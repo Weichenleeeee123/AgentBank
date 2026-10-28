@@ -124,6 +124,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = capabilities.execute(user_id, capability_id, payload.payload, payload.idempotency_key)
         return result.model_dump(mode="json")
 
+    @app.post("/admin/v1/capabilities/dispatch-due")
+    def dispatch_due_capabilities(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        results = capabilities.dispatch_due()
+        return {"dispatched": [result.model_dump(mode="json") for result in results], "count": len(results)}
+
     @app.get("/v1/capability-records/{record_id}")
     def get_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.get(user_id, record_id).model_dump(mode="json")
