@@ -341,7 +341,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def create_birthday_plan(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         plan = plans.create_birthday_plan(user_id, str(payload.get("event_id", "event_birthday")),
                                           int(payload.get("reserve_minor", 100_000)))
-        return plan.model_dump(mode="json")
+        with database.sessions() as session:
+            record = session.get(PlanRecord, plan.plan_id)
+            receipt = session.scalar(select(__import__("agentbank.db", fromlist=["ReceiptRecord"]).ReceiptRecord).where(
+                __import__("agentbank.db", fromlist=["ReceiptRecord"]).ReceiptRecord.plan_id == plan.plan_id))
+            return {**plan.model_dump(mode="json"), "display_hash": record.display_hash if record else "",
+                    "action_hash": record.action_hash if record else "", "receipt_id": receipt.id if receipt else ""}
 
     @app.post("/v1/plans/{plan_id}/revise")
     def revise_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -352,8 +357,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return plans.graph(plan_id, user_id)
 
     @app.post("/v1/plans/{plan_id}/execute")
-    def execute_plan(plan_id: str, payload: dict[str, bool], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        return plans.execute_plan(user_id, plan_id, confirmed=bool(payload.get("confirmed", False)))
+    def execute_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return plans.execute_plan(user_id, plan_id, str(payload.get("receipt_id", "")), str(payload.get("display_hash", "")))
 
     @app.post("/v1/im/webim/events")
     def webim_event(payload: dict[str, Any], x_im_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:

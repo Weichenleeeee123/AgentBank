@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 
 from agentbank.contracts import Plan, PlanNode
-from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord, ReceiptRecord
+from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
@@ -99,19 +99,28 @@ class BusinessPlanService:
         return Plan(plan_id=revised.plan_id, revision=2, status=revised.status, user_id=user_id,
                     nodes=revised.nodes, display=revised.display, created_at=revised.created_at)
 
-    def execute_plan(self, user_id: str, plan_id: str, *, confirmed: bool) -> dict[str, Any]:
-        if not confirmed:
-            raise DomainError("CONFIRMATION_REQUIRED")
+    def execute_plan(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str) -> dict[str, Any]:
         with self.database.sessions() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if receipt is None or receipt.plan_id != plan_id or receipt.subject_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if receipt.status in {"consumed", "invalidated"}:
+                raise DomainError("RECEIPT_REPLAYED")
+            if receipt.display_hash != display_hash or plan.display_hash != display_hash:
+                raise DomainError("HASH_MISMATCH")
             records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id).order_by(PlanNodeRecord.id)).all())
+            consumed = {item.node_id for item in session.scalars(select(ReceiptConsumption).where(ReceiptConsumption.receipt_id == receipt_id)).all()}
         capabilities = CapabilityService(self.database)
         reservation_id: str | None = None
         results: list[dict[str, Any]] = []
         for record in records:
             data = json.loads(record.args_json)
+            logical_id = data["id"]
+            if logical_id in consumed:
+                continue
             if data["id"] == "event":
                 status = "succeeded"
                 result_data = {"event_id": data["args"]["event_id"]}
@@ -127,10 +136,15 @@ class BusinessPlanService:
                 current = session.get(PlanNodeRecord, record.id)
                 if current is not None:
                     current.status = status
+                session.add(ReceiptConsumption(receipt_id=receipt_id, node_id=logical_id,
+                                               operation_id=f"{plan_id}-{logical_id}", consumed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
             results.append({"node_id": data["id"], "status": status, "data": result_data})
         final_status = "succeeded" if all(item["status"] in {"succeeded", "scheduled", "reserved"} for item in results) else "partially_completed"
         with self.database.sessions.begin() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is not None:
                 plan.status = final_status
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if receipt is not None and final_status == "succeeded":
+                receipt.status = "consumed"
         return {"plan_id": plan_id, "status": final_status, "nodes": results}
