@@ -10,6 +10,10 @@
 |---|---|
 | [docs/PLAN.md](docs/PLAN.md) | **整体方案与开发计划（定稿）**：33 项能力矩阵、架构、契约、权限规则、安全机制、测试、里程碑、提交物 |
 | [docs/brief.md](docs/brief.md) | 赛题事实，是所有设计判断的唯一依据 |
+| [docs/architecture.md](docs/architecture.md) | 当前系统边界、Agent、执行内核、DAG 和渠道 |
+| [docs/algorithms.md](docs/algorithms.md) | 已实现算法和验证口径 |
+| [docs/security-self-eval.md](docs/security-self-eval.md) | 已验证安全行为、已知边界和禁止的过度结论 |
+| [docs/submission-checklist.md](docs/submission-checklist.md) | M4 提交门禁清单（当前未冻结） |
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
