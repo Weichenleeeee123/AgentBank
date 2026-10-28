@@ -34,7 +34,8 @@ class FraudDetector:
         behavior_strong = bool(behavior.get("night") or behavior.get("p95_amount") or behavior.get("multiple_recipients"))
         signals = {"transfer_intent": transfer_intent, "phrase_hits": phrase_hits,
                    "relation_strong": relation_strong, "behavior_strong": behavior_strong}
-        if transfer_intent and phrase_hits and (relation_strong or behavior_strong):
+        classifier_high = any(phrase in {"安全账户", "公检法", "验证码"} for phrase in phrase_hits)
+        if transfer_intent and phrase_hits and (classifier_high or relation_strong or behavior_strong):
             return FraudAssessment(FraudLevel.high, ["U07", "U08"], 0.95, signals)
         if transfer_intent and (phrase_hits or relation_strong or behavior_strong):
             return FraudAssessment(FraudLevel.medium, ["U07"], 0.65, signals)

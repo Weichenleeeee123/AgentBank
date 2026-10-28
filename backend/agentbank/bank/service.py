@@ -14,6 +14,7 @@ from agentbank.audit.store import PersistentAudit
 from agentbank.auth.devices import DeviceService, _hash
 from agentbank.clock import business_date, utc_now_naive
 from agentbank.contracts import Assurance
+from agentbank.security.fraud import FraudDetector, FraudLevel
 from agentbank.db import (
     Account,
     Challenge,
@@ -27,6 +28,7 @@ from agentbank.db import (
     ReceiptConsumption,
     ReceiptRecord,
     Database,
+    CoolingPeriod,
 )
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
@@ -62,6 +64,7 @@ class TransferService:
         self.database = database
         self.audit = PersistentAudit(database)
         self.devices = DeviceService(database)
+        self.fraud = FraudDetector()
 
     def balance(self, user_id: str) -> Account:
         with self.database.sessions.begin() as session:
@@ -149,6 +152,24 @@ class TransferService:
                 session.rollback()
                 raise DomainError("PRECONDITION_FAILED")
             args = json.loads(node.args_json)
+            assessment = self.fraud.evaluate(str(args.get("memo") or ""), relation={}, behavior={})
+            if assessment.level is FraudLevel.high:
+                self.audit.append(session, f"trace_{plan_id}", user_id, "security.fraud.blocked",
+                                  {"level": assessment.level.value, "reason_codes": assessment.reason_codes})
+                session.commit()
+                raise DomainError("FRAUD_HIGH")
+            if assessment.level is FraudLevel.medium:
+                started = utc_now_naive()
+                cooling_id = f"cool_{uuid.uuid4().hex}"
+                expires = started + timedelta(minutes=30)
+                session.add(CoolingPeriod(id=cooling_id, user_id=user_id, plan_id=plan_id,
+                                          amount_minor=int(args["amount_minor"]), started_at=started,
+                                          expires_at=expires, status="active"))
+                self.audit.append(session, f"trace_{plan_id}", user_id, "security.cooling.started",
+                                  {"cooling_id": cooling_id, "expires_at": expires.isoformat(),
+                                   "reason_codes": assessment.reason_codes})
+                session.commit()
+                return TransferResult("", "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
             bucket = self._bucket(session, user_id)
             projected = bucket.completed_minor + bucket.pending_minor + int(args["amount_minor"])
             if projected > 100_000:

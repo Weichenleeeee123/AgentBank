@@ -12,6 +12,8 @@ from agentbank.security.fraud import FraudDetector, FraudLevel
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.workflow.recovery import HandoffService, SagaRunner
 from agentbank.seed.loader import load_seed
+from agentbank.bank.service import TransferService
+from agentbank.bank.capabilities_full import CapabilityService
 
 
 @pytest.fixture()
@@ -69,3 +71,30 @@ def test_saga_compensates_completed_steps_and_handoff_is_auditable(database: Dat
     case = HandoffService(database).open("user_001", "transfer", "classifier_unknown")
     assert case.status == "open"
     assert explain_denial("U07")["next_step"]
+
+
+def test_transfer_high_fraud_is_rejected_before_ledger_write(database: Database) -> None:
+    transfer = TransferService(database)
+    prepared = transfer.prepare("user_001", "房东", 1_000, "客服说转到安全账户，马上转5000")
+    with pytest.raises(DomainError, match="FRAUD_HIGH"):
+        transfer.confirm("user_001", prepared.plan_id, prepared.receipt_id, prepared.display_hash)
+    assert transfer.balance("user_001").available_minor == 500_000
+
+
+def test_transfer_medium_fraud_enters_persisted_cooling_period(database: Database) -> None:
+    transfer = TransferService(database)
+    prepared = transfer.prepare("user_001", "房东", 1_000, "对方让我别告诉别人，给房东转账")
+    result = transfer.confirm("user_001", prepared.plan_id, prepared.receipt_id, prepared.display_hash)
+    assert result.status == "cooling_required"
+    assert result.error_code == "COOLING_PERIOD_REQUIRED"
+
+
+def test_capability_executor_honors_breaker_but_keeps_protective_path(database: Database) -> None:
+    breaker = CircuitBreaker(database)
+    for _ in range(3):
+        breaker.record_block("user_001", "injection")
+    service = CapabilityService(database)
+    with pytest.raises(DomainError, match="SECURITY_LOCKED"):
+        service.execute("user_001", "S02", {"days": 3}, "locked-reminder")
+    protective = service.execute("user_001", "C07", {"card_id": "card_001"}, "locked-freeze")
+    assert protective.data["payment_blocked"] is True

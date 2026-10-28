@@ -17,12 +17,17 @@ CAPABILITIES = {
 }
 
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
+READ_ONLY = {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "S01", "X01"}
+PROTECTIVE = {"C02", "C03", "C07", "X02"}
+MFA = {"W04", "W05", "C01", "C04", "C05", "C06", "C08", "X05"}
 for capability_id, tool_name in CAPABILITIES.items():
+    assurance = "none" if capability_id in READ_ONLY else "mfa" if capability_id in MFA else "confirm"
     TOOL_REGISTRY[capability_id] = {
         "tool": tool_name,
         "version": "1.0",
+        "kind": "query" if capability_id in READ_ONLY else "command",
         "preconditions": ["resource_owner"] if "." in tool_name else [],
-        "security": {"minimum_assurance": "none" if capability_id.startswith(("Q", "B", "W0", "X01")) else "confirm"},
-        "compensation": None if capability_id.startswith(("Q", "B", "W0", "S01", "X01")) else "explicit_command",
+        "security": {"minimum_assurance": assurance, "protective": capability_id in PROTECTIVE},
+        "compensation": None if capability_id in READ_ONLY else "explicit_command",
         "card": {"title": capability_id, "show_evidence": True},
     }

@@ -42,6 +42,30 @@ def test_capability_commands_are_idempotent_and_owner_bound(service: CapabilityS
         service.get("user_002", first.record_id)
 
 
+def test_investment_debit_card_restriction_and_scheduler_have_business_state(service: CapabilityService) -> None:
+    before = service._account("user_001").available_minor
+    service.execute("user_001", "W03", {"answers": [2] * 10}, "state-W03")
+    subscribed = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 10_000}, "state-W04")
+    assert subscribed.data["funds_status"] == "debited"
+    assert service._account("user_001").available_minor == before - 10_000
+    restricted = service.execute("user_001", "C03", {"card_id": "card_001", "restriction": "online"}, "state-C03")
+    assert restricted.data["payment_blocked"] is True
+    assert service.card_payment("user_001", "card_001", 100) == "CARD_RESTRICTED"
+    service.execute("user_001", "T04", {"next_due": service.clock.business_date(), "max_uses": 1}, "state-T04")
+    dispatched = service.dispatch_due("user_001")
+    assert dispatched[0].status == "succeeded"
+    assert service.dispatch_due("user_001") == []
+
+
+def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) -> None:
+    prepared = service.execute("user_001", "T01", {"recipient_name": "房东", "amount_minor": 1_000}, "state-T01")
+    assert prepared.status == "prepared"
+    pending = service.execute("user_001", "X05", {"card_id": "card_001"}, "state-X05")
+    assert pending.status == "partially_completed"
+    finished = service.execute("user_001", "X05", {"card_id": "card_001", "mfa_verified": True}, "state-X05-mfa")
+    assert finished.status == "succeeded"
+
+
 def test_generic_capability_api_returns_business_record(tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
     from agentbank.api.app import create_app
