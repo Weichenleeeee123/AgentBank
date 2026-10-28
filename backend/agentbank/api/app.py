@@ -330,6 +330,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
                                           int(payload.get("reserve_minor", 100_000)))
         return plan.model_dump(mode="json")
 
+    @app.post("/v1/plans/{plan_id}/revise")
+    def revise_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return plans.revise_birthday_plan(user_id, plan_id, payload).model_dump(mode="json")
+
     @app.get("/v1/plans/{plan_id}/graph")
     def get_plan_graph(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.graph(plan_id, user_id)

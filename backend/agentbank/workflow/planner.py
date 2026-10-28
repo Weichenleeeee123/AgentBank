@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 
 from agentbank.contracts import Plan, PlanNode
-from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord
+from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord, ReceiptRecord
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
@@ -40,8 +40,14 @@ class BusinessPlanService:
         PlanValidator(self.registry).validate([node.model_dump() for node in nodes])
         created = datetime.now(timezone.utc).replace(tzinfo=None)
         with self.database.sessions.begin() as session:
+            display_hash = f"sha256:{uuid.uuid4().hex}"
+            action_digest = f"sha256:{uuid.uuid4().hex}"
             session.add(PlanRecord(id=plan_id, user_id=user_id, revision=1, status="awaiting_confirmation",
-                                   display_hash=f"sha256:{uuid.uuid4().hex}", action_hash=f"sha256:{uuid.uuid4().hex}", created_at=created))
+                                   display_hash=display_hash, action_hash=action_digest, created_at=created))
+            session.add(ReceiptRecord(id=f"rcp_{uuid.uuid4().hex}", subject_id=user_id, plan_id=plan_id,
+                                      plan_revision=1, node_ids_json=json.dumps([node.id for node in nodes]),
+                                      action_hash=action_digest, display_hash=display_hash, assurance="confirm",
+                                      issued_at=created, expires_at=created + timedelta(minutes=5), status="pending"))
             for node in nodes:
                 session.add(PlanNodeRecord(id=f"{plan_id}-{node.id}", plan_id=plan_id, tool=node.tool,
                                            args_json=json.dumps(node.model_dump(), ensure_ascii=False), status="pending",
@@ -63,6 +69,35 @@ class BusinessPlanService:
                               "authorization": "confirm" if record.tool in {"funds.reserve", "merchant.order.create"} else "none",
                               "compensation": data.get("compensation")})
             return {"plan_id": plan_id, "status": plan.status, "revision": plan.revision, "nodes": nodes}
+
+    def revise_birthday_plan(self, user_id: str, plan_id: str, changes: dict[str, Any]) -> Plan:
+        with self.database.sessions() as session:
+            current = session.get(PlanRecord, plan_id)
+            if current is None or current.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if current.status in {"succeeded", "cancelled"}:
+                raise DomainError("PLAN_NOT_EDITABLE")
+            event_node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id,
+                                                                       PlanNodeRecord.tool == "events.lookup"))
+            if event_node is None:
+                raise DomainError("PLAN_INVALID")
+            event_id = json.loads(event_node.args_json)["args"]["event_id"]
+            reserve_minor = int(changes.get("reserve_minor", 100_000))
+        with self.database.sessions.begin() as session:
+            current = session.get(PlanRecord, plan_id)
+            if current is None:
+                raise DomainError("PLAN_NOT_FOUND")
+            current.status = "invalidated"
+            from agentbank.db import ReceiptRecord
+            for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id)).all():
+                receipt.status = "invalidated"
+        revised = self.create_birthday_plan(user_id, event_id, reserve_minor)
+        with self.database.sessions.begin() as session:
+            new_record = session.get(PlanRecord, revised.plan_id)
+            if new_record is not None:
+                new_record.revision = current.revision + 1 if current else 2
+        return Plan(plan_id=revised.plan_id, revision=2, status=revised.status, user_id=user_id,
+                    nodes=revised.nodes, display=revised.display, created_at=revised.created_at)
 
     def execute_plan(self, user_id: str, plan_id: str, *, confirmed: bool) -> dict[str, Any]:
         if not confirmed:

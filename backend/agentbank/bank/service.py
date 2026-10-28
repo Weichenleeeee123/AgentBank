@@ -164,6 +164,16 @@ class TransferService:
                 session.rollback()
                 raise DomainError("PRECONDITION_FAILED")
             args = json.loads(node.args_json)
+            if action_hash(node.tool, args) != receipt.action_hash or action_hash(node.tool, args) != plan.action_hash:
+                session.rollback()
+                raise DomainError("HASH_MISMATCH")
+            payee_for_display = session.get(Payee, str(args.get("recipient_id", "")))
+            expected_display = _display_hash([{"label": "收款人", "value": payee_for_display.masked_name if payee_for_display else ""},
+                                              {"label": "金额", "value": f"¥{int(args.get('amount_minor', 0)) / 100:.2f}"},
+                                              {"label": "币种", "value": "人民币"}])
+            if expected_display != receipt.display_hash or expected_display != plan.display_hash:
+                session.rollback()
+                raise DomainError("HASH_MISMATCH")
             assessment = self.fraud.evaluate(str(args.get("memo") or ""), relation={}, behavior={})
             if assessment.level is FraudLevel.high:
                 self.audit.append(session, f"trace_{plan_id}", user_id, "security.fraud.blocked",
