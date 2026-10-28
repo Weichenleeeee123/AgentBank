@@ -66,3 +66,18 @@ def test_cooling_release_api_requires_reconfirmation(tmp_path: Path) -> None:
         cooling.expires_at = utc_now_naive() - timedelta(seconds=1)
     released = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": True})
     assert released.status_code == 200
+
+
+def test_admin_progresses_due_jobs_and_investments(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENTBANK_ADMIN_TOKEN", "admin-test")
+    app = create_app(f"sqlite:///{tmp_path / 'admin-progress.db'}")
+    client = TestClient(app)
+    token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    schedule = client.post("/v1/capabilities/T04", headers=headers, json={"capability_id": "T04", "idempotency_key": "admin-job", "payload": {"next_due": "2026-10-28"}})
+    assert schedule.status_code == 200
+    dispatch = client.post("/admin/v1/capabilities/dispatch-due", headers={"X-Admin-Token": "admin-test"})
+    assert dispatch.status_code == 200
+    assert dispatch.json()["count"] >= 1
+    progress = client.post("/admin/v1/investments/progress", headers={"X-Admin-Token": "admin-test"}, json={"user_id": "user_001"})
+    assert progress.status_code == 200

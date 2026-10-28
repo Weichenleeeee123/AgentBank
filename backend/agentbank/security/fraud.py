@@ -23,7 +23,7 @@ class FraudAssessment:
 
 class FraudDetector:
     _strong_phrases = ("安全账户", "公检法", "刷单", "验证码", "客服退款", "荐股群", "别告诉别人")
-    _transfer_pattern = re.compile(r"转账|转给|汇款|付款|打钱|转\s*\d")
+    _transfer_pattern = re.compile(r"转账|转给|转钱|转到|汇款|付款|打钱|转\s*\d")
 
     def evaluate(self, text: str, *, relation: dict[str, Any], behavior: dict[str, Any], classifier_failed: bool = False) -> FraudAssessment:
         if classifier_failed:

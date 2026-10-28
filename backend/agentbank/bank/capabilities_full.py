@@ -478,23 +478,24 @@ class CapabilityService:
                 return "LIMIT_EXCEEDED"
             return "approved"
 
-    def progress_investments(self, user_id: str) -> list[CapabilityResult]:
+    def progress_investments(self, user_id: str | None = None) -> list[CapabilityResult]:
         changed: list[CapabilityRecord] = []
         with self.database.sessions.begin() as session:
-            orders = list(session.scalars(select(InvestmentOrder).where(InvestmentOrder.user_id == user_id,
-                                                                        InvestmentOrder.status == "processing",
-                                                                        InvestmentOrder.side == "redeem")).all())
+            query = select(InvestmentOrder).where(InvestmentOrder.status == "processing", InvestmentOrder.side == "redeem")
+            if user_id:
+                query = query.where(InvestmentOrder.user_id == user_id)
+            orders = list(session.scalars(query).all())
             for order in orders:
                 order.status = "settled"
-                redemption_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                redemption_account = session.scalar(select(Account).where(Account.user_id == order.user_id).order_by(Account.id))
                 if redemption_account is not None:
                     redemption_account.available_minor += order.amount_minor
-                position = session.scalar(select(Position).where(Position.user_id == user_id,
+                position = session.scalar(select(Position).where(Position.user_id == order.user_id,
                                                                   Position.product_id == order.product_id))
                 if position is not None:
                     position.shares = 0
                     position.market_value_minor = 0
-                record = session.scalar(select(CapabilityRecord).where(CapabilityRecord.user_id == user_id,
+                record = session.scalar(select(CapabilityRecord).where(CapabilityRecord.user_id == order.user_id,
                                                                         CapabilityRecord.capability_id == "W05",
                                                                         CapabilityRecord.data_json.contains(order.id)))
                 if record is not None:

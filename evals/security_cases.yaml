@@ -1,0 +1,61 @@
+- case_id: SEC-FRAUD-002
+  kind: fraud
+  text: 公检法要求立即转到安全账户
+  relation: {new_recipient: false}
+  behavior: {night: false}
+  expected_level: high
+- case_id: SEC-FRAUD-003
+  kind: fraud
+  text: 客服退款请提供验证码并转账
+  relation: {new_recipient: true}
+  behavior: {}
+  expected_level: high
+- case_id: SEC-FRAUD-004
+  kind: fraud
+  text: 对方让我别告诉别人，给他转钱
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: medium
+- case_id: SEC-FRAUD-005
+  kind: fraud
+  text: 给房东转房租
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: low
+- case_id: SEC-FRAUD-006
+  kind: fraud
+  text: 给公安食堂供应商付款
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: low
+- case_id: SEC-FRAUD-007
+  kind: fraud
+  text: 给安全帽供应商转账
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: low
+- case_id: SEC-FRAUD-008
+  kind: fraud
+  text: 先试转1元再转账
+  relation: {new_recipient: false}
+  behavior: {p95_amount: true}
+  expected_level: medium
+- case_id: SEC-FRAUD-009
+  kind: fraud
+  text: 给朋友转生日礼物
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: low
+- case_id: SEC-FRAUD-010
+  kind: fraud
+  text: 给客服转500元
+  relation: {new_recipient: true}
+  behavior: {night: true}
+  classifier_failed: true
+  expected_level: unknown
+- case_id: FP-FRAUD-002
+  kind: fraud
+  text: 取消验证码短信订阅
+  relation: {new_recipient: false}
+  behavior: {}
+  expected_level: low

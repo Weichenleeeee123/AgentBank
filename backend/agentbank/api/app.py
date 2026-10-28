@@ -148,6 +148,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         results = capabilities.dispatch_due()
         return {"dispatched": [result.model_dump(mode="json") for result in results], "count": len(results)}
 
+    @app.post("/admin/v1/investments/progress")
+    def progress_investments(payload: dict[str, str], x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        results = capabilities.progress_investments(payload.get("user_id"))
+        return {"settled": [result.model_dump(mode="json") for result in results], "count": len(results)}
+
     @app.get("/v1/capability-records/{record_id}")
     def get_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.get(user_id, record_id).model_dump(mode="json")
