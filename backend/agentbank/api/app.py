@@ -7,7 +7,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from agentbank.auth.devices import DeviceService
 from agentbank.agent.orchestrator import AgentOrchestrator
+from agentbank.channels.feishu import FeishuAdapter
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.analysis.dsl import DslExecutor
@@ -99,6 +100,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
+    app.state.feishu = FeishuAdapter(os.getenv("AGENTBANK_FEISHU_SECRET", "development-feishu-secret"))
     frontend_root = Path(__file__).resolve().parents[3] / "frontend"
     if frontend_root.exists():
         app.mount("/app", StaticFiles(directory=frontend_root, html=True), name="agentbank-app")
@@ -350,6 +352,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
         text = str(payload.get("text", ""))
         response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
         return {"event_id": event_id, "type": response.kind, **response.model_dump()}
+
+    @app.post("/v1/im/feishu/events")
+    def feishu_event(payload: dict[str, Any], x_feishu_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        return cast(FeishuAdapter, app.state.feishu).handle(payload, x_feishu_signature, agent)
 
     @app.post("/v1/conversations/{conversation_id}/messages")
     def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
