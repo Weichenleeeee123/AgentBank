@@ -1,0 +1,36 @@
+version: "2026-10-28.1"
+assurance_order: [none, confirm, mfa]
+tiers: [G, Y, R, D]
+rules:
+  - id: P01
+    description: unauthenticated session is denied
+    tier: D
+    assurance: none
+  - id: P02
+    description: resource ownership is required
+    tier: D
+    assurance: none
+  - id: P03
+    operations: [account.balance, transactions.query]
+    tier: G
+    assurance: none
+  - id: P05
+    operations: [transfer.create]
+    condition: projected_today_minor <= 100000
+    tier: Y
+    assurance: confirm
+  - id: P06
+    operations: [transfer.create]
+    condition: projected_today_minor > 100000
+    tier: R
+    assurance: mfa
+  - id: U03
+    description: commit quota recheck and ledger write in one immediate transaction
+  - id: U05
+    condition: new_recipient == true
+    tier: R
+    assurance: mfa
+  - id: U09
+    description: changed parameters invalidate the receipt
+  - id: U19
+    description: audit failure rejects a commit

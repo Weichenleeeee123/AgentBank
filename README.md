@@ -13,4 +13,4 @@
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-代码目前还没有开始写，按 PLAN.md 第 12 节的 M0（契约冻结）启动。
+当前已完成 M0 契约冻结：后端包、SQLite 表结构、规则初稿、确定性种子和评测运行器骨架均已建立。M1 将继续打通 Q01/T01 的全链路。
