@@ -39,6 +39,16 @@ def test_plan_validator_rejects_cycles_and_untrusted_write_args() -> None:
         ])
 
 
+def test_plan_validator_requires_refs_to_preceding_dependencies() -> None:
+    validator = PlanValidator({"read": {"kind": "query"}, "write": {"kind": "command"}})
+    with pytest.raises(DomainError, match="REF_DEPENDENCY_REQUIRED"):
+        validator.validate([
+            {"id": "a", "tool": "read", "args": {}, "idempotency_key": "a"},
+            {"id": "b", "tool": "write", "args": {"account": {"$ref": "a.data.account"}},
+             "idempotency_key": "b", "compensation": "undo"},
+        ])
+
+
 def test_business_clock_advances_business_time_only() -> None:
     clock = BusinessClock(datetime(2026, 10, 28, 8, 0, tzinfo=timezone.utc))
     assert clock.now().isoformat().startswith("2026-10-28")

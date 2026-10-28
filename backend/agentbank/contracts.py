@@ -40,6 +40,48 @@ class TransferCreateRequest(Contract):
     memo: str | None = Field(default=None, max_length=80)
 
 
+class TransactionQueryRequest(Contract):
+    start_date: str | None = None
+    end_date: str | None = None
+    category: str | None = None
+    limit: StrictInt = Field(default=100, gt=0, le=50_000)
+
+
+class AnalysisDslRequest(Contract):
+    source: str = Field(default="transactions", pattern="^transactions$")
+    filters: list[dict[str, Any]] = Field(default_factory=list)
+    group_by: list[str] = Field(default_factory=list)
+    metrics: list[dict[str, Any]] = Field(default_factory=list)
+    limit: StrictInt = Field(default=100, gt=0, le=50_000)
+
+
+class RiskQuestionnaireRequest(Contract):
+    answers: list[StrictInt] = Field(min_length=10, max_length=10)
+
+
+class CardFreezeRequest(Contract):
+    card_id: str | None = None
+
+
+class SubscriptionCancelRequest(Contract):
+    subscription_id: str = Field(min_length=1)
+
+
+class AASplitRequest(Contract):
+    total_minor: StrictInt = Field(gt=0)
+    participant_ids: list[str] = Field(min_length=2)
+
+
+class MandateRequest(Contract):
+    plan_id: str
+    operation_type: str
+    subject_ref: str
+    max_amount_minor: StrictInt = Field(gt=0)
+    max_uses: StrictInt = Field(gt=0)
+    starts_on: str
+    expires_on: str
+
+
 class OperationMetadata(Contract):
     operation_id: str
     idempotency_key: str

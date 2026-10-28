@@ -50,6 +50,14 @@ class PlanValidator:
                     queue.append(child)
         if len(order) != len(nodes):
             raise DomainError("PLAN_CYCLE")
+        positions = {node_id: index for index, node_id in enumerate(order)}
+        for node in nodes:
+            for target in self._refs(node.get("args", {})):
+                target_node = target.split(".", 1)[0]
+                if target_node not in node_map:
+                    raise DomainError("REF_TARGET_MISSING")
+                if positions[target_node] >= positions[str(node["id"])] or target_node not in node.get("depends_on", []):
+                    raise DomainError("REF_DEPENDENCY_REQUIRED")
         return order
 
     def _reject_untrusted(self, value: Any) -> None:
@@ -61,3 +69,16 @@ class PlanValidator:
         elif isinstance(value, list):
             for child in value:
                 self._reject_untrusted(child)
+
+    def _refs(self, value: Any) -> list[str]:
+        refs: list[str] = []
+        if isinstance(value, dict):
+            ref = value.get("$ref")
+            if isinstance(ref, str):
+                refs.append(ref)
+            for child in value.values():
+                refs.extend(self._refs(child))
+        elif isinstance(value, list):
+            for child in value:
+                refs.extend(self._refs(child))
+        return refs
