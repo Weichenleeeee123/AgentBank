@@ -18,3 +18,12 @@
 | X01-X05 | 跨场景 | 完成 | 可信事件、预留、商户订单、Saga、盗刷分段授权 |
 
 每个集群完成后必须把对应行改为 `完成`，并链接测试文件和提交号。
+
+## M2 门禁证据
+
+- 33 项能力：`test_capability_matrix.py`、各集群不变量测试；
+- 生日 DAG/mandate/计划图：`test_plan_orchestration.py`、`test_plan_execution.py`、`test_m2_qt_invariants.py`；
+- DSL 沙箱边界和用户隔离：`test_m2_gate.py`、`test_m2_analysis.py`；
+- Web IM 事件签名/去重/Agent 路由：`test_m2_gate.py`、`test_m2_api.py`；
+- 保护性操作快速通道：`test_m3_security.py`、`test_m2_gate.py`；
+- 主动发现：`test_agent_core.py`、`test_m2_gate.py`。

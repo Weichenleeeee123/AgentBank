@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from time import perf_counter
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 
@@ -51,8 +52,20 @@ class DslExecutor:
         for ordering in dsl.get("order_by", []):
             if ordering.get("field") not in ALLOWED_GROUPS | {"sum_amount_minor", "count"} or ordering.get("dir", "asc") not in {"asc", "desc"}:
                 raise ValueError("DSL_ORDER_NOT_ALLOWED")
+        started = perf_counter()
+        readonly_connection: Any | None = None
         with self.database.sessions() as session:
+            if session.bind is not None and session.bind.dialect.name == "sqlite":
+                connection = session.connection()
+                connection.exec_driver_sql("PRAGMA query_only=ON")
+                raw_connection = cast(Any, connection.connection.driver_connection)
+                raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
+                readonly_connection = raw_connection
             records = list(session.scalars(select(Transaction).where(Transaction.user_id == user_id)).all())
+            if perf_counter() - started > 2.0:
+                raise ValueError("DSL_TIMEOUT")
+            if readonly_connection is not None:
+                readonly_connection.execute("PRAGMA query_only=OFF")
         records = [record for record in records if self._matches(record, filters)]
         if groups:
             rows = self._group(records, groups)
