@@ -29,7 +29,7 @@ M2/M3 仍在开发中。已新增确定性 Agent 编排器：自然语言槽位�
 - `UnknownRecoveryService`：unknown 结果转为 processing，保持原幂等键，不重复产生副作用。
 - `HandoffService` 和 `POST /v1/handoffs`：记录人工接管原因和状态。
 - `ReplyFragmentChecker`：事实片段校验数值，禁止自由文本伪造金融标签。
-- `POST /admin/v1/self-test`：执行 `evals/` 下的 CAP、SEC、FP 和 M3 恢复矩阵。
+- `POST /admin/v1/self-test`：执行 `evals/` 下的 CAP、SEC、FP 和 M3 恢复矩阵；当前本地评测包含 118 个用例。
 
 ## 当前验证命令
 
@@ -40,4 +40,4 @@ python -m mypy backend/agentbank
 python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
 ```
 
-最近一次结果：全量 pytest 通过；Ruff 通过；Mypy 通过；评测矩阵 `108/108` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
+最近一次结果：全量 pytest 通过；Ruff 通过；Mypy 通过；评测矩阵 `118/118` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
