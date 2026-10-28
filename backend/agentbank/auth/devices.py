@@ -44,6 +44,14 @@ class DeviceService:
                                                                   Challenge.expires_at > utc_now_naive())).all()
             return [{"challenge_id": item.id, "receipt_id": item.receipt_id, "code": item.delivery_code or ""} for item in challenges]
 
+    def validate_token(self, user_id: str, device_token: str) -> None:
+        with self.database.sessions() as session:
+            device = session.scalar(select(Device).where(Device.user_id == user_id,
+                                                          Device.token_hash == _hash(device_token),
+                                                          Device.active.is_(True)))
+            if device is None:
+                raise DomainError("DEVICE_UNAUTHORIZED")
+
     def verify(self, user_id: str, code: str) -> Challenge:
         with self.database.sessions.begin() as session:
             challenge = session.scalar(select(Challenge).where(Challenge.user_id == user_id,

@@ -10,12 +10,13 @@ from sqlalchemy import select
 from agentbank.analysis.dsl import DslExecutor
 from agentbank.analysis.insights import detect_anomalies, detect_subscriptions, monthly_report
 from agentbank.audit.store import PersistentAudit
+from agentbank.auth.devices import DeviceService
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Subscription, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -47,6 +48,11 @@ class CapabilityService:
         if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))):
             if payload.get("assurance") != "mfa":
                 raise DomainError("MFA_REQUIRED")
+            device_token = payload.get("device_token")
+            otp = payload.get("otp")
+            if isinstance(device_token, str) and isinstance(otp, str):
+                DeviceService(self.database).validate_token(user_id, device_token)
+                DeviceService(self.database).verify(user_id, otp)
         if capability_id == "C02":
             with self.database.sessions() as session:
                 card = session.get(Card, str(payload.get("card_id", "card_001")))
@@ -206,6 +212,28 @@ class CapabilityService:
                     shares = session.scalars(select(AAShare).where(AAShare.bill_id == bill_id)).all()
                     return {"bill_id": bill_id, "status": bill.status, "shares": [{"participant_id": share.participant_id,
                             "amount_minor": share.amount_minor, "status": share.status} for share in shares]}, "succeeded"
+            if payload.get("action") == "pay_share":
+                bill_id = str(payload["bill_id"])
+                with self.database.sessions.begin() as session:
+                    bill = session.get(AABill, bill_id)
+                    if bill is None:
+                        raise DomainError("BILL_NOT_FOUND")
+                    share = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id,
+                                                                  AAShare.participant_id == user_id))
+                    if share is None:
+                        raise DomainError("SHARE_NOT_FOUND")
+                    if share.status == "paid":
+                        return {"bill_id": bill_id, "share_status": "paid", "bill_status": bill.status}, "succeeded"
+                    aa_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                    if aa_account is None or aa_account.available_minor < share.amount_minor:
+                        raise DomainError("INSUFFICIENT_FUNDS")
+                    aa_account.available_minor -= share.amount_minor
+                    share.status = "paid"
+                    unpaid = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id, AAShare.status != "paid"))
+                    if unpaid is None:
+                        bill.status = "settled"
+                    return {"bill_id": bill_id, "share_status": share.status, "bill_status": bill.status,
+                            "amount_minor": share.amount_minor}, "succeeded"
             participants = [str(item) for item in payload.get("participant_ids", [user_id, "user_002", "user_003"])]
             total_minor = int(payload.get("total_minor", 10_000))
             allocations = split_bill(total_minor, participants, user_id)
@@ -285,6 +313,24 @@ class CapabilityService:
         if capability_id.startswith("C"):
             return self._card(user_id, capability_id, payload)
         if capability_id == "S01":
+            if payload.get("action") == "simulate_charge":
+                subscription_id = str(payload.get("subscription_id", "sub_video"))
+                with self.database.sessions.begin() as session:
+                    subscription = session.get(Subscription, subscription_id)
+                    if subscription is None or subscription.user_id != user_id:
+                        raise DomainError("NOT_OWNER")
+                    if subscription.status != "active":
+                        return {"subscription_id": subscription_id, "charged": False, "reason": "CANCELLED"}, "succeeded"
+                    subscription_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                    if subscription_account is None or subscription_account.available_minor < subscription.amount_minor:
+                        return {"subscription_id": subscription_id, "charged": False, "reason": "INSUFFICIENT_FUNDS"}, "succeeded"
+                    subscription_account.available_minor -= subscription.amount_minor
+                    transaction_id = f"txn_sub_{uuid.uuid4().hex}"
+                    session.add(Transaction(id=transaction_id, user_id=user_id, posted_at=self.clock.business_date(),
+                                            amount_minor=subscription.amount_minor, merchant=subscription.merchant,
+                                            category="订阅", direction="debit", memo="模拟续费"))
+                    return {"subscription_id": subscription_id, "charged": True, "transaction_id": transaction_id,
+                            "amount_minor": subscription.amount_minor}, "succeeded"
             return {"subscriptions": detect_subscriptions(self.database, user_id)}, "succeeded"
         if capability_id == "S02":
             subscription_id = str(payload.get("subscription_id", "sub_video"))
@@ -428,6 +474,33 @@ class CapabilityService:
             if amount_minor > card.limit_minor:
                 return "LIMIT_EXCEEDED"
             return "approved"
+
+    def progress_investments(self, user_id: str) -> list[CapabilityResult]:
+        changed: list[CapabilityRecord] = []
+        with self.database.sessions.begin() as session:
+            orders = list(session.scalars(select(InvestmentOrder).where(InvestmentOrder.user_id == user_id,
+                                                                        InvestmentOrder.status == "processing",
+                                                                        InvestmentOrder.side == "redeem")).all())
+            for order in orders:
+                order.status = "settled"
+                redemption_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                if redemption_account is not None:
+                    redemption_account.available_minor += order.amount_minor
+                position = session.scalar(select(Position).where(Position.user_id == user_id,
+                                                                  Position.product_id == order.product_id))
+                if position is not None:
+                    position.shares = 0
+                    position.market_value_minor = 0
+                record = session.scalar(select(CapabilityRecord).where(CapabilityRecord.user_id == user_id,
+                                                                        CapabilityRecord.capability_id == "W05",
+                                                                        CapabilityRecord.data_json.contains(order.id)))
+                if record is not None:
+                    data = json.loads(record.data_json)
+                    data["status"] = "settled"
+                    record.status = "succeeded"
+                    record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                    changed.append(record)
+        return [self._result(record) for record in changed]
 
     def dispatch_due(self, user_id: str | None = None) -> list[CapabilityResult]:
         today = self.clock.business_date()

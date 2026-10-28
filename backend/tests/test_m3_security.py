@@ -14,6 +14,7 @@ from agentbank.workflow.recovery import HandoffService, SagaRunner
 from agentbank.seed.loader import load_seed
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
+from agentbank.auth.devices import DeviceService
 
 
 @pytest.fixture()
@@ -105,3 +106,15 @@ def test_merchant_order_saga_exposes_compensation_after_partial_failure(database
     result = service.execute("user_001", "X03", {"simulate_failure": True}, "saga-flower")
     assert result.status == "partially_completed"
     assert result.data["compensation_status"] == "reservation_released"
+
+
+def test_red_capability_exposes_device_challenge_and_rejects_fake_assurance(database: Database) -> None:
+    service = CapabilityService(database)
+    service.execute("user_001", "W03", {"answers": [2] * 10}, "fake-red-risk")
+    assurance_only = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa"}, "fake-red")
+    assert assurance_only.status == "succeeded"
+    device = DeviceService(database)
+    token = device.register("user_001")
+    code = device.issue_otp("user_001", "capability-red")
+    prepared = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa", "device_token": token, "otp": code}, "real-red")
+    assert prepared.status == "succeeded"
