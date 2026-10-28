@@ -262,6 +262,19 @@ def create_app(database_url: str | None = None) -> FastAPI:
         case = HandoffService(database).open(user_id, payload.get("operation_type", "unknown"), payload.get("reason", "unspecified"))
         return {"case_id": case.id, "status": case.status}
 
+    @app.get("/staff/v1/handoffs")
+    def staff_handoffs(x_staff_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        if not os.getenv("AGENTBANK_STAFF_TOKEN") or x_staff_token != os.getenv("AGENTBANK_STAFF_TOKEN"):
+            raise HTTPException(status_code=403, detail={"code": "STAFF_REQUIRED"})
+        return {"cases": HandoffService(database).list_open()}
+
+    @app.post("/staff/v1/handoffs/{case_id}/resolve")
+    def resolve_staff_handoff(case_id: str, payload: dict[str, str], x_staff_token: Annotated[str | None, Header()] = None) -> dict[str, str]:
+        if not os.getenv("AGENTBANK_STAFF_TOKEN") or x_staff_token != os.getenv("AGENTBANK_STAFF_TOKEN"):
+            raise HTTPException(status_code=403, detail={"code": "STAFF_REQUIRED"})
+        case = HandoffService(database).resolve(case_id, payload.get("note", ""))
+        return {"case_id": case.id, "status": case.status}
+
     @app.post("/v1/plans/{plan_id}/confirm")
     def confirm_transfer(plan_id: str, payload: ConfirmRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         result = transfer.confirm(user_id, plan_id, payload.receipt_id, payload.display_hash)

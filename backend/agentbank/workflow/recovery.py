@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import uuid
 from typing import Callable
+from sqlalchemy import select
 
 from agentbank.clock import utc_now_naive
 from agentbank.db import Database, HandoffCase, Operation
@@ -46,6 +47,21 @@ class HandoffService:
         with self.database.sessions.begin() as session:
             session.add(case)
         return HandoffView(case.id, case.status)
+
+    def list_open(self) -> list[dict[str, str]]:
+        with self.database.sessions() as session:
+            cases = session.scalars(select(HandoffCase).where(HandoffCase.status == "open").order_by(HandoffCase.created_at)).all()
+            return [{"id": case.id, "user_id": case.user_id, "operation_type": case.operation_type,
+                     "reason": case.reason, "status": case.status, "created_at": case.created_at.isoformat()} for case in cases]
+
+    def resolve(self, case_id: str, note: str) -> HandoffView:
+        with self.database.sessions.begin() as session:
+            case = session.get(HandoffCase, case_id)
+            if case is None:
+                raise DomainError("HANDOFF_NOT_FOUND")
+            case.status = "resolved"
+            case.resolved_at = utc_now_naive()
+            return HandoffView(case.id, case.status)
 
 
 @dataclass(frozen=True)
