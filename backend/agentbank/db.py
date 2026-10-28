@@ -43,6 +43,29 @@ class Payee(Base):
     is_new: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    posted_at: Mapped[str] = mapped_column(String(32), index=True)
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    merchant: Mapped[str] = mapped_column(String(160))
+    category: Mapped[str] = mapped_column(String(64), default="其他")
+    direction: Mapped[str] = mapped_column(String(16), default="debit")
+    memo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160))
+    risk_level: Mapped[str] = mapped_column(String(2))
+    term_days: Mapped[int] = mapped_column(Integer, default=0)
+    fee_bps: Mapped[int] = mapped_column(Integer, default=0)
+    redemption_days: Mapped[int] = mapped_column(Integer, default=1)
+
+
 class PlanRecord(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

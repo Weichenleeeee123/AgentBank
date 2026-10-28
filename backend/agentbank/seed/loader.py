@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from agentbank.db import Account, Database, Payee, User
+from agentbank.db import Account, Database, Payee, Product, Transaction, User
 from agentbank.seed.generator import generate_seed
 
 
@@ -20,3 +20,10 @@ def load_seed(database: Database) -> None:
                               display_name=str(item["display_name"]), masked_name=str(item["masked_name"]),
                               phone=item["phone"], account_id=str(item["account_id"]), is_new=bool(item["is_new"]))
                          for item in fixture["payees"])
+        session.add_all(Transaction(id=str(item["id"]), user_id=str(item["user_id"]), posted_at=str(item["posted_at"]),
+                                    amount_minor=int(cast(int, item["amount_minor"])), merchant=str(item["merchant"]),
+                                    category=str(item.get("category", "其他")), direction=str(item.get("direction", "debit")),
+                                    memo=item.get("memo")) for item in fixture["transactions"])
+        session.add_all(Product(id=str(item["id"]), name=str(item["name"]), risk_level=str(item["risk_level"]),
+                                term_days=int(cast(int, item.get("term_days", 0))), fee_bps=int(cast(int, item.get("fee_bps", 0))),
+                                redemption_days=int(cast(int, item.get("redemption_days", 1)))) for item in fixture["products"])
