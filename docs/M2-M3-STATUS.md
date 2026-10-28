@@ -6,6 +6,8 @@
 
 M2/M3 仍在开发中。已新增确定性 Agent 编排器：自然语言槽位解析、多轮补槽、收款人消歧、能力路由、确认卡、设备绑定 MFA 接续和 Web IM/App 共用入口；模拟手机访问 inbox 后会绑定 token 到 Agent challenge 流程；新增生日四节点 DAG 和图查询；新增 PWA 壳、签名飞书适配器和完整的 AA 分摊付款、定时任务、投资订单/赎回结算、卡片申请、订阅提醒/模拟扣费、商户订单推进与预留补偿；提交前重新计算 action/display hash，计划修订会作废旧授权，生日 DAG 节点按 receipt consumption 逐个消费。仍需继续补齐所有能力的完整授权边界、真实租户联调（如有凭证）、攻击集规模和 M4 必交材料。
 
+M2 六个业务集群（Q/T、B、W、C、S、X）已经分别补充业务不变量测试并标记在 `docs/M2-COVERAGE.md`；这表示业务层逐项验收已建立，不表示 M3 安全门禁或 M4 发布门禁已经通过。
+
 ## M2 能力入口
 
 33 项能力全部由 `CapabilityService.execute(user_id, capability_id, payload, idempotency_key)` 处理，并通过 `POST /v1/capabilities/{capability_id}` 对外暴露。命令或查询都会生成 `CapabilityRecord`，结果包含 `record_id`、状态、业务数据和审计事件名。
