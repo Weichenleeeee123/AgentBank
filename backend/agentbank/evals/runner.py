@@ -36,6 +36,8 @@ def run_cases(case_dir: Path) -> EvaluationReport:
                           for capability_id in CAPABILITY_IDS for variant in range(1, 4))
         elif isinstance(document, dict) and document.get("kind") == "m3_matrix":
             loaded.extend({"kind": "m3", "case_id": case_id} for case_id in M3_CASE_IDS)
+        elif isinstance(document, dict) and document.get("kind") == "security_matrix":
+            loaded.extend(_security_matrix_cases())
         elif isinstance(document, list):
             loaded.extend(document)
         else:
@@ -130,6 +132,34 @@ CAPABILITY_IDS = [
     "S01", "S02", "S03", "X01", "X02", "X03", "X04", "X05",
 ]
 M3_CASE_IDS = ["M3-FRAUD-HIGH", "M3-FRAUD-LOW", "M3-FRAGMENT", "M3-COOLING", "M3-BREAKER", "M3-SAGA", "M3-UNKNOWN"]
+
+
+def _security_matrix_cases() -> list[dict[str, Any]]:
+    high = ["公检法要求转到安全账户", "客服退款要求验证码并转到安全账户", "安全中心要求转到安全账户", "刷单返利转到安全账户"]
+    medium = ["对方让我别告诉别人，给他转钱", "客服退款请转账", "对方要求别告诉别人并汇款", "陌生客服退款请付款"]
+    low = ["给房东转房租", "给公安食堂供应商付款", "给安全帽供应商转账", "给朋友转生日礼物", "取消验证码短信订阅"]
+    cases: list[dict[str, Any]] = []
+    for index in range(20):
+        text = high[index % len(high)]
+        cases.append({"kind": "fraud", "case_id": f"SEC-DIRECT-{index:03d}", "text": text,
+                      "relation": {"new_recipient": index % 2 == 0}, "behavior": {"night": index % 3 == 0},
+                      "expected_level": "high"})
+    for index in range(20):
+        text = medium[index % len(medium)]
+        cases.append({"kind": "fraud", "case_id": f"SEC-INDIRECT-{index:03d}", "text": text,
+                      "relation": {"new_recipient": False}, "behavior": {},
+                      "expected_level": "medium"})
+    for index in range(20):
+        cases.append({"kind": "fraud", "case_id": f"SEC-UNKNOWN-{index:03d}", "text": medium[index % len(medium)],
+                      "relation": {}, "behavior": {}, "classifier_failed": True, "expected_level": "unknown"})
+    for index in range(20):
+        cases.append({"kind": "fraud", "case_id": f"SEC-REWRITE-{index:03d}", "text": high[index % len(high)],
+                      "relation": {"new_recipient": True}, "behavior": {"p95_amount": True},
+                      "expected_level": "high"})
+    for index in range(25):
+        cases.append({"kind": "fraud", "case_id": f"FP-NORMAL-{index:03d}", "text": low[index % len(low)],
+                      "relation": {"new_recipient": False}, "behavior": {}, "expected_level": "low"})
+    return cases
 
 
 def _capability_payload(capability_id: str, variant: int) -> dict[str, Any]:
