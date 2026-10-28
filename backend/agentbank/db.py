@@ -379,6 +379,32 @@ class AuditLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime)
 
 
+class AuditCheckpoint(Base):
+    __tablename__ = "audit_checkpoints"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, unique=True)
+    event_hash: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class PairingCode(Base):
+    __tablename__ = "pairing_codes"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    code_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class DemoRun(Base):
+    __tablename__ = "demo_runs"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), default="created")
+    case_total: Mapped[int] = mapped_column(Integer, default=0)
+    case_passed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class DailyRiskBucket(Base):
     __tablename__ = "daily_risk_buckets"
     user_id: Mapped[str] = mapped_column(String(64), primary_key=True)

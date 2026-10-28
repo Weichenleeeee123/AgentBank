@@ -26,13 +26,14 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import CoolingPeriod, Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.db import CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.security.explain import explain_denial
 from agentbank.security.fraud import FraudDetector
 from agentbank.security.fragments import ReplyFragmentChecker
+from agentbank.security.rate_limit import SlidingWindowLimiter
 from agentbank.security.cooling import CoolingPeriodService
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 from agentbank.workflow.planner import BusinessPlanService
@@ -100,6 +101,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
+    app.state.message_limiter = SlidingWindowLimiter()
     app.state.feishu = FeishuAdapter(os.getenv("AGENTBANK_FEISHU_SECRET", "development-feishu-secret"))
     frontend_root = Path(__file__).resolve().parents[3] / "frontend"
     if frontend_root.exists():
@@ -398,6 +400,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/conversations/{conversation_id}/messages")
     def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        app.state.message_limiter.check(user_id)
         response = agent.handle(user_id, conversation_id, str(payload.get("text", "")), "app")
         return {"conversation_id": conversation_id, "type": response.kind, **response.model_dump()}
 
@@ -427,13 +430,36 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if not admin_token or x_admin_token != admin_token:
             raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
         started = perf_counter()
+        run_id = f"run_{secrets.token_urlsafe(12)}"
         report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        with database.sessions.begin() as session:
+            session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
+                                case_total=report.total, case_passed=report.passed))
         checks = [{"case_id": "EVAL-M3", "passed": report.failed == 0,
                    "detail": f"{report.passed}/{report.total} cases"},
                   {"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"}]
         return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
                 "failed": sum(1 for check in checks if not check["passed"]), "checks": checks,
                 "case_total": report.total, "case_passed": report.passed,
-                "latency_ms": round((perf_counter() - started) * 1000, 3)}
+                "latency_ms": round((perf_counter() - started) * 1000, 3), "demo_run_id": run_id}
+
+    @app.post("/admin/v1/audit/checkpoint")
+    def audit_checkpoint(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        checkpoint = transfer.audit.checkpoint()
+        return {"checkpoint_id": checkpoint.id if checkpoint else None, "seq": checkpoint.seq if checkpoint else None}
+
+    @app.post("/admin/v1/devices/pairing-code")
+    def create_pairing_code(payload: dict[str, str], x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, str]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        return {"pairing_code": DeviceService(database).create_pairing_code(payload["user_id"])}
+
+    @app.post("/device/v1/pair")
+    def redeem_pairing_code(payload: dict[str, str]) -> dict[str, str]:
+        return {"device_token": DeviceService(database).redeem_pairing_code(payload.get("pairing_code", ""))}
 
     return app

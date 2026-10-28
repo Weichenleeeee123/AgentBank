@@ -8,7 +8,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from agentbank.clock import utc_now_naive
-from agentbank.db import Challenge, Database, Device
+from agentbank.db import Challenge, Database, Device, PairingCode
 from agentbank.errors import DomainError
 
 
@@ -25,6 +25,26 @@ class DeviceService:
         with self.database.sessions.begin() as session:
             session.add(Device(id=f"dev_{uuid.uuid4().hex}", user_id=user_id, token_hash=_hash(raw), paired_at=utc_now_naive()))
         return raw
+
+    def create_pairing_code(self, user_id: str, ttl_minutes: int = 10) -> str:
+        code = f"{secrets.randbelow(1_000_000):06d}"
+        with self.database.sessions.begin() as session:
+            session.add(PairingCode(id=f"pair_{uuid.uuid4().hex}", user_id=user_id,
+                                    code_hash=_hash(code),
+                                    expires_at=utc_now_naive() + timedelta(minutes=ttl_minutes)))
+        return code
+
+    def redeem_pairing_code(self, code: str) -> str:
+        with self.database.sessions.begin() as session:
+            pairing = session.scalar(select(PairingCode).where(PairingCode.code_hash == _hash(code),
+                                                               PairingCode.consumed.is_(False)))
+            if pairing is None or pairing.expires_at <= utc_now_naive():
+                raise DomainError("PAIRING_CODE_INVALID")
+            pairing.consumed = True
+            raw = secrets.token_urlsafe(32)
+            session.add(Device(id=f"dev_{uuid.uuid4().hex}", user_id=pairing.user_id,
+                               token_hash=_hash(raw), paired_at=utc_now_naive()))
+            return raw
 
     def issue_otp(self, user_id: str, receipt_id: str) -> str:
         code = f"{secrets.randbelow(1_000_000):06d}"

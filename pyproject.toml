@@ -26,6 +26,9 @@ dev = [
   "types-PyYAML>=6.0,<7",
 ]
 
+[project.scripts]
+agentbank-audit = "agentbank.audit.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 pythonpath = ["backend"]

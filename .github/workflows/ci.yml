@@ -18,3 +18,11 @@ jobs:
       - run: python -m ruff check backend
       - run: python -m mypy backend/agentbank
       - run: python -m pytest
+      - name: Scan secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image
+        run: docker build -f deploy/Dockerfile .
+      - name: Frontend smoke
+        run: python -c "from pathlib import Path; assert Path('frontend/index.html').exists(); assert Path('frontend/app.js').exists()"

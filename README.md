@@ -14,6 +14,7 @@
 | [docs/algorithms.md](docs/algorithms.md) | 已实现算法和验证口径 |
 | [docs/security-self-eval.md](docs/security-self-eval.md) | 已验证安全行为、已知边界和禁止的过度结论 |
 | [docs/submission-checklist.md](docs/submission-checklist.md) | M4 提交门禁清单（当前未冻结） |
+| [docs/M3-COVERAGE.md](docs/M3-COVERAGE.md) | M3 安全闭环逐项证据 |
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 

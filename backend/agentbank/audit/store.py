@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from agentbank.audit.chain import _canonical
 from agentbank.clock import utc_now_naive
-from agentbank.db import AuditLog, Database
+from agentbank.db import AuditCheckpoint, AuditLog, Database
 
 
 class PersistentAudit:
@@ -39,7 +39,10 @@ class PersistentAudit:
         with self.database.sessions() as session:
             records = session.scalars(select(AuditLog).order_by(AuditLog.seq)).all()
             previous_hash: str | None = None
+            expected_seq = 1
             for record in records:
+                if record.seq != expected_seq:
+                    return False
                 body = {"seq": record.seq, "event_id": record.event_id, "trace_id": record.trace_id,
                         "subject_id": record.subject_id, "event_type": record.event_type,
                         "payload": json.loads(record.payload_json), "previous_hash": record.previous_hash,
@@ -50,4 +53,20 @@ class PersistentAudit:
                 if record.previous_hash != previous_hash or expected != record.event_hash:
                     return False
                 previous_hash = record.event_hash
+                expected_seq += 1
+            checkpoints = session.scalars(select(AuditCheckpoint).order_by(AuditCheckpoint.seq)).all()
+            for checkpoint in checkpoints:
+                matching = next((record for record in records if record.seq == checkpoint.seq), None)
+                if matching is None or matching.event_hash != checkpoint.event_hash:
+                    return False
             return True
+
+    def checkpoint(self) -> AuditCheckpoint | None:
+        with self.database.sessions.begin() as session:
+            record = session.scalar(select(AuditLog).order_by(AuditLog.seq.desc()))
+            if record is None:
+                return None
+            checkpoint = AuditCheckpoint(id=f"chk_{uuid.uuid4().hex}", seq=record.seq,
+                                         event_hash=record.event_hash)
+            session.add(checkpoint)
+            return checkpoint
