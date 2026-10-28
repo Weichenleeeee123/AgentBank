@@ -22,7 +22,7 @@
 ## M2 门禁证据
 
 - 33 项能力：`test_capability_matrix.py`、各集群不变量测试；
-- HTTP 端到端入口：`test_m2_api_matrix.py`（Q01-X05 逐项调用统一能力 API）；
+- HTTP 端到端入口：`test_m2_api_matrix.py`、`test_m2_red_api_flow.py`（Q01-X05 逐项调用统一能力 API，包含红色 OTP 接续）；
 - 生日 DAG/mandate/计划图：`test_plan_orchestration.py`、`test_plan_execution.py`、`test_m2_qt_invariants.py`；
 - DSL 沙箱边界和用户隔离：`test_m2_gate.py`、`test_m2_analysis.py`；
 - Web IM 事件签名/去重/Agent 路由：`test_m2_gate.py`、`test_m2_api.py`；
