@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from agentbank.db import Account, Database, Payee, Product, Transaction, User
+from agentbank.db import Account, Card, Database, Event, Payee, Product, Subscription, Transaction, User
 from agentbank.seed.generator import generate_seed
 
 
@@ -27,3 +27,10 @@ def load_seed(database: Database) -> None:
         session.add_all(Product(id=str(item["id"]), name=str(item["name"]), risk_level=str(item["risk_level"]),
                                 term_days=int(cast(int, item.get("term_days", 0))), fee_bps=int(cast(int, item.get("fee_bps", 0))),
                                 redemption_days=int(cast(int, item.get("redemption_days", 1)))) for item in fixture["products"])
+        session.add_all(Card(id=str(item["id"]), user_id=str(item["user_id"]), status=str(item["status"]))
+                         for item in fixture["cards"])
+        session.add_all(Subscription(id=str(item["id"]), user_id=str(item["user_id"]), merchant=str(item["merchant"]),
+                                     amount_minor=int(cast(int, item["amount_minor"])), status=str(item["status"]),
+                                     next_charge_at=str(item["next_charge_at"])) for item in fixture["subscriptions"])
+        session.add_all(Event(id=str(item["id"]), user_id=str(item["user_id"]), event_type=str(item["event_type"]),
+                              event_date=str(item["event_date"]), title=str(item["title"])) for item in fixture["events"])

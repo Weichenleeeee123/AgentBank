@@ -62,4 +62,14 @@ def generate_seed(seed: int = 20261028) -> dict[str, list[dict[str, object]]]:
     ]
     products.append({"id": "product_balanced", "name": "稳健组合", "risk_level": "R3", "term_days": 90,
                      "fee_bps": 5, "redemption_days": 2})
-    return {"users": users, "accounts": accounts, "payees": payees, "transactions": transactions, "products": products}
+    cards: list[dict[str, object]] = [{"id": "card_001", "user_id": "user_001", "status": "active"},
+             {"id": "card_002", "user_id": "user_002", "status": "lost"},
+             {"id": "card_003", "user_id": "user_003", "status": "restricted"}]
+    subscriptions: list[dict[str, object]] = [{"id": "sub_video", "user_id": "user_001", "merchant": "视频会员", "amount_minor": 2_990,
+                      "next_charge_at": "2026-11-15", "status": "active"},
+                     {"id": "sub_ai", "user_id": "user_001", "merchant": "AI 工具", "amount_minor": 1_990,
+                      "next_charge_at": "2026-11-03", "status": "suspected"}]
+    events: list[dict[str, object]] = [{"id": "event_birthday", "user_id": "user_001", "event_type": "birthday",
+               "event_date": "2026-11-15", "title": "配偶生日"}]
+    return {"users": users, "accounts": accounts, "payees": payees, "transactions": transactions,
+            "products": products, "cards": cards, "subscriptions": subscriptions, "events": events}

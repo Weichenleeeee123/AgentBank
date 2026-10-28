@@ -66,6 +66,68 @@ class Product(Base):
     redemption_days: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class RiskProfile(Base):
+    __tablename__ = "risk_profiles"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    level: Mapped[str] = mapped_column(String(2))
+    score: Mapped[int] = mapped_column(Integer)
+    expires_on: Mapped[str] = mapped_column(String(10))
+
+
+class Card(Base):
+    __tablename__ = "cards"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    limit_minor: Mapped[int] = mapped_column(Integer, default=100_000)
+    restrictions_json: Mapped[str] = mapped_column(Text, default="[]")
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    merchant: Mapped[str] = mapped_column(String(160))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    next_charge_at: Mapped[str] = mapped_column(String(32))
+    mandate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class Mandate(Base):
+    __tablename__ = "mandates"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    plan_id: Mapped[str] = mapped_column(String(64))
+    operation_type: Mapped[str] = mapped_column(String(120))
+    subject_ref: Mapped[str] = mapped_column(String(120))
+    max_amount_minor: Mapped[int] = mapped_column(Integer)
+    max_uses: Mapped[int] = mapped_column(Integer)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    starts_on: Mapped[str] = mapped_column(String(10))
+    expires_on: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(32), default="active")
+
+
+class Event(Base):
+    __tablename__ = "events"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    event_date: Mapped[str] = mapped_column(String(10))
+    title: Mapped[str] = mapped_column(String(160))
+
+
+class Reservation(Base):
+    __tablename__ = "fund_reservations"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    account_id: Mapped[str] = mapped_column(String(64))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    plan_id: Mapped[str] = mapped_column(String(64))
+
+
 class PlanRecord(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
