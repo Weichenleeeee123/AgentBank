@@ -209,8 +209,15 @@ class CapabilityService:
                     "as_of": datetime.now(timezone.utc).isoformat()}, "succeeded"
         if capability_id == "Q02":
             with self.database.sessions() as session:
-                rows = session.scalars(select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.posted_at)).all()
-                return {"transactions": [{"txn_id": row.id, "posted_at": row.posted_at, "amount_minor": row.amount_minor,
+                query = select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.posted_at)
+                if payload.get("category"):
+                    query = query.where(Transaction.category == str(payload["category"]))
+                if payload.get("start_date"):
+                    query = query.where(Transaction.posted_at >= str(payload["start_date"]))
+                if payload.get("end_date"):
+                    query = query.where(Transaction.posted_at <= str(payload["end_date"]))
+                rows = list(session.scalars(query.limit(int(payload.get("limit", 100)))).all())
+                return {"transactions": [{"txn_id": row.id, "user_id": row.user_id, "posted_at": row.posted_at, "amount_minor": row.amount_minor,
                                            "merchant": row.merchant, "category": row.category, "direction": row.direction}
                                           for row in rows]}, "succeeded"
         if capability_id in {"T02", "T03"}:
@@ -593,7 +600,14 @@ class CapabilityService:
                     data["dispatched_count"] = int(data.get("dispatched_count", 0)) + 1
                     data["max_uses"] = int(data.get("max_uses", 1)) - 1
                     if data["max_uses"] > 0:
-                        data["next_due"] = (datetime.fromisoformat(due) + timedelta(days=30)).date().isoformat()
+                        next_due = (datetime.fromisoformat(due) + timedelta(days=30)).date().isoformat()
+                        data["next_due"] = next_due
+                        with self.database.sessions.begin() as job_session:
+                            job_session.add(ScheduledJob(id=f"job_{uuid.uuid4().hex}", user_id=record.user_id,
+                                                        schedule_id=str(data["schedule_id"]), due_date=next_due,
+                                                        period_index=int(data["dispatched_count"]) + 1,
+                                                        idempotency_key=f"{record.id}-period-{int(data['dispatched_count']) + 1}",
+                                                        status="scheduled"))
                         status = "scheduled"
                 except DomainError as error:
                     data["error_code"] = error.code
