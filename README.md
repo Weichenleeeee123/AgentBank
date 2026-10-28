@@ -13,7 +13,7 @@
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-当前已完成 M0 契约冻结：后端包、SQLite 表结构、规则初稿、确定性种子和评测运行器骨架均已建立。M1 将继续打通 Q01/T01 的全链路。
+当前实现包含 M0-M3：M1 的转账授权与账本链路、M2 的 33 项能力处理器与业务状态、M3 的反诈/冷静期/熔断/Saga/人工接管和全量评测入口。逐项证据见 [docs/M2-M3-STATUS.md](docs/M2-M3-STATUS.md)。
 
 ## 本地运行
 
@@ -24,6 +24,21 @@ uvicorn agentbank.api.run:app --reload
 ```
 
 通过 `POST /v1/sessions` 获取演示会话令牌，再调用余额、转账准备、确认和验证接口。模拟手机只通过配对后的设备令牌访问 `/device/v1/inbox`，不会复用 App 会话。
+
+所有能力也可以通过统一入口调用：
+
+```json
+POST /v1/capabilities/Q01
+{"capability_id":"Q01","idempotency_key":"demo-q01-1","payload":{}}
+```
+
+命令结果会写入 `capability_records`，并返回可追溯的审计事件。需要用户确认的 T01/T02/T03 先返回 `record_id`、`plan_id`、`receipt_id` 和 `display_hash`，再调用 `/v1/capability-records/{record_id}/confirm`。
+
+运行全量确定性评测：
+
+```powershell
+python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
+```
 
 ## 双实例部署
 
