@@ -72,6 +72,8 @@ class CapabilityService:
                 card = session.get(Card, str(payload.get("card_id", "card_001")))
                 if card is not None and int(payload.get("limit_minor", card.limit_minor)) > card.limit_minor and payload.get("assurance") != "mfa":
                     raise DomainError("MFA_REQUIRED")
+        if capability_id == "C07" and payload.get("action") == "unfreeze" and payload.get("assurance") != "mfa":
+            raise DomainError("MFA_REQUIRED")
         read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "S01", "X01"}
         protective = capability_id in {"C02", "C03", "C07", "X05"}
         if not read_only and not protective and self.breaker.is_locked(user_id):
@@ -462,6 +464,16 @@ class CapabilityService:
 
     def _card(self, user_id: str, capability_id: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
         if capability_id == "C07":
+            if payload.get("action") == "unfreeze":
+                card_id = str(payload.get("card_id", "card_001"))
+                with self.database.sessions.begin() as session:
+                    card = session.get(Card, card_id)
+                    if card is None or card.user_id != user_id:
+                        raise DomainError("NOT_OWNER")
+                    if card.status != "frozen":
+                        raise DomainError("INVALID_CARD_STATE")
+                    card.status = "active"
+                return {"card_id": card_id, "status": "active", "payment_blocked": False}, "succeeded"
             card_id = CardService(self.database).freeze(user_id, payload.get("card_id"))
             return {"card_id": card_id, "status": "frozen", "payment_blocked": True}, "succeeded"
         if capability_id == "C06":
