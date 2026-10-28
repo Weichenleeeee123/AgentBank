@@ -52,7 +52,7 @@ class AgentOrchestrator:
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message=f"还需要补充：{missing}。")
         key = "agent-" + hashlib.sha256(f"{conversation_id}:{text}".encode()).hexdigest()[:32]
-        if parsed.capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"}:
+        if parsed.capability_id in {"W04", "W05", "C02", "C04", "C05", "C06", "C07", "C08"}:
             parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "assurance": "mfa"}, parsed.missing, parsed.ambiguities)
         capability_id = parsed.capability_id
         assert capability_id is not None

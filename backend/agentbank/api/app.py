@@ -168,7 +168,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/capability-records/{record_id}/verify")
     def verify_capability_transfer(record_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
-        return capabilities.verify_transfer(user_id, record_id, payload.otp).model_dump(mode="json")
+        with database.sessions() as session:
+            record = session.get(__import__("agentbank.db", fromlist=["CapabilityRecord"]).CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = __import__("json").loads(record.data_json)
+        if data.get("plan_id"):
+            result = capabilities.verify_transfer(user_id, record_id, payload.otp)
+        else:
+            result = capabilities.verify_mfa(user_id, record_id, payload.otp)
+        return result.model_dump(mode="json")
 
     @app.post("/v1/capability-records/{record_id}/release")
     def release_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:

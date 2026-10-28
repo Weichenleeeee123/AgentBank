@@ -47,7 +47,14 @@ class CapabilityService:
                 if existing.user_id != user_id:
                     raise DomainError("NOT_OWNER")
                 return self._result(existing)
-        if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))):
+        red_capability = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True)))
+        if capability_id == "C02":
+            with self.database.sessions() as session:
+                card_for_policy = session.get(Card, str(payload.get("card_id", "card_001")))
+                red_capability = card_for_policy is not None and int(payload.get("limit_minor", card_for_policy.limit_minor)) > card_for_policy.limit_minor
+        if capability_id == "C07" and payload.get("action") == "unfreeze":
+            red_capability = True
+        if red_capability:
             if payload.get("assurance") != "mfa":
                 raise DomainError("MFA_REQUIRED")
             device_token = payload.get("device_token")
