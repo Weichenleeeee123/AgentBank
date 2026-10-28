@@ -174,6 +174,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def release_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.release_reservation(user_id, record_id).model_dump(mode="json")
 
+    @app.post("/v1/mandates/{mandate_id}/revoke")
+    def revoke_mandate(mandate_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
+        capabilities.revoke_mandate(user_id, mandate_id)
+        return {"mandate_id": mandate_id, "status": "revoked"}
+
     @app.get("/v1/transactions")
     def get_transactions(user_id: str = Depends(current_user)) -> dict[str, Any]:
         with database.sessions() as session:

@@ -81,6 +81,15 @@ def test_scheduled_transfer_dispatch_writes_ledger_and_rechecks_daily_limit(serv
     assert service._account("user_001").available_minor == 499_000
 
 
+def test_scheduled_transfer_uses_revocable_mandate(service: CapabilityService) -> None:
+    scheduled = service.execute("user_001", "T04", {"recipient_name": "房东", "amount_minor": 1_000, "max_uses": 1}, "mandate-schedule")
+    mandate_id = scheduled.data["mandate_id"]
+    service.revoke_mandate("user_001", mandate_id)
+    dispatched = service.dispatch_due("user_001")
+    assert dispatched[0].status == "paused"
+    assert dispatched[0].data["error_code"] == "MANDATE_INVALID"
+
+
 def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) -> None:
     prepared = service.execute("user_001", "T01", {"recipient_name": "房东", "amount_minor": 1_000}, "state-T01")
     assert prepared.status == "prepared"

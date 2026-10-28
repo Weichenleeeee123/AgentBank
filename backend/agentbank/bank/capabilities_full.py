@@ -16,7 +16,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Subscription, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, Mandate, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Subscription, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -111,6 +111,14 @@ class CapabilityService:
                               {"record_id": record_id, "reservation_id": reservation.id})
             return self._result(record)
 
+    def revoke_mandate(self, user_id: str, mandate_id: str) -> None:
+        with self.database.sessions.begin() as session:
+            mandate = session.get(Mandate, mandate_id)
+            if mandate is None or mandate.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            mandate.status = "revoked"
+            self.audit.append(session, f"trace_{mandate_id}", user_id, "mandate.revoked", {"mandate_id": mandate_id})
+
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:
             record = session.get(CapabilityRecord, record_id)
@@ -198,10 +206,16 @@ class CapabilityService:
                 session.add(ScheduledJob(id=f"job_{uuid.uuid4().hex}", user_id=user_id, schedule_id=schedule_id,
                                          due_date=due_date, period_index=1, idempotency_key=f"{idempotency_key}-period-1",
                                          status="scheduled"))
+                mandate_id = f"mdt_{uuid.uuid4().hex}"
+                session.add(Mandate(id=mandate_id, user_id=user_id, plan_id=schedule_id,
+                                    operation_type="transfer.create", subject_ref=recipient.id,
+                                    max_amount_minor=int(payload.get("amount_minor", 1_000)),
+                                    max_uses=int(payload.get("max_uses", 1)), starts_on=due_date,
+                                    expires_on="2099-12-31", status="active"))
             return {"schedule_id": schedule_id, "period": period,
                     "next_due": due_date,
                     "max_uses": int(payload.get("max_uses", 1)), "amount_minor": int(payload.get("amount_minor", 1_000)),
-                    "recipient_id": recipient.id, "operation_template": f"op_{idempotency_key}"}, "scheduled"
+                    "recipient_id": recipient.id, "mandate_id": mandate_id, "operation_template": f"op_{idempotency_key}"}, "scheduled"
         if capability_id == "T05":
             if payload.get("action") == "status":
                 bill_id = str(payload["bill_id"])
@@ -523,6 +537,13 @@ class CapabilityService:
             status = "succeeded"
             if record.capability_id == "T04":
                 try:
+                    mandate = None
+                    with self.database.sessions() as mandate_session:
+                        mandate = mandate_session.get(Mandate, str(data.get("mandate_id", "")))
+                    if mandate is None or mandate.status != "active":
+                        raise DomainError("MANDATE_INVALID")
+                    if not MandateService(self.database, self.clock).consume(mandate.id, int(data["amount_minor"])):
+                        raise DomainError("MANDATE_INVALID")
                     transfer = TransferService(self.database).commit_scheduled(
                         record.user_id, str(data["recipient_id"]), int(data["amount_minor"]),
                         str(data["schedule_id"]), record.id, f"{record.id}-period-{int(data.get('dispatched_count', 0)) + 1}")
