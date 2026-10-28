@@ -13,7 +13,12 @@ from sqlalchemy import select
 
 from agentbank.auth.devices import DeviceService
 from agentbank.bank.service import TransferService
-from agentbank.db import Database, User
+from agentbank.analysis.dsl import DslExecutor
+from agentbank.bank.business import CardService, RiskService, SubscriptionService
+from agentbank.bank.capabilities import split_bill
+from agentbank.analysis.insights import monthly_report
+from agentbank.clock import BusinessClock
+from agentbank.db import Database, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 
@@ -67,9 +72,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
     load_seed(database)
     transfer = TransferService(database)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
+    business_clock = BusinessClock()
     app = FastAPI(title="AgentBank", version="0.1.0")
     app.state.database = database
     app.state.transfer = transfer
+    app.state.session_secret = secret
+    app.state.business_clock = business_clock
+    app.state.webim_events = set()
 
     def current_user(authorization: Annotated[str | None, Header()] = None) -> str:
         if not authorization or not authorization.startswith("Bearer "):
@@ -81,7 +90,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, error: DomainError) -> JSONResponse:
-        status = 409 if error.code in {"HASH_MISMATCH", "RECEIPT_REPLAYED", "DAILY_TOTAL_OVER_1000", "MFA_REQUIRED"} else 400
+        status = 409 if error.code in {"HASH_MISMATCH", "RECEIPT_REPLAYED", "DAILY_TOTAL_OVER_1000", "MFA_REQUIRED", "WEBIM_REPLAYED"} else 400
         return JSONResponse(status_code=status, content={"code": error.code})
 
     @app.post("/v1/sessions")
@@ -96,6 +105,62 @@ def create_app(database_url: str | None = None) -> FastAPI:
         account = transfer.balance(user_id)
         return {"account_id": account.id, "available_minor": account.available_minor,
                 "ledger_balance_minor": account.ledger_balance_minor, "currency": "CNY"}
+
+    @app.get("/v1/transactions")
+    def get_transactions(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            rows = session.scalars(select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.posted_at)).all()
+            return {"transactions": [{"txn_id": row.id, "posted_at": row.posted_at, "amount_minor": row.amount_minor,
+                                      "merchant": row.merchant, "category": row.category, "direction": row.direction}
+                                     for row in rows]}
+
+    @app.post("/v1/analysis/run")
+    def run_analysis(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        result = DslExecutor(database).run(user_id, payload)
+        return {"query_hash": result.query_hash, "row_count": result.row_count, "rows": result.rows}
+
+    @app.get("/v1/subscriptions")
+    def get_subscriptions(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        subscriptions = SubscriptionService(database).list(user_id)
+        return {"subscriptions": [{"id": item.id, "merchant": item.merchant, "amount_minor": item.amount_minor,
+                                    "status": item.status, "next_charge_at": item.next_charge_at}
+                                   for item in subscriptions]}
+
+    @app.post("/v1/subscriptions/{subscription_id}/cancel")
+    def cancel_subscription(subscription_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
+        SubscriptionService(database).cancel(user_id, subscription_id)
+        return {"subscription_id": subscription_id, "status": "cancelled"}
+
+    @app.post("/v1/risk/submit")
+    def submit_risk(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        profile = RiskService(database).submit(user_id, [int(value) for value in payload.get("answers", [])])
+        return {"level": profile.level, "score": profile.score, "expires_on": profile.expires_on}
+
+    @app.get("/v1/products/recommend")
+    def recommend_products(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        products = RiskService(database).recommend(user_id)
+        return {"products": [{"id": item.id, "name": item.name, "risk_level": item.risk_level,
+                              "term_days": item.term_days, "fee_bps": item.fee_bps,
+                              "redemption_days": item.redemption_days} for item in products]}
+
+    @app.post("/v1/cards/freeze")
+    def freeze_card(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, str]:
+        card_id = CardService(database).freeze(user_id, payload.get("card_id"))
+        return {"card_id": card_id, "status": "frozen"}
+
+    @app.post("/v1/cards/{card_id}/unfreeze")
+    def unfreeze_card(card_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:
+        CardService(database).unfreeze(user_id, card_id, assurance=payload.get("assurance", ""))
+        return {"card_id": card_id, "status": "active"}
+
+    @app.post("/v1/aa/preview")
+    def preview_aa(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        shares = split_bill(int(payload["total_minor"]), [str(item) for item in payload["participant_ids"]], user_id)
+        return {"shares": shares, "status": "preview"}
+
+    @app.get("/v1/reports/monthly")
+    def get_monthly_report(start_month: str, end_month: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return {"months": monthly_report(database, user_id, start_month, end_month)}
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -139,5 +204,52 @@ def create_app(database_url: str | None = None) -> FastAPI:
                  "payload": event.payload_json, "event_hash": event.event_hash}
                 for event in events
             ]}
+
+    @app.get("/v1/plans/{plan_id}")
+    def get_plan(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
+            return {"plan_id": plan.id, "status": plan.status, "revision": plan.revision,
+                    "display_hash": plan.display_hash, "action_hash": plan.action_hash,
+                    "nodes": [{"node_id": node.id, "tool": node.tool, "status": node.status,
+                               "idempotency_key": node.idempotency_key} for node in nodes]}
+
+    @app.post("/v1/im/webim/events")
+    def webim_event(payload: dict[str, Any], x_im_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        body = __import__("json").dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        if not x_im_signature or not hmac.compare_digest(x_im_signature, expected):
+            raise HTTPException(status_code=401, detail={"code": "IM_SIGNATURE_INVALID"})
+        event_id = str(payload.get("event_id", ""))
+        if not event_id or event_id in app.state.webim_events:
+            raise DomainError("WEBIM_REPLAYED")
+        app.state.webim_events.add(event_id)
+        user_id = str(payload.get("user_id", ""))
+        text = str(payload.get("text", ""))
+        if text in {"查余额", "余额", "查一下余额"}:
+            account = transfer.balance(user_id)
+            return {"type": "facts", "event_id": event_id,
+                    "facts": [{"label": "可用余额", "value_minor": account.available_minor, "currency": "CNY"}]}
+        return {"type": "clarification", "event_id": event_id, "message": "请补充要办理的银行业务"}
+
+    @app.post("/v1/conversations/{conversation_id}/messages")
+    def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        text = str(payload.get("text", ""))
+        if text in {"查余额", "余额", "查一下余额"}:
+            account = transfer.balance(user_id)
+            return {"conversation_id": conversation_id, "type": "facts",
+                    "facts": [{"label": "可用余额", "value_minor": account.available_minor, "currency": "CNY"}]}
+        return {"conversation_id": conversation_id, "type": "clarification", "message": "请补充要办理的银行业务"}
+
+    @app.post("/admin/v1/clock/advance")
+    def advance_clock(payload: dict[str, int], x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, str]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        business_clock.advance(days=int(payload.get("days", 0)), hours=int(payload.get("hours", 0)))
+        return {"business_date": business_clock.business_date()}
 
     return app
