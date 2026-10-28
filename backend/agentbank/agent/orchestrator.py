@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -51,8 +52,12 @@ class AgentOrchestrator:
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message=f"还需要补充：{missing}。")
         key = "agent-" + hashlib.sha256(f"{conversation_id}:{text}".encode()).hexdigest()[:32]
+        if parsed.capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"}:
+            parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "assurance": "mfa"}, parsed.missing, parsed.ambiguities)
+        capability_id = parsed.capability_id
+        assert capability_id is not None
         try:
-            result = self.capabilities.execute(user_id, parsed.capability_id, parsed.slots, key)
+            result = self.capabilities.execute(user_id, capability_id, parsed.slots, key)
         except AmbiguousRecipient:
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message="存在多个同名收款人，请提供手机号或联系人备注。")
@@ -95,13 +100,23 @@ class AgentOrchestrator:
                              fragments=[{"type": "fact", "label": "操作状态", "value_minor": 0, "status": result.status}])
 
     def verify(self, user_id: str, record_id: str, otp: str) -> AgentResponse:
-        result = self.capabilities.verify_transfer(user_id, record_id, otp)
+        with self.database.sessions() as session:
+            from agentbank.db import CapabilityRecord
+            record = session.get(CapabilityRecord, record_id)
+            data = json.loads(record.data_json) if record is not None else {}
+        if data.get("plan_id"):
+            result = self.capabilities.verify_transfer(user_id, record_id, otp)
+        else:
+            result = self.capabilities.verify_mfa(user_id, record_id, otp)
         return AgentResponse(kind="result", intent="transfer", capability_id=result.capability_id,
                              record_id=record_id, data=result.data, message="强验证完成，结果已从模拟银行确认。",
                              fragments=[{"type": "fact", "label": "操作状态", "value_minor": 0, "status": result.status}])
 
     def _response(self, parsed: ParsedIntent, result: CapabilityResult) -> AgentResponse:
         data = result.data
+        if result.status == "awaiting_mfa":
+            return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
+                                 record_id=result.record_id, data=data, message="请在模拟手机中完成强验证。")
         if parsed.capability_id in {"T01", "T02", "T03"}:
             display = data.get("display", [])
             fragments = [{"type": "fact", "label": item.get("label", "详情"), "value_minor": 0, "text": item.get("value", "")}

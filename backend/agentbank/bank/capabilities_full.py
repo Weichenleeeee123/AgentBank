@@ -35,6 +35,7 @@ class CapabilityService:
         self.clock = clock or BusinessClock()
         self.audit = PersistentAudit(database)
         self.breaker = CircuitBreaker(database)
+        self.device_tokens: dict[str, str] = {}
 
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
@@ -50,9 +51,21 @@ class CapabilityService:
                 raise DomainError("MFA_REQUIRED")
             device_token = payload.get("device_token")
             otp = payload.get("otp")
-            if isinstance(device_token, str) and isinstance(otp, str):
-                DeviceService(self.database).validate_token(user_id, device_token)
-                DeviceService(self.database).verify(user_id, otp)
+            if not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
+                record_id = f"cap_{uuid.uuid4().hex}"
+                pending_data = {"payload": payload, "assurance": "mfa", "challenge_record_id": record_id}
+                with self.database.sessions.begin() as session:
+                    session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
+                                                 status="awaiting_mfa", data_json=json.dumps(pending_data, ensure_ascii=False),
+                                                 idempotency_key=idempotency_key))
+                if user_id in self.device_tokens:
+                    DeviceService(self.database).issue_otp(user_id, record_id)
+                return CapabilityResult(capability_id=capability_id, record_id=record_id, status="awaiting_mfa",
+                                        data=pending_data, evidence={"audit_event": f"capability.{capability_id}.awaiting_mfa",
+                                                                       "idempotency_key": idempotency_key})
+            if not payload.get("_mfa_verified"):
+                DeviceService(self.database).validate_token(user_id, str(device_token))
+                DeviceService(self.database).verify(user_id, str(otp))
         if capability_id == "C02":
             with self.database.sessions() as session:
                 card = session.get(Card, str(payload.get("card_id", "card_001")))
@@ -76,6 +89,28 @@ class CapabilityService:
                               {"capability_id": capability_id, "record_id": record_id, "status": status,
                                "idempotency_key": idempotency_key})
             session.flush()
+            return self._result(record)
+
+    def verify_mfa(self, user_id: str, record_id: str, code: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+            if record.status != "awaiting_mfa":
+                return self._result(record)
+        DeviceService(self.database).verify(user_id, code)
+        payload = dict(data["payload"])
+        payload["_mfa_verified"] = True
+        result_data, status = self._dispatch(user_id, record.capability_id, payload, record.idempotency_key)
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None:
+                raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
+            record.status = status
+            record.data_json = json.dumps(result_data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record_id}", user_id, f"capability.{record.capability_id}.mfa_completed",
+                              {"record_id": record_id, "status": status})
             return self._result(record)
 
     def get(self, user_id: str, record_id: str) -> CapabilityResult:
