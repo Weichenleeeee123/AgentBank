@@ -324,6 +324,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def get_plan_graph(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.graph(plan_id, user_id)
 
+    @app.post("/v1/plans/{plan_id}/execute")
+    def execute_plan(plan_id: str, payload: dict[str, bool], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return plans.execute_plan(user_id, plan_id, confirmed=bool(payload.get("confirmed", False)))
+
     @app.post("/v1/im/webim/events")
     def webim_event(payload: dict[str, Any], x_im_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:
         body = __import__("json").dumps(payload, ensure_ascii=False, separators=(",", ":"))

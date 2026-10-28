@@ -11,6 +11,7 @@ from agentbank.contracts import Plan, PlanNode
 from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
+from agentbank.bank.capabilities_full import CapabilityService
 
 
 class BusinessPlanService:
@@ -62,3 +63,39 @@ class BusinessPlanService:
                               "authorization": "confirm" if record.tool in {"funds.reserve", "merchant.order.create"} else "none",
                               "compensation": data.get("compensation")})
             return {"plan_id": plan_id, "status": plan.status, "revision": plan.revision, "nodes": nodes}
+
+    def execute_plan(self, user_id: str, plan_id: str, *, confirmed: bool) -> dict[str, Any]:
+        if not confirmed:
+            raise DomainError("CONFIRMATION_REQUIRED")
+        with self.database.sessions() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id).order_by(PlanNodeRecord.id)).all())
+        capabilities = CapabilityService(self.database)
+        reservation_id: str | None = None
+        results: list[dict[str, Any]] = []
+        for record in records:
+            data = json.loads(record.args_json)
+            if data["id"] == "event":
+                status = "succeeded"
+                result_data = {"event_id": data["args"]["event_id"]}
+            elif data["id"] == "reserve":
+                result = capabilities.execute(user_id, "X02", {"amount_minor": data["args"]["amount_minor"], "plan_id": plan_id}, f"{plan_id}-reserve")
+                reservation_id = str(result.data["reservation_id"])
+                status, result_data = result.status, result.data
+            else:
+                capability_id = "X03" if data["args"]["item"] == "flower" else "X04"
+                result = capabilities.execute(user_id, capability_id, {"delivery_date": "2026-11-13", "reservation_id": reservation_id}, f"{plan_id}-{data['id']}")
+                status, result_data = result.status, result.data
+            with self.database.sessions.begin() as session:
+                current = session.get(PlanNodeRecord, record.id)
+                if current is not None:
+                    current.status = status
+            results.append({"node_id": data["id"], "status": status, "data": result_data})
+        final_status = "succeeded" if all(item["status"] in {"succeeded", "scheduled", "reserved"} for item in results) else "partially_completed"
+        with self.database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is not None:
+                plan.status = final_status
+        return {"plan_id": plan_id, "status": final_status, "nodes": results}
