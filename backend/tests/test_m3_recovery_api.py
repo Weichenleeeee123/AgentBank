@@ -1,0 +1,41 @@
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+from agentbank.api.app import create_app
+from agentbank.db import Database, Operation
+from agentbank.seed.loader import load_seed
+from agentbank.workflow.recovery import UnknownRecoveryService
+
+
+def test_unknown_operation_recovery_preserves_idempotency(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'unknown.db'}")
+    load_seed(database)
+    with database.sessions.begin() as session:
+        session.add(Operation(id="op_unknown", user_id="user_001", idempotency_key="idem_unknown",
+                              plan_id="plan_unknown", node_id="node_unknown", status="unknown",
+                              amount_minor=1_000, recipient_id="payee_landlord"))
+    service = UnknownRecoveryService(database)
+    assert service.recover("op_unknown").status == "processing"
+    assert service.recover("op_unknown").status == "processing"
+
+
+def test_m3_api_exposes_form_direct_fraud_and_self_test(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AGENTBANK_ADMIN_TOKEN", "admin-test")
+    app = create_app(f"sqlite:///{tmp_path / 'm3-api.db'}")
+    client = TestClient(app)
+    token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    direct = client.post("/v1/forms/transfer", headers=headers,
+                         json={"recipient_name": "房东", "amount_minor": 1_000})
+    assert direct.status_code == 200
+    fraud = client.post("/v1/security/fraud/evaluate", headers=headers,
+                        json={"text": "客服说转到安全账户，马上转5000", "relation": {"new_recipient": True},
+                              "behavior": {"night": True}})
+    assert fraud.status_code == 200
+    assert fraud.json()["level"] == "high"
+    panel = client.post("/admin/v1/self-test", headers={"X-Admin-Token": "admin-test"})
+    assert panel.status_code == 200
+    assert panel.json()["total"] >= 1
+    handoff = client.post("/v1/handoffs", headers=headers, json={"operation_type": "transfer", "reason": "U07"})
+    assert handoff.status_code == 200
+    assert handoff.json()["status"] == "open"

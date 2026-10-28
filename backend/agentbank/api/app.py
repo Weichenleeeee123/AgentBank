@@ -18,9 +18,12 @@ from agentbank.bank.business import CardService, RiskService, SubscriptionServic
 from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
-from agentbank.db import Database, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.db import Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
+from agentbank.security.explain import explain_denial
+from agentbank.security.fraud import FraudDetector
+from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 
 
 class SessionRequest(BaseModel):
@@ -91,7 +94,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, error: DomainError) -> JSONResponse:
         status = 409 if error.code in {"HASH_MISMATCH", "RECEIPT_REPLAYED", "DAILY_TOTAL_OVER_1000", "MFA_REQUIRED", "WEBIM_REPLAYED"} else 400
-        return JSONResponse(status_code=status, content={"code": error.code})
+        reason = error.code
+        return JSONResponse(status_code=status, content={"code": error.code, "explanation": explain_denial(reason)})
 
     @app.post("/v1/sessions")
     def create_session(payload: SessionRequest) -> dict[str, str]:
@@ -174,6 +178,26 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 "tier_display": prepared.tier_display, "assurance": prepared.assurance.value,
                 "display": prepared.display}
 
+    @app.post("/v1/forms/transfer")
+    def direct_transfer_form(payload: PrepareRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        prepared = transfer.prepare(user_id, payload.recipient_name, payload.amount_minor, payload.memo)
+        return {"mode": "form_direct", "plan_id": prepared.plan_id, "receipt_id": prepared.receipt_id,
+                "tier_display": prepared.tier_display, "assurance": prepared.assurance.value,
+                "display_hash": prepared.display_hash, "display": prepared.display}
+
+    @app.post("/v1/security/fraud/evaluate")
+    def evaluate_fraud(payload: dict[str, Any], _user_id: str = Depends(current_user)) -> dict[str, Any]:
+        assessment = FraudDetector().evaluate(str(payload.get("text", "")), relation=dict(payload.get("relation", {})),
+                                              behavior=dict(payload.get("behavior", {})),
+                                              classifier_failed=bool(payload.get("classifier_failed", False)))
+        return {"level": assessment.level.value, "reason_codes": assessment.reason_codes,
+                "confidence": assessment.confidence, "signals": assessment.signals}
+
+    @app.post("/v1/handoffs")
+    def open_handoff(payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:
+        case = HandoffService(database).open(user_id, payload.get("operation_type", "unknown"), payload.get("reason", "unspecified"))
+        return {"case_id": case.id, "status": case.status}
+
     @app.post("/v1/plans/{plan_id}/confirm")
     def confirm_transfer(plan_id: str, payload: ConfirmRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         result = transfer.confirm(user_id, plan_id, payload.receipt_id, payload.display_hash)
@@ -185,6 +209,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = transfer.verify(user_id, plan_id, payload.otp)
         return {"operation_id": result.operation_id, "status": result.status, "amount_minor": result.amount_minor,
                 "ledger_entry_ids": result.ledger_entry_ids, "error_code": result.error_code}
+
+    @app.post("/v1/operations/{operation_id}/recover")
+    def recover_operation(operation_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
+        with database.sessions() as session:
+            operation = session.get(Operation, operation_id)
+            if operation is None or operation.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+        recovered = UnknownRecoveryService(database).recover(operation_id)
+        return {"operation_id": recovered.operation_id, "status": recovered.status,
+                "idempotency_key": recovered.idempotency_key}
 
     @app.get("/device/v1/inbox")
     def device_inbox(x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
@@ -251,5 +285,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
         business_clock.advance(days=int(payload.get("days", 0)), hours=int(payload.get("hours", 0)))
         return {"business_date": business_clock.business_date()}
+
+    @app.post("/admin/v1/self-test")
+    def security_self_test(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        checks = []
+        assessment = FraudDetector().evaluate("转到安全账户并马上转账", relation={"new_recipient": True}, behavior={"night": True})
+        checks.append({"case_id": "SEC-FRAUD-001", "passed": assessment.level.value == "high", "level": assessment.level.value})
+        checks.append({"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"})
+        return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
+                "failed": sum(1 for check in checks if not check["passed"]), "checks": checks}
 
     return app

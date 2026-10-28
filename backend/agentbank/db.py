@@ -128,6 +128,37 @@ class Reservation(Base):
     plan_id: Mapped[str] = mapped_column(String(64))
 
 
+class CoolingPeriod(Base):
+    __tablename__ = "cooling_periods"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    plan_id: Mapped[str] = mapped_column(String(64))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    reconfirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class SecurityCounter(Base):
+    __tablename__ = "security_counters"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    reason: Mapped[str] = mapped_column(String(120))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class HandoffCase(Base):
+    __tablename__ = "handoff_cases"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    operation_type: Mapped[str] = mapped_column(String(120))
+    reason: Mapped[str] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class PlanRecord(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
