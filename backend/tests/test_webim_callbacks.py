@@ -22,7 +22,7 @@ def test_webim_red_flow_exposes_nonce_deep_link_and_consumes_callback(tmp_path: 
     assert response.status_code == 200
     assert "app_deep_link" in response.json()
     nonce = response.json()["app_deep_link"].split("nonce=", 1)[1]
-    callback = signed(client, app, {"event_id": "callback-1", "event_type": "card_callback", "nonce": nonce})
+    callback = signed(client, app, {"event_id": "callback-1", "event_type": "card_callback", "user_id": "user_001", "nonce": nonce})
     assert callback.json()["type"] == "callback_ack"
 
 

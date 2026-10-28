@@ -67,7 +67,11 @@ class BusinessPlanService:
                 nodes.append({"node_id": record.id, "logical_id": data["id"], "tool": record.tool,
                               "status": record.status, "depends_on": data.get("depends_on", []),
                               "authorization": "confirm" if record.tool in {"funds.reserve", "merchant.order.create"} else "none",
-                              "compensation": data.get("compensation")})
+                              "compensation": data.get("compensation"),
+                              "rule_id": "P13" if record.tool == "funds.reserve" else "P14" if record.tool == "merchant.order.create" else "P03",
+                              "decision_chain": [{"stage": "ownership", "status": "passed"},
+                                                 {"stage": "policy", "rule_id": "P13" if record.tool == "funds.reserve" else "P14" if record.tool == "merchant.order.create" else "P03", "status": "passed"},
+                                                 {"stage": "authorization", "status": "pending" if record.status == "pending" else "consumed"}]})
             return {"plan_id": plan_id, "status": plan.status, "revision": plan.revision, "nodes": nodes}
 
     def revise_birthday_plan(self, user_id: str, plan_id: str, changes: dict[str, Any]) -> Plan:

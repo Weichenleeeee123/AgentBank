@@ -101,7 +101,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
-    app.state.webim_nonces = set()
+    app.state.webim_nonces = {}
     app.state.message_limiter = SlidingWindowLimiter()
     app.state.feishu = FeishuAdapter(os.getenv("AGENTBANK_FEISHU_SECRET", "development-feishu-secret"))
     frontend_root = Path(__file__).resolve().parents[3] / "frontend"
@@ -401,10 +401,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
         event_id = str(payload.get("event_id", ""))
         if payload.get("event_type") == "card_callback":
             nonce = str(payload.get("nonce", ""))
-            if nonce not in app.state.webim_nonces:
+            callback_user = str(payload.get("user_id", ""))
+            callback_meta = app.state.webim_nonces.get(nonce)
+            if callback_meta is None or callback_meta["user_id"] != callback_user:
                 raise DomainError("WEBIM_CALLBACK_INVALID")
-            app.state.webim_nonces.remove(nonce)
-            return {"event_id": event_id, "type": "callback_ack", "status": "accepted"}
+            del app.state.webim_nonces[nonce]
+            return {"event_id": event_id, "type": "callback_ack", "status": "accepted", "record_id": callback_meta.get("record_id")}
         if not event_id or event_id in app.state.webim_events:
             raise DomainError("WEBIM_REPLAYED")
         app.state.webim_events.add(event_id)
@@ -414,7 +416,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
         if response.kind == "mfa":
             nonce = secrets.token_urlsafe(16)
-            app.state.webim_nonces.add(nonce)
+            app.state.webim_nonces[nonce] = {"user_id": user_id, "record_id": response.record_id}
             result["app_deep_link"] = f"/app/?record_id={response.record_id}&nonce={nonce}"
         if bool(payload.get("group", False)):
             result = {"event_id": event_id, "type": "generic_status", "message": "已处理，请前往私聊或 App 查看详情。"}
