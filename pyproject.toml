@@ -30,6 +30,7 @@ dev = [
 testpaths = ["backend/tests"]
 pythonpath = ["backend"]
 addopts = "-q"
+filterwarnings = ["ignore:.*BlockingPortal alias is deprecated.*:DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100

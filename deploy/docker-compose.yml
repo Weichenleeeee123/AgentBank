@@ -1,0 +1,32 @@
+services:
+  public:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      AGENTBANK_ENV: public
+      AGENTBANK_DATABASE_URL: sqlite:////data/public.db
+      AGENTBANK_SESSION_SECRET: ${PUBLIC_SESSION_SECRET:?set PUBLIC_SESSION_SECRET}
+    volumes:
+      - public_data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  eval:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      AGENTBANK_ENV: eval
+      AGENTBANK_DATABASE_URL: sqlite:////data/eval.db
+      AGENTBANK_SESSION_SECRET: ${EVAL_SESSION_SECRET:?set EVAL_SESSION_SECRET}
+    volumes:
+      - eval_data:/data
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+
+volumes:
+  public_data:
+  eval_data:

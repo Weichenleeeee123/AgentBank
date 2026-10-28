@@ -9,6 +9,8 @@ from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from agentbank.clock import utc_now_naive
+
 
 class Base(DeclarativeBase):
     pass
@@ -18,7 +20,7 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class Account(Base):
@@ -49,7 +51,7 @@ class PlanRecord(Base):
     status: Mapped[str] = mapped_column(String(32))
     display_hash: Mapped[str] = mapped_column(String(128))
     action_hash: Mapped[str] = mapped_column(String(128))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class PlanNodeRecord(Base):
@@ -112,6 +114,7 @@ class Challenge(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     receipt_id: Mapped[str] = mapped_column(String(64))
     code_hash: Mapped[str] = mapped_column(String(128))
+    delivery_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -128,7 +131,7 @@ class Operation(Base):
     amount_minor: Mapped[int] = mapped_column(Integer)
     recipient_id: Mapped[str] = mapped_column(String(64))
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class LedgerEntry(Base):
@@ -138,7 +141,7 @@ class LedgerEntry(Base):
     account_id: Mapped[str] = mapped_column(String(64), index=True)
     amount_minor: Mapped[int] = mapped_column(Integer)
     direction: Mapped[str] = mapped_column(String(8))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
 class AuditLog(Base):
