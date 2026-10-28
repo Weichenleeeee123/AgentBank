@@ -73,6 +73,26 @@ class CapabilityService:
                 raise DomainError("NOT_OWNER")
             return self._result(record)
 
+    def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+        result = TransferService(self.database).confirm(user_id, str(data["plan_id"]), str(data["receipt_id"]), display_hash)
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None:
+                raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
+            data["transfer_result"] = {"operation_id": result.operation_id, "status": result.status,
+                                        "amount_minor": result.amount_minor, "ledger_entry_ids": result.ledger_entry_ids,
+                                        "error_code": result.error_code}
+            record.status = result.status
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record_id}", user_id, "capability.transfer.confirmed",
+                              {"record_id": record_id, "status": result.status})
+            return self._result(record)
+
     def _result(self, record: CapabilityRecord) -> CapabilityResult:
         return CapabilityResult(capability_id=record.capability_id, record_id=record.id, status=record.status,
                                 data=json.loads(record.data_json),
@@ -94,8 +114,12 @@ class CapabilityService:
         if capability_id in {"T02", "T03"}:
             resolver = RecipientResolver(self.database)
             candidate = resolver.by_phone(user_id, str(payload["phone"])) if payload.get("phone") else resolver.by_name(user_id, str(payload.get("alias") or payload.get("recipient_name", "")))
+            prepared = TransferService(self.database).prepare_for_payee(user_id, candidate.id,
+                                                                         int(payload.get("amount_minor", 1_000)), payload.get("memo"))
             return {"recipient_id": candidate.id, "masked_name": candidate.masked_name, "phone_tail": candidate.phone_tail,
-                    "is_new": candidate.is_new, "next": "transfer.create"}, "prepared"
+                    "is_new": candidate.is_new, "next": "transfer.create", "plan_id": prepared.plan_id,
+                    "receipt_id": prepared.receipt_id, "display_hash": prepared.display_hash,
+                    "action_hash": prepared.action_hash, "display": prepared.display}, "prepared"
         if capability_id == "T01":
             prepared = TransferService(self.database).prepare(user_id, str(payload.get("recipient_name", "")),
                                                               int(payload.get("amount_minor", 0)), payload.get("memo"))

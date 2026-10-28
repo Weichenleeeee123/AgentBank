@@ -86,7 +86,19 @@ class TransferService:
                 raise DomainError("RECIPIENT_NOT_FOUND")
             if len(payees) > 1:
                 raise AmbiguousRecipient()
-            payee = payees[0]
+            return self._prepare_selected(session, user_id, payees[0], amount_minor, memo)
+
+    def prepare_for_payee(self, user_id: str, payee_id: str, amount_minor: int, memo: str | None = None) -> PreparedTransfer:
+        if amount_minor <= 0:
+            raise DomainError("INVALID_AMOUNT")
+        with self.database.sessions.begin() as session:
+            payee = session.get(Payee, payee_id)
+            if payee is None or payee.owner_user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            return self._prepare_selected(session, user_id, payee, amount_minor, memo)
+
+    def _prepare_selected(self, session: Session, user_id: str, payee: Payee, amount_minor: int,
+                          memo: str | None) -> PreparedTransfer:
             account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
             if account is None:
                 raise DomainError("NOT_OWNER")
@@ -209,6 +221,9 @@ class TransferService:
             raise DomainError("NOT_OWNER")
         if account.status != "active" or account.available_minor < amount:
             raise DomainError("INSUFFICIENT_FUNDS")
+        recipient = session.get(Payee, str(args["recipient_id"]))
+        if recipient is None:
+            raise DomainError("RECIPIENT_NOT_FOUND")
         bucket = self._bucket(session, user_id)
         projected = bucket.completed_minor + bucket.pending_minor + amount
         if projected > 100_000 and receipt.assurance != Assurance.mfa.value:
@@ -224,7 +239,7 @@ class TransferService:
         credit_id = f"le_{uuid.uuid4().hex}"
         session.add_all([LedgerEntry(id=debit_id, operation_id=operation_id, account_id=account.id,
                                      amount_minor=-amount, direction="debit"),
-                         LedgerEntry(id=credit_id, operation_id=operation_id, account_id=str(args["recipient_id"]),
+                         LedgerEntry(id=credit_id, operation_id=operation_id, account_id=recipient.account_id,
                                      amount_minor=amount, direction="credit")])
         node.status = "succeeded"
         plan.status = "succeeded"

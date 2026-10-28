@@ -79,6 +79,14 @@ def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) ->
     assert finished.status == "succeeded"
 
 
+def test_phone_and_alias_transfers_can_be_confirmed_into_ledger(service: CapabilityService) -> None:
+    for capability_id, payload, key in (("T02", {"phone": "13800000001", "amount_minor": 1000}, "phone-transfer"),
+                                        ("T03", {"alias": "房东", "amount_minor": 1000}, "alias-transfer")):
+        prepared = service.execute("user_001", capability_id, payload, key)
+        confirmed = service.confirm_transfer("user_001", prepared.record_id, prepared.data["display_hash"])
+        assert confirmed.data["transfer_result"]["status"] == "succeeded"
+
+
 def test_generic_capability_api_returns_business_record(tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
     from agentbank.api.app import create_app

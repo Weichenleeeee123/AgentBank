@@ -34,6 +34,16 @@ def test_q01_balance_and_t01_transfer_200_yuan_create_audited_ledger(service) ->
     assert transfer.audit.verify() is True
 
 
+def test_transfer_credit_ledger_uses_recipient_bank_account(service) -> None:
+    transfer, _device_token = service
+    prepared = transfer.prepare("user_001", "房东", 1_000)
+    result = transfer.confirm("user_001", prepared.plan_id, prepared.receipt_id, prepared.display_hash)
+    with transfer.database.sessions() as session:
+        entries = session.query(__import__("agentbank.db", fromlist=["LedgerEntry"]).LedgerEntry).where(
+            __import__("agentbank.db", fromlist=["LedgerEntry"]).LedgerEntry.operation_id == result.operation_id).all()
+        assert {entry.account_id for entry in entries} == {"acc_001", "acc_902"}
+
+
 def test_forged_display_hash_and_receipt_replay_are_rejected(service) -> None:
     transfer, _device_token = service
     prepared = transfer.prepare("user_001", "房东", 20_000)
