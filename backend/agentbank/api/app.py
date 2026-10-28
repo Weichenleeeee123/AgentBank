@@ -146,6 +146,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def confirm_capability_transfer(record_id: str, payload: ConfirmRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.confirm_transfer(user_id, record_id, payload.display_hash).model_dump(mode="json")
 
+    @app.post("/v1/capability-records/{record_id}/verify")
+    def verify_capability_transfer(record_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.verify_transfer(user_id, record_id, payload.otp).model_dump(mode="json")
+
     @app.post("/v1/capability-records/{record_id}/release")
     def release_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.release_reservation(user_id, record_id).model_dump(mode="json")

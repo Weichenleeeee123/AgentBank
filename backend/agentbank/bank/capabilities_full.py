@@ -38,6 +38,12 @@ class CapabilityService:
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
             raise DomainError("CAPABILITY_NOT_REGISTERED")
+        with self.database.sessions() as session:
+            existing = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == idempotency_key))
+            if existing is not None:
+                if existing.user_id != user_id:
+                    raise DomainError("NOT_OWNER")
+                return self._result(existing)
         if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))):
             if payload.get("assurance") != "mfa":
                 raise DomainError("MFA_REQUIRED")
@@ -48,12 +54,6 @@ class CapabilityService:
                 self.audit.append(session, f"trace_security_{uuid.uuid4().hex}", user_id, "security.breaker.blocked",
                                   {"capability_id": capability_id, "reason": "U17"})
             raise DomainError("SECURITY_LOCKED")
-        with self.database.sessions() as session:
-            existing = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == idempotency_key))
-            if existing is not None:
-                if existing.user_id != user_id:
-                    raise DomainError("NOT_OWNER")
-                return self._result(existing)
         data, status = self._dispatch(user_id, capability_id, payload, idempotency_key)
         record_id = f"cap_{uuid.uuid4().hex}"
         with self.database.sessions.begin() as session:
@@ -117,6 +117,26 @@ class CapabilityService:
             record.status = result.status
             record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
             self.audit.append(session, f"trace_{record_id}", user_id, "capability.transfer.confirmed",
+                              {"record_id": record_id, "status": result.status})
+            return self._result(record)
+
+    def verify_transfer(self, user_id: str, record_id: str, code: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+        result = TransferService(self.database).verify(user_id, str(data["plan_id"]), code)
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None:
+                raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
+            data["transfer_result"] = {"operation_id": result.operation_id, "status": result.status,
+                                        "amount_minor": result.amount_minor, "ledger_entry_ids": result.ledger_entry_ids,
+                                        "error_code": result.error_code}
+            record.status = result.status
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record_id}", user_id, "capability.transfer.verified",
                               {"record_id": record_id, "status": result.status})
             return self._result(record)
 
