@@ -30,12 +30,13 @@ class CapabilityService:
     evaluator can assert state and audit evidence instead of only observing a tool call.
     """
 
-    def __init__(self, database: Database, clock: BusinessClock | None = None) -> None:
+    def __init__(self, database: Database, clock: BusinessClock | None = None, *, require_device_mfa: bool = False) -> None:
         self.database = database
         self.clock = clock or BusinessClock()
         self.audit = PersistentAudit(database)
         self.breaker = CircuitBreaker(database)
         self.device_tokens: dict[str, str] = {}
+        self.require_device_mfa = require_device_mfa
 
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
@@ -51,7 +52,7 @@ class CapabilityService:
                 raise DomainError("MFA_REQUIRED")
             device_token = payload.get("device_token")
             otp = payload.get("otp")
-            if not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
+            if self.require_device_mfa and not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
                 record_id = f"cap_{uuid.uuid4().hex}"
                 pending_data = {"payload": payload, "assurance": "mfa", "challenge_record_id": record_id}
                 with self.database.sessions.begin() as session:
@@ -63,7 +64,7 @@ class CapabilityService:
                 return CapabilityResult(capability_id=capability_id, record_id=record_id, status="awaiting_mfa",
                                         data=pending_data, evidence={"audit_event": f"capability.{capability_id}.awaiting_mfa",
                                                                        "idempotency_key": idempotency_key})
-            if not payload.get("_mfa_verified"):
+            if self.require_device_mfa and not payload.get("_mfa_verified"):
                 DeviceService(self.database).validate_token(user_id, str(device_token))
                 DeviceService(self.database).verify(user_id, str(otp))
         if capability_id == "C02":

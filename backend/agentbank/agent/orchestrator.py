@@ -31,7 +31,7 @@ class AgentResponse:
 class AgentOrchestrator:
     def __init__(self, database: Database) -> None:
         self.database = database
-        self.capabilities = CapabilityService(database)
+        self.capabilities = CapabilityService(database, require_device_mfa=True)
         self.parser = IntentParser()
         self._pending: dict[tuple[str, str], ParsedIntent] = {}
 

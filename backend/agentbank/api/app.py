@@ -86,7 +86,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     database = Database(resolved_database_url)
     load_seed(database)
     transfer = TransferService(database)
-    capabilities = CapabilityService(database)
+    capabilities = CapabilityService(database, require_device_mfa=True)
     plans = BusinessPlanService(database)
     agent = AgentOrchestrator(database)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
