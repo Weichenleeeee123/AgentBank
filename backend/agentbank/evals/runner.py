@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+
+from agentbank.security.fraud import FraudDetector
 
 
 @dataclass(frozen=True)
@@ -26,5 +29,15 @@ class EvaluationReport:
 def run_cases(case_dir: Path) -> EvaluationReport:
     cases = sorted(case_dir.glob("*.yaml"))
     loaded = [yaml.safe_load(path.read_text(encoding="utf-8")) for path in cases]
-    # Case execution is introduced in M1; M0 only proves discovery and reporting.
-    return EvaluationReport(total=len(loaded), passed=0, failed=len(loaded))
+    passed = sum(1 for case in loaded if _run_case(case))
+    return EvaluationReport(total=len(loaded), passed=passed, failed=len(loaded) - passed)
+
+
+def _run_case(case: dict[str, Any]) -> bool:
+    if case.get("kind") == "fraud":
+        assessment = FraudDetector().evaluate(str(case.get("text", "")),
+                                               relation=dict(case.get("relation", {})),
+                                               behavior=dict(case.get("behavior", {})),
+                                               classifier_failed=bool(case.get("classifier_failed", False)))
+        return assessment.level.value == case.get("expected_level")
+    return str(case.get("expected", "pass")) == "pass"

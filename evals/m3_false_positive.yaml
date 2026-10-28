@@ -1,0 +1,7 @@
+case_id: FP-FRAUD-001
+kind: fraud
+text: 给公安食堂供应商支付货款
+relation:
+  new_recipient: false
+behavior: {}
+expected_level: low

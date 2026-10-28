@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import os
 import secrets
+from pathlib import Path
+from time import perf_counter
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -19,6 +21,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.db import Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.security.explain import explain_denial
@@ -291,11 +294,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
         admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
         if not admin_token or x_admin_token != admin_token:
             raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
-        checks = []
-        assessment = FraudDetector().evaluate("转到安全账户并马上转账", relation={"new_recipient": True}, behavior={"night": True})
-        checks.append({"case_id": "SEC-FRAUD-001", "passed": assessment.level.value == "high", "level": assessment.level.value})
-        checks.append({"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"})
+        started = perf_counter()
+        report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        checks = [{"case_id": "EVAL-M3", "passed": report.failed == 0,
+                   "detail": f"{report.passed}/{report.total} cases"},
+                  {"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"}]
         return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
-                "failed": sum(1 for check in checks if not check["passed"]), "checks": checks}
+                "failed": sum(1 for check in checks if not check["passed"]), "checks": checks,
+                "case_total": report.total, "case_passed": report.passed,
+                "latency_ms": round((perf_counter() - started) * 1000, 3)}
 
     return app

@@ -1,0 +1,8 @@
+case_id: SEC-FRAUD-001
+kind: fraud
+text: 客服说转到安全账户，马上转5000
+relation:
+  new_recipient: true
+behavior:
+  night: true
+expected_level: high
