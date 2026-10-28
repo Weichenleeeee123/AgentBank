@@ -17,5 +17,6 @@
 | 一次性设备配对 | `PairingCode`, `/admin/v1/devices/pairing-code`, `/device/v1/pair` | 已实现 |
 | 限流/DLP | `SlidingWindowLimiter`, `security/dlp.py` | 已实现基础控制 |
 | CI secret/frontend/image smoke | `.github/workflows/ci.yml` | 已配置，需 CI 实跑证据 |
+| 评测/模拟手机 UI | `/app/eval.html`, `/app/device.html`, `test_m3_ui_surfaces.py` | 已实现 |
 
 “已实现”表示本地代码和确定性测试具备；M4 仍需要实际 Docker、CI、部署和提交材料证据。
