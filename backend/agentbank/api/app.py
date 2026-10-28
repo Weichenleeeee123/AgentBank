@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from agentbank.auth.devices import DeviceService
+from agentbank.agent.orchestrator import AgentOrchestrator
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.analysis.dsl import DslExecutor
@@ -83,12 +84,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     load_seed(database)
     transfer = TransferService(database)
     capabilities = CapabilityService(database)
+    agent = AgentOrchestrator(database)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
     business_clock = BusinessClock()
     app = FastAPI(title="AgentBank", version="0.1.0")
     app.state.database = database
     app.state.transfer = transfer
     app.state.capabilities = capabilities
+    app.state.agent = agent
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
@@ -316,20 +319,25 @@ def create_app(database_url: str | None = None) -> FastAPI:
         app.state.webim_events.add(event_id)
         user_id = str(payload.get("user_id", ""))
         text = str(payload.get("text", ""))
-        if text in {"查余额", "余额", "查一下余额"}:
-            account = transfer.balance(user_id)
-            return {"type": "facts", "event_id": event_id,
-                    "facts": [{"label": "可用余额", "value_minor": account.available_minor, "currency": "CNY"}]}
-        return {"type": "clarification", "event_id": event_id, "message": "请补充要办理的银行业务"}
+        response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
+        return {"event_id": event_id, "type": response.kind, **response.model_dump()}
 
     @app.post("/v1/conversations/{conversation_id}/messages")
     def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        text = str(payload.get("text", ""))
-        if text in {"查余额", "余额", "查一下余额"}:
-            account = transfer.balance(user_id)
-            return {"conversation_id": conversation_id, "type": "facts",
-                    "facts": [{"label": "可用余额", "value_minor": account.available_minor, "currency": "CNY"}]}
-        return {"conversation_id": conversation_id, "type": "clarification", "message": "请补充要办理的银行业务"}
+        response = agent.handle(user_id, conversation_id, str(payload.get("text", "")), "app")
+        return {"conversation_id": conversation_id, "type": response.kind, **response.model_dump()}
+
+    @app.post("/v1/conversations/{conversation_id}/records/{record_id}/confirm")
+    def confirm_conversation_record(conversation_id: str, record_id: str, payload: ConfirmRequest,
+                                    user_id: str = Depends(current_user)) -> dict[str, Any]:
+        response = agent.confirm(user_id, record_id, payload.display_hash)
+        return {"conversation_id": conversation_id, **response.model_dump()}
+
+    @app.post("/v1/conversations/{conversation_id}/records/{record_id}/verify")
+    def verify_conversation_record(conversation_id: str, record_id: str, payload: VerifyRequest,
+                                   user_id: str = Depends(current_user)) -> dict[str, Any]:
+        response = agent.verify(user_id, record_id, payload.otp)
+        return {"conversation_id": conversation_id, **response.model_dump()}
 
     @app.post("/admin/v1/clock/advance")
     def advance_clock(payload: dict[str, int], x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, str]:

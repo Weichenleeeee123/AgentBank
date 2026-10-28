@@ -44,3 +44,19 @@ def test_webim_signature_and_replay_protection(tmp_path: Path) -> None:
     assert response.json()["type"] == "facts"
     replay = client.post("/v1/im/webim/events", json=event, headers={"X-IM-Signature": signature})
     assert replay.status_code == 409
+
+
+def test_conversation_api_runs_agent_transfer_flow(tmp_path: Path) -> None:
+    app = create_app(f"sqlite:///{tmp_path / 'conversation.db'}")
+    client = TestClient(app)
+    token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    response = client.post("/v1/conversations/c1/messages", headers=headers,
+                           json={"text": "给房东转 20 元，备注房租"})
+    assert response.status_code == 200
+    assert response.json()["kind"] == "confirmation"
+    confirmed = client.post(f"/v1/conversations/c1/records/{response.json()['record_id']}/confirm", headers=headers,
+                            json={"receipt_id": response.json()["data"]["receipt_id"],
+                                  "display_hash": response.json()["display_hash"]})
+    assert confirmed.status_code == 200
+    assert confirmed.json()["data"]["transfer_result"]["status"] == "succeeded"

@@ -166,7 +166,8 @@ class CapabilityService:
             return {"recipient_id": candidate.id, "masked_name": candidate.masked_name, "phone_tail": candidate.phone_tail,
                     "is_new": candidate.is_new, "next": "transfer.create", "plan_id": prepared.plan_id,
                     "receipt_id": prepared.receipt_id, "display_hash": prepared.display_hash,
-                    "action_hash": prepared.action_hash, "display": prepared.display}, "prepared"
+                    "action_hash": prepared.action_hash, "assurance": prepared.assurance.value,
+                    "tier_display": prepared.tier_display, "display": prepared.display}, "prepared"
         if capability_id == "T01":
             prepared = TransferService(self.database).prepare(user_id, str(payload.get("recipient_name", "")),
                                                               int(payload.get("amount_minor", 0)), payload.get("memo"))
