@@ -377,8 +377,11 @@ class CapabilityService:
                 with self.database.sessions.begin() as session:
                     session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
                                               amount_minor=int(payload.get("amount_minor", 5_000)),
-                                              delivery_date=str(payload.get("delivery_date", "2026-11-13")), status=saga.status))
+                                              delivery_date=str(payload.get("delivery_date", "2026-11-13")), status=saga.status,
+                                              reservation_id=payload.get("reservation_id")))
                 return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": saga.status,
+                        "delivery_date": payload.get("delivery_date", self.clock.business_date()),
+                        "reservation_id": payload.get("reservation_id"),
                         "compensation_status": "reservation_released", "failure_code": "MERCHANT_UNAVAILABLE"}, saga.status
             with self.database.sessions.begin() as session:
                 session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
@@ -506,7 +509,7 @@ class CapabilityService:
         today = self.clock.business_date()
         changed: list[CapabilityRecord] = []
         with self.database.sessions() as session:
-            query = select(CapabilityRecord).where(CapabilityRecord.status == "scheduled",
+            query = select(CapabilityRecord).where(CapabilityRecord.status.in_(["scheduled", "partially_completed"]),
                                                     CapabilityRecord.capability_id.in_(["T04", "X03", "X04"]))
             if user_id:
                 query = query.where(CapabilityRecord.user_id == user_id)
@@ -540,6 +543,25 @@ class CapabilityService:
             else:
                 data["operation_id"] = f"{record.id}-operation"
                 data["status"] = "succeeded"
+                with self.database.sessions.begin() as order_session:
+                    merchant = order_session.get(MerchantOrder, str(data.get("order_id", "")))
+                    if merchant is not None:
+                        if merchant.status == "partially_completed":
+                            merchant.status = "failed"
+                            if merchant.reservation_id:
+                                reservation = order_session.get(Reservation, merchant.reservation_id)
+                                if reservation is not None and reservation.status == "active":
+                                    account = order_session.get(Account, reservation.account_id)
+                                    if account is not None:
+                                        account.available_minor += reservation.amount_minor
+                                    reservation.status = "released"
+                            data["status"] = "failed"
+                        else:
+                            merchant.status = "delivered"
+                            if merchant.reservation_id:
+                                reservation = order_session.get(Reservation, merchant.reservation_id)
+                                if reservation is not None and reservation.status == "active":
+                                    reservation.status = "consumed"
             with self.database.sessions.begin() as session:
                 current = session.get(CapabilityRecord, record.id)
                 if current is None:
