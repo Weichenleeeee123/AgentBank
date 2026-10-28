@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
@@ -33,6 +34,7 @@ from agentbank.security.fraud import FraudDetector
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.security.cooling import CoolingPeriodService
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
+from agentbank.workflow.planner import BusinessPlanService
 
 
 class SessionRequest(BaseModel):
@@ -84,6 +86,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     load_seed(database)
     transfer = TransferService(database)
     capabilities = CapabilityService(database)
+    plans = BusinessPlanService(database)
     agent = AgentOrchestrator(database)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
     business_clock = BusinessClock()
@@ -91,10 +94,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.database = database
     app.state.transfer = transfer
     app.state.capabilities = capabilities
+    app.state.plans = plans
     app.state.agent = agent
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
+    frontend_root = Path(__file__).resolve().parents[3] / "frontend"
+    if frontend_root.exists():
+        app.mount("/app", StaticFiles(directory=frontend_root, html=True), name="agentbank-app")
 
     def current_user(authorization: Annotated[str | None, Header()] = None) -> str:
         if not authorization or not authorization.startswith("Bearer "):
@@ -306,6 +313,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
                     "display_hash": plan.display_hash, "action_hash": plan.action_hash,
                     "nodes": [{"node_id": node.id, "tool": node.tool, "status": node.status,
                                "idempotency_key": node.idempotency_key} for node in nodes]}
+
+    @app.post("/v1/birthday/plans")
+    def create_birthday_plan(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        plan = plans.create_birthday_plan(user_id, str(payload.get("event_id", "event_birthday")),
+                                          int(payload.get("reserve_minor", 100_000)))
+        return plan.model_dump(mode="json")
+
+    @app.get("/v1/plans/{plan_id}/graph")
+    def get_plan_graph(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return plans.graph(plan_id, user_id)
 
     @app.post("/v1/im/webim/events")
     def webim_event(payload: dict[str, Any], x_im_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:

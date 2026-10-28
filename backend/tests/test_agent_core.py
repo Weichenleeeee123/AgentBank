@@ -54,3 +54,26 @@ def test_agent_discovers_birthday_without_spending(tmp_path: Path) -> None:
     assert response.kind == "facts"
     assert response.capability_id == "X01"
     assert response.data["recommendation_only"] is True
+
+
+def test_agent_continues_missing_slots_and_risk_questionnaire(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    first = agent.handle("user_001", "conv-slots", "给房东转账")
+    assert first.kind == "clarification"
+    second = agent.handle("user_001", "conv-slots", "20元")
+    assert second.kind == "confirmation"
+    risk = agent.handle("user_001", "conv-risk", "做风险测评")
+    assert risk.kind == "clarification"
+    complete = agent.handle("user_001", "conv-risk", "1 1 1 1 1 1 1 1 1 1")
+    assert complete.kind == "facts"
+    assert complete.data["level"] == "C1"
+
+
+def test_agent_routes_subscription_and_card_commands(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    subscriptions = agent.handle("user_001", "conv-sub", "帮我查一下订阅")
+    assert subscriptions.capability_id == "S01"
+    cancelled = agent.handle("user_001", "conv-sub-cancel", "取消视频会员")
+    assert cancelled.capability_id == "S03"
+    frozen = agent.handle("user_001", "conv-card", "先把我的卡冻结")
+    assert frozen.capability_id == "C07"

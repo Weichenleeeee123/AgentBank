@@ -74,4 +74,62 @@ def detect_anomalies(database: Database, user_id: str) -> list[dict[str, Any]]:
                 if delta <= timedelta(minutes=5):
                     output.append({"reason_code": "DUP_CHARGE", "txn_ids": [left.id, right.id],
                                    "evidence": f"same merchant and amount within {delta.total_seconds():.0f}s"})
+    by_category: dict[str, list[Transaction]] = defaultdict(list)
+    for record in records:
+        if record.direction == "debit":
+            by_category[record.category].append(record)
+    for category, items in by_category.items():
+        if len(items) < 4:
+            continue
+        amounts = sorted(item.amount_minor for item in items)
+        midpoint = len(amounts) // 2
+        med = amounts[midpoint] if len(amounts) % 2 else (amounts[midpoint - 1] + amounts[midpoint]) / 2
+        deviations = sorted(abs(amount - med) for amount in amounts)
+        mad_mid = len(deviations) // 2
+        mad = deviations[mad_mid] if len(deviations) % 2 else (deviations[mad_mid - 1] + deviations[mad_mid]) / 2
+        if mad <= 0:
+            continue
+        for record in items:
+            robust_z = 0.6745 * abs(record.amount_minor - med) / mad
+            if robust_z > 3.5 and record.amount_minor > 20_000:
+                output.append({"reason_code": "AMOUNT_OUTLIER", "txn_ids": [record.id],
+                               "evidence": {"category": category, "median_minor": med, "mad_minor": mad,
+                                            "robust_z": round(robust_z, 3)}})
+    for merchant, items in _group_by_merchant(records).items():
+        items.sort(key=lambda item: item.posted_at)
+        for index, small in enumerate(items):
+            try:
+                small_time = datetime.fromisoformat(small.posted_at)
+            except ValueError:
+                continue
+            if not (small.merchant.startswith("境外") and small.amount_minor < 500):
+                continue
+            for large in items[index + 1:]:
+                try:
+                    delta = datetime.fromisoformat(large.posted_at) - small_time
+                except ValueError:
+                    continue
+                if timedelta(0) <= delta <= timedelta(hours=24) and large.amount_minor > 20_000:
+                    output.append({"reason_code": "PROBE_THEN_LARGE", "txn_ids": [small.id, large.id],
+                                   "evidence": "foreign small probe followed by large payment within 24h"})
+                    break
+    debit_records = [record for record in records if record.direction == "debit"]
+    amounts = sorted(record.amount_minor for record in debit_records)
+    if amounts:
+        p95 = amounts[min(len(amounts) - 1, int(len(amounts) * 0.95))]
+        seen: set[str] = set()
+        for record in sorted(debit_records, key=lambda item: item.posted_at):
+            if record.merchant in seen:
+                continue
+            seen.add(record.merchant)
+            if record.amount_minor > p95:
+                output.append({"reason_code": "NEW_MERCHANT_LARGE", "txn_ids": [record.id],
+                               "evidence": {"debit_p95_minor": p95, "amount_minor": record.amount_minor}})
     return output
+
+
+def _group_by_merchant(records: list[Transaction]) -> dict[str, list[Transaction]]:
+    grouped: dict[str, list[Transaction]] = defaultdict(list)
+    for record in records:
+        grouped[record.merchant].append(record)
+    return grouped

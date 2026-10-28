@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="/app/manifest.json" />
+  <link rel="stylesheet" href="/app/styles.css" />
+  <title>AgentBank</title>
+</head>
+<body>
+  <main class="shell">
+    <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><button id="balanceBtn" class="ghost">查余额</button></header>
+    <section id="status" class="status">连接模拟银行中…</section>
+    <section id="messages" class="messages" aria-live="polite"></section>
+    <form id="composer" class="composer"><input id="message" autocomplete="off" placeholder="例如：给房东转 20 元，备注房租" /><button>发送</button></form>
+    <section class="quick"><button data-text="帮我查一下余额">余额</button><button data-text="帮我查一下订阅">订阅</button><button data-text="推荐理财产品">理财</button><button data-text="先把我的卡冻结">保护卡片</button></section>
+  </main>
+  <script src="/app/app.js" type="module"></script>
+</body>
+</html>

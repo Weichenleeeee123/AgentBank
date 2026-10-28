@@ -15,7 +15,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date
 from agentbank.contracts import CapabilityResult
-from agentbank.db import Account, Card, CapabilityRecord, Database, Product, Reservation, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -47,6 +47,11 @@ class CapabilityService:
         if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))):
             if payload.get("assurance") != "mfa":
                 raise DomainError("MFA_REQUIRED")
+        if capability_id == "C02":
+            with self.database.sessions() as session:
+                card = session.get(Card, str(payload.get("card_id", "card_001")))
+                if card is not None and int(payload.get("limit_minor", card.limit_minor)) > card.limit_minor and payload.get("assurance") != "mfa":
+                    raise DomainError("MFA_REQUIRED")
         read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "S01", "X01"}
         protective = capability_id in {"C02", "C03", "C07", "X05"}
         if not read_only and not protective and self.breaker.is_locked(user_id):
@@ -176,16 +181,41 @@ class CapabilityService:
                     "assurance": prepared.assurance.value, "display": prepared.display}, "prepared"
         if capability_id == "T04":
             period = str(payload.get("period", "monthly"))
-            recipient_name = str(payload.get("recipient_name", "房东"))
-            recipient = RecipientResolver(self.database).by_name(user_id, recipient_name)
-            return {"schedule_id": f"schedule_{uuid.uuid4().hex}", "period": period,
-                    "next_due": payload.get("next_due", self.clock.business_date()),
+            recipient_id = str(payload.get("recipient_id", "payee_landlord"))
+            with self.database.sessions() as lookup_session:
+                recipient = lookup_session.get(Payee, recipient_id)
+            if recipient is None or recipient.owner_user_id != user_id:
+                raise DomainError("RECIPIENT_NOT_FOUND")
+            schedule_id = f"schedule_{uuid.uuid4().hex}"
+            due_date = str(payload.get("next_due", self.clock.business_date()))
+            with self.database.sessions.begin() as session:
+                session.add(ScheduledJob(id=f"job_{uuid.uuid4().hex}", user_id=user_id, schedule_id=schedule_id,
+                                         due_date=due_date, period_index=1, idempotency_key=f"{idempotency_key}-period-1",
+                                         status="scheduled"))
+            return {"schedule_id": schedule_id, "period": period,
+                    "next_due": due_date,
                     "max_uses": int(payload.get("max_uses", 1)), "amount_minor": int(payload.get("amount_minor", 1_000)),
                     "recipient_id": recipient.id, "operation_template": f"op_{idempotency_key}"}, "scheduled"
         if capability_id == "T05":
+            if payload.get("action") == "status":
+                bill_id = str(payload["bill_id"])
+                with self.database.sessions() as session:
+                    bill = session.get(AABill, bill_id)
+                    if bill is None or bill.user_id != user_id:
+                        raise DomainError("NOT_OWNER")
+                    shares = session.scalars(select(AAShare).where(AAShare.bill_id == bill_id)).all()
+                    return {"bill_id": bill_id, "status": bill.status, "shares": [{"participant_id": share.participant_id,
+                            "amount_minor": share.amount_minor, "status": share.status} for share in shares]}, "succeeded"
             participants = [str(item) for item in payload.get("participant_ids", [user_id, "user_002", "user_003"])]
-            return {"shares": split_bill(int(payload.get("total_minor", 10_000)), participants, user_id),
-                    "participant_count": len(participants), "request_only": True}, "created"
+            total_minor = int(payload.get("total_minor", 10_000))
+            allocations = split_bill(total_minor, participants, user_id)
+            bill_id = f"aa_{uuid.uuid4().hex}"
+            with self.database.sessions.begin() as session:
+                session.add(AABill(id=bill_id, user_id=user_id, total_minor=total_minor, status="open"))
+                for participant_id, amount in allocations.items():
+                    session.add(AAShare(id=f"share_{uuid.uuid4().hex}", bill_id=bill_id,
+                                        participant_id=participant_id, amount_minor=amount, status="requested"))
+            return {"bill_id": bill_id, "shares": allocations, "participant_count": len(participants), "request_only": True}, "created"
         if capability_id == "B01":
             dsl = payload.get("dsl", {"source": "transactions", "group_by": ["category"], "limit": 100})
             result = DslExecutor(self.database).run(user_id, dsl)
@@ -200,7 +230,9 @@ class CapabilityService:
                                     str(payload.get("end_month", "2026-12")))
             return {"year": str(payload.get("year", "2026")), "months": months, "missing_months": [row["month"] for row in months if row["missing"]]}, "succeeded"
         if capability_id == "W01":
-            products = RiskService(self.database).recommend(user_id) if self._has_risk(user_id) else []
+            if not self._has_risk(user_id):
+                raise DomainError("RISK_PROFILE_REQUIRED")
+            products = RiskService(self.database).recommend(user_id)
             return {"products": [self._product_data(product) for product in products]}, "succeeded"
         if capability_id == "W02":
             with self.database.sessions() as session:
@@ -223,27 +255,60 @@ class CapabilityService:
                 if investment_account is None or investment_account.available_minor < amount_minor:
                     raise DomainError("INSUFFICIENT_FUNDS")
                 investment_account.available_minor -= amount_minor
-            return {"order_id": f"order_{uuid.uuid4().hex}", "product_id": product_id, "status": "subscribed",
-                    "shares": amount_minor // 100, "amount_minor": amount_minor, "funds_status": "debited"}, "succeeded"
+                order_id = f"order_{uuid.uuid4().hex}"
+                shares_count = amount_minor // 100
+                session.add(InvestmentOrder(id=order_id, user_id=user_id, product_id=product_id, side="subscribe",
+                                            amount_minor=amount_minor, shares=shares_count, status="subscribed"))
+                session.add(Position(id=f"pos_{uuid.uuid4().hex}", user_id=user_id, product_id=product_id,
+                                     shares=shares_count, cost_minor=amount_minor, market_value_minor=amount_minor,
+                                     as_of=datetime.now(timezone.utc).replace(tzinfo=None)))
+            return {"order_id": order_id, "product_id": product_id, "status": "subscribed",
+                    "shares": shares_count, "amount_minor": amount_minor, "funds_status": "debited"}, "succeeded"
         if capability_id == "W05":
-            return {"order_id": str(payload.get("order_id", f"order_{uuid.uuid4().hex}")), "status": "processing",
-                    "expected_settlement_at": (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()}, "processing"
+            order_id = str(payload.get("order_id", f"order_{uuid.uuid4().hex}"))
+            expected = datetime.now(timezone.utc) + timedelta(days=2)
+            with self.database.sessions.begin() as session:
+                order = session.get(InvestmentOrder, order_id)
+                if order is None or order.user_id != user_id:
+                    raise DomainError("ORDER_NOT_FOUND")
+                order.status = "processing"
+                order.side = "redeem"
+                order.expected_settlement_at = expected.replace(tzinfo=None)
+            return {"order_id": order_id, "status": "processing", "expected_settlement_at": expected.isoformat()}, "processing"
         if capability_id == "W06":
             with self.database.sessions() as session:
-                orders = session.scalars(select(CapabilityRecord).where(CapabilityRecord.user_id == user_id,
-                                                                        CapabilityRecord.capability_id == "W04",
-                                                                        CapabilityRecord.status == "succeeded")).all()
-            return {"positions": [json.loads(order.data_json) for order in orders],
+                positions = session.scalars(select(Position).where(Position.user_id == user_id)).all()
+            return {"positions": [{"product_id": position.product_id, "shares": position.shares,
+                                    "cost_minor": position.cost_minor, "market_value_minor": position.market_value_minor,
+                                    "pnl_minor": position.market_value_minor - position.cost_minor} for position in positions],
                     "source": "simulated_bank", "as_of": datetime.now(timezone.utc).isoformat()}, "succeeded"
         if capability_id.startswith("C"):
             return self._card(user_id, capability_id, payload)
         if capability_id == "S01":
             return {"subscriptions": detect_subscriptions(self.database, user_id)}, "succeeded"
         if capability_id == "S02":
-            return {"reminder_id": f"rem_{uuid.uuid4().hex}", "remind_before_days": int(payload.get("days", 3)), "dedupe_key": idempotency_key}, "scheduled"
+            subscription_id = str(payload.get("subscription_id", "sub_video"))
+            reminder_id = f"rem_{uuid.uuid4().hex}"
+            with self.database.sessions.begin() as session:
+                subscription = session.get(__import__("agentbank.db", fromlist=["Subscription"]).Subscription, subscription_id)
+                if subscription is None or subscription.user_id != user_id:
+                    raise DomainError("NOT_OWNER")
+                session.add(Reminder(id=reminder_id, user_id=user_id, subscription_id=subscription_id,
+                                     remind_before_days=int(payload.get("days", 3)), status="scheduled",
+                                     idempotency_key=idempotency_key))
+            return {"reminder_id": reminder_id, "subscription_id": subscription_id,
+                    "remind_before_days": int(payload.get("days", 3)), "dedupe_key": idempotency_key}, "scheduled"
         if capability_id == "S03":
             subscription_id = str(payload.get("subscription_id", "sub_video"))
             SubscriptionService(self.database).cancel(user_id, subscription_id)
+            with self.database.sessions.begin() as session:
+                mandate = session.scalar(select(DebitMandate).where(DebitMandate.subscription_id == subscription_id,
+                                                                     DebitMandate.user_id == user_id))
+                if mandate is None:
+                    session.add(DebitMandate(id=f"dm_{uuid.uuid4().hex}", user_id=user_id,
+                                             subscription_id=subscription_id, status="revoked"))
+                else:
+                    mandate.status = "revoked"
             return {"subscription_id": subscription_id, "status": "cancelled", "debit_mandate": "revoked"}, "succeeded"
         if capability_id == "X01":
             with self.database.sessions() as session:
@@ -255,16 +320,26 @@ class CapabilityService:
             reservation_id = planner.reserve(user_id, amount, str(payload.get("plan_id", idempotency_key)))
             return {"reservation_id": reservation_id, "amount_minor": amount, "ledger_balance_unchanged": True}, "reserved"
         if capability_id in {"X03", "X04"}:
+            order_id = f"merchant_order_{uuid.uuid4().hex}"
+            quote_id = f"quote_{uuid.uuid4().hex}"
+            item = "flower" if capability_id == "X03" else "cake"
             if payload.get("simulate_failure"):
                 saga = SagaRunner().run([
                     ("reserve", lambda: None, lambda: None),
                     ("merchant_order", lambda: (_ for _ in ()).throw(RuntimeError("merchant_unavailable")), lambda: None),
                 ])
-                return {"quote_id": f"quote_{uuid.uuid4().hex}", "order_id": f"merchant_order_{uuid.uuid4().hex}",
-                        "item": "flower" if capability_id == "X03" else "cake", "status": saga.status,
+                with self.database.sessions.begin() as session:
+                    session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
+                                              amount_minor=int(payload.get("amount_minor", 5_000)),
+                                              delivery_date=str(payload.get("delivery_date", "2026-11-13")), status=saga.status))
+                return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": saga.status,
                         "compensation_status": "reservation_released", "failure_code": "MERCHANT_UNAVAILABLE"}, saga.status
-            return {"quote_id": f"quote_{uuid.uuid4().hex}", "order_id": f"merchant_order_{uuid.uuid4().hex}",
-                    "item": "flower" if capability_id == "X03" else "cake", "status": "scheduled",
+            with self.database.sessions.begin() as session:
+                session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
+                                          amount_minor=int(payload.get("amount_minor", 5_000)),
+                                          delivery_date=str(payload.get("delivery_date", "2026-11-13")), status="scheduled",
+                                          reservation_id=payload.get("reservation_id")))
+            return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "scheduled",
                     "delivery_date": payload.get("delivery_date", "2026-11-13")}, "scheduled"
         if capability_id == "X05":
             card_id = CardService(self.database).freeze(user_id)
@@ -306,6 +381,9 @@ class CapabilityService:
             card_status = "active" if payload.get("virtual", True) else "pending"
             with self.database.sessions.begin() as session:
                 session.add(Card(id=card_id, user_id=user_id, status=card_status))
+                session.add(CardApplication(id=f"cardapp_{uuid.uuid4().hex}", card_id=card_id, user_id=user_id,
+                                            card_type="virtual" if payload.get("virtual", True) else "physical",
+                                            status=card_status))
             return {"card_id": card_id, "status": card_status, "card_type": "virtual" if payload.get("virtual", True) else "physical"}, "succeeded" if card_status == "active" else "pending"
         if capability_id == "C02":
             card_id = str(payload.get("card_id", "card_001"))
@@ -372,6 +450,12 @@ class CapabilityService:
                         record.user_id, str(data["recipient_id"]), int(data["amount_minor"]),
                         str(data["schedule_id"]), record.id, f"{record.id}-period-{int(data.get('dispatched_count', 0)) + 1}")
                     data["operation_id"] = transfer.operation_id
+                    with self.database.sessions.begin() as job_session:
+                        job = job_session.scalar(select(ScheduledJob).where(ScheduledJob.schedule_id == str(data["schedule_id"]),
+                                                                            ScheduledJob.status == "scheduled"))
+                        if job is not None:
+                            job.operation_id = transfer.operation_id
+                            job.status = "succeeded"
                     data["dispatched_count"] = int(data.get("dispatched_count", 0)) + 1
                     data["max_uses"] = int(data.get("max_uses", 1)) - 1
                     if data["max_uses"] > 0:

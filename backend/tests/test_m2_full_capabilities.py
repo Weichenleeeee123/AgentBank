@@ -21,13 +21,17 @@ def service(tmp_path: Path) -> CapabilityService:
     "C05", "C06", "C07", "C08", "S01", "S02", "S03", "X01", "X02", "X03", "X04", "X05",
 ])
 def test_every_declared_capability_has_a_business_result(service: CapabilityService, capability_id: str) -> None:
+    payload = {"amount_minor": 1_000, "recipient_name": "房东"}
     if capability_id == "W01":
         service.execute("user_001", "W03", {"answers": [1] * 10}, "setup-W03")
     if capability_id == "W04":
         service.execute("user_001", "W03", {"answers": [1] * 10}, "setup-W03-W04")
+    if capability_id == "W05":
+        service.execute("user_001", "W03", {"answers": [1] * 10}, "setup-W03-W05")
+        order = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa"}, "setup-W04-W05")
+        payload = {"order_id": order.data["order_id"]}
     if capability_id == "C06":
         service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, "setup-C05-C06")
-    payload = {"amount_minor": 1_000, "recipient_name": "房东"}
     if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08", "X05"}:
         payload["assurance"] = "mfa"
     if capability_id == "C01":

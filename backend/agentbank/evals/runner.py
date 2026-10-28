@@ -65,6 +65,11 @@ def _run_case(case: dict[str, Any]) -> bool:
             service.execute("user_001", "W03", {"answers": [1] * 10}, f"eval-setup-{capability_id}")
         if capability_id == "W04":
             service.execute("user_001", "W03", {"answers": [2] * 10}, "eval-setup-W04")
+        if capability_id == "W05":
+            service.execute("user_001", "W03", {"answers": [2] * 10}, f"eval-setup-W05-{case.get('variant')}")
+            order = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000,
+                                                         "assurance": "mfa"}, f"eval-setup-order-W05-{case.get('variant')}")
+            payload["order_id"] = order.data["order_id"]
         if capability_id == "C06":
             service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, f"eval-setup-C06-{case.get('variant')}")
         try:

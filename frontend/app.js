@@ -1,0 +1,16 @@
+const state={token:null,conversationId:crypto.randomUUID()};
+const $=id=>document.getElementById(id);
+function addBubble(kind,text,fragments=[],data={},recordId=null,displayHash=""){
+  const node=document.createElement("article"); node.className=`bubble ${kind}`;
+  node.innerHTML=`<h3>${kind==='user'?'你':kind==='confirmation'?'待确认':kind==='mfa'?'需要强验证':'AgentBank'}</h3><p>${escapeHtml(text||'')}</p>`;
+  for(const fact of fragments){const row=document.createElement("div");row.className="fact";row.innerHTML=`<span>${escapeHtml(fact.label||'事实')}</span><strong>${escapeHtml(String(fact.text??(fact.value_minor??'')))}</strong>`;node.append(row)}
+  if(recordId&&(kind==='confirmation'||kind==='mfa')){const actions=document.createElement("div");actions.className="card-actions";const button=document.createElement("button");button.textContent=kind==='mfa'?'输入验证码':'确认执行';button.onclick=()=>kind==='mfa'?verify(recordId):confirm(recordId,displayHash);actions.append(button);node.append(actions)}
+  $("messages").append(node); node.scrollIntoView({behavior:"smooth"});
+}
+function escapeHtml(value){return value.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
+async function api(path,options={}){const response=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(state.token?{Authorization:`Bearer ${state.token}`}:{}) ,...(options.headers||{})}});const data=await response.json();if(!response.ok)throw new Error(data.code||data.detail?.code||'请求失败');return data}
+async function start(){const session=await api('/v1/sessions',{method:'POST',body:JSON.stringify({user_id:'user_001'})});state.token=session.access_token;$('status').textContent='已连接模拟银行 · user_001';addBubble('agent','我可以帮你查余额、转账、分析账单、管理理财、卡片和订阅。');}
+async function send(text){if(!text)return;addBubble('user',text);try{const response=await api(`/v1/conversations/${state.conversationId}/messages`,{method:'POST',body:JSON.stringify({text})});addBubble(response.kind,response.message,response.fragments,response.data,response.record_id,response.display_hash)}catch(error){addBubble('error',error.message)}}
+async function confirm(recordId,displayHash){try{const response=await api(`/v1/conversations/${state.conversationId}/records/${recordId}/confirm`,{method:'POST',body:JSON.stringify({receipt_id:'from-card',display_hash:displayHash})});addBubble(response.kind,response.message,response.fragments,response.data)}catch(error){addBubble('error',error.message)}}
+async function verify(recordId){const otp=prompt('请输入模拟手机验证码');if(!otp)return;try{const response=await api(`/v1/conversations/${state.conversationId}/records/${recordId}/verify`,{method:'POST',body:JSON.stringify({otp})});addBubble(response.kind,response.message,response.fragments,response.data)}catch(error){addBubble('error',error.message)}}
+$("composer").onsubmit=e=>{e.preventDefault();const input=$("message");const text=input.value.trim();input.value='';send(text)};$("balanceBtn").onclick=()=>send('帮我查一下余额');document.querySelectorAll('.quick button').forEach(button=>button.onclick=()=>send(button.dataset.text));start().catch(error=>{$('status').textContent=`连接失败：${error.message}`});

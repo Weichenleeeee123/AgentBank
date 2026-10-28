@@ -14,6 +14,7 @@ from agentbank.db import Database, Transaction
 ALLOWED_FIELDS = {"category", "merchant", "posted_at", "amount_minor", "direction"}
 ALLOWED_OPS = {"eq", "between", "gte", "lte"}
 ALLOWED_GROUPS = {"month", "category", "merchant", "direction"}
+ALLOWED_METRICS = {"sum", "count"}
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,14 @@ class DslExecutor:
         groups = list(dsl.get("group_by", []))
         if any(group not in ALLOWED_GROUPS for group in groups):
             raise ValueError("DSL_GROUP_NOT_ALLOWED")
+        for metric in dsl.get("metrics", []):
+            if metric.get("fn") not in ALLOWED_METRICS:
+                raise ValueError("DSL_METRIC_NOT_ALLOWED")
+            if metric.get("fn") == "sum" and metric.get("field") not in {"amount_minor"}:
+                raise ValueError("DSL_FIELD_NOT_ALLOWED")
+        for ordering in dsl.get("order_by", []):
+            if ordering.get("field") not in ALLOWED_GROUPS | {"sum_amount_minor", "count"} or ordering.get("dir", "asc") not in {"asc", "desc"}:
+                raise ValueError("DSL_ORDER_NOT_ALLOWED")
         with self.database.sessions() as session:
             records = list(session.scalars(select(Transaction).where(Transaction.user_id == user_id)).all())
         records = [record for record in records if self._matches(record, filters)]

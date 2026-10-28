@@ -49,6 +49,10 @@ def test_capability_has_three_business_state_cases(tmp_path: Path, capability_id
         service.execute("user_001", "W03", {"answers": [1] * 10}, f"setup-{capability_id}")
     if capability_id == "W04":
         service.execute("user_001", "W03", {"answers": [2] * 10}, f"setup-{capability_id}")
+    if capability_id == "W05":
+        service.execute("user_001", "W03", {"answers": [2] * 10}, f"setup-{capability_id}-risk")
+        order = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa"}, f"setup-{capability_id}-order")
+        payload["order_id"] = order.data["order_id"]
     if capability_id == "C06":
         service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, f"setup-{capability_id}")
     if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and payload.get("virtual") is False):

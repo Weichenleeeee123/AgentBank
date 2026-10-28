@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from agentbank.bank.capabilities_full import CapabilityService
@@ -31,15 +32,20 @@ class AgentOrchestrator:
         self.database = database
         self.capabilities = CapabilityService(database)
         self.parser = IntentParser()
+        self._pending: dict[tuple[str, str], ParsedIntent] = {}
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
         parsed = self.parser.parse(text)
+        pending = self._pending.get((user_id, conversation_id))
+        if parsed.capability_id is None and pending is not None:
+            parsed = self._continue_pending(pending, text)
         if parsed.capability_id is None:
             return AgentResponse(kind="clarification", intent=parsed.intent, message="我还不能确定要办理哪项银行业务，请说明查询、转账、账单、理财、卡片或订阅。")
         if parsed.ambiguities:
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message="请确认收款人：我找到多个同名联系人，请提供手机号或联系人备注。")
         if parsed.missing:
+            self._pending[(user_id, conversation_id)] = parsed
             labels = {"amount": "金额", "recipient": "收款人", "answers": "风险测评答案", "product_id": "产品", "order_id": "订单", "subscription_id": "订阅", "card_id": "卡片"}
             missing = "、".join(labels.get(item, item) for item in parsed.missing)
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
@@ -55,7 +61,32 @@ class AgentOrchestrator:
                 return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
                                      message="这项操作需要模拟手机验证码验证，请输入验证码。")
             return AgentResponse(kind="error", intent=parsed.intent, capability_id=parsed.capability_id, message=error.code)
+        self._pending.pop((user_id, conversation_id), None)
         return self._response(parsed, result)
+
+    def _continue_pending(self, pending: ParsedIntent, text: str) -> ParsedIntent:
+        slots = dict(pending.slots)
+        missing = list(pending.missing)
+        if pending.capability_id == "W03":
+            answers = [int(item) for item in re.findall(r"\d+", text)]
+            if len(answers) == 10:
+                slots["answers"] = answers
+                missing = []
+        elif pending.capability_id in {"T01", "T02", "T03"}:
+            amount_match = self.parser._amount.search(text)
+            if amount_match:
+                slots["amount_minor"] = self.parser.parse(text + " 转账").slots.get("amount_minor")
+                missing = [item for item in missing if item != "amount"]
+        elif pending.capability_id == "W04":
+            product = re.search(r"R[1-5]", text, re.IGNORECASE)
+            amount_match = self.parser._amount.search(text)
+            if product:
+                slots["product_id"] = f"product_{product.group(0).upper()}"
+                missing = [item for item in missing if item != "product_id"]
+            if amount_match:
+                slots["amount_minor"] = self.parser.parse(f"转账 {amount_match.group('amount')}").slots.get("amount_minor")
+                missing = [item for item in missing if item != "amount_minor"]
+        return ParsedIntent(pending.intent, pending.capability_id, slots, missing, pending.ambiguities)
 
     def confirm(self, user_id: str, record_id: str, display_hash: str) -> AgentResponse:
         result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)

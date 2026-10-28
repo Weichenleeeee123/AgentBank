@@ -38,6 +38,8 @@ def test_dsl_rejects_unknown_fields_and_large_limits(database: Database) -> None
         DslExecutor(database).run("user_001", {"source": "transactions", "filters": [{"field": "password", "op": "eq", "value": "x"}]})
     with pytest.raises(ValueError, match="DSL_LIMIT_EXCEEDED"):
         DslExecutor(database).run("user_001", {"source": "transactions", "limit": 50_001})
+    with pytest.raises(ValueError, match="DSL_METRIC_NOT_ALLOWED"):
+        DslExecutor(database).run("user_001", {"source": "transactions", "metrics": [{"fn": "raw_sql", "field": "amount_minor"}]})
 
 
 def test_monthly_report_marks_missing_months_and_separates_transfer(database: Database) -> None:
@@ -53,3 +55,6 @@ def test_seed_contains_confirmed_and_suspected_subscriptions_and_anomalies(datab
     assert any(item["status"] == "suspected" for item in subscriptions)
     anomalies = detect_anomalies(database, "user_001")
     assert any(item["reason_code"] == "DUP_CHARGE" for item in anomalies)
+    assert any(item["reason_code"] == "AMOUNT_OUTLIER" for item in anomalies)
+    assert any(item["reason_code"] == "PROBE_THEN_LARGE" for item in anomalies)
+    assert any(item["reason_code"] == "NEW_MERCHANT_LARGE" for item in anomalies)

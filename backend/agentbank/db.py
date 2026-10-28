@@ -171,6 +171,100 @@ class CapabilityRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class AABill(Base):
+    __tablename__ = "aa_bills"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    total_minor: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class AAShare(Base):
+    __tablename__ = "aa_shares"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    bill_id: Mapped[str] = mapped_column(String(80), index=True)
+    participant_id: Mapped[str] = mapped_column(String(64))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="requested")
+
+
+class ScheduledJob(Base):
+    __tablename__ = "scheduled_jobs"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    schedule_id: Mapped[str] = mapped_column(String(80), index=True)
+    due_date: Mapped[str] = mapped_column(String(10))
+    period_index: Mapped[int] = mapped_column(Integer, default=1)
+    operation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="scheduled")
+
+
+class InvestmentOrder(Base):
+    __tablename__ = "investment_orders"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    product_id: Mapped[str] = mapped_column(String(80))
+    side: Mapped[str] = mapped_column(String(16))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32))
+    expected_settlement_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class Position(Base):
+    __tablename__ = "positions"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    product_id: Mapped[str] = mapped_column(String(80))
+    shares: Mapped[int] = mapped_column(Integer)
+    cost_minor: Mapped[int] = mapped_column(Integer)
+    market_value_minor: Mapped[int] = mapped_column(Integer)
+    as_of: Mapped[datetime] = mapped_column(DateTime)
+
+
+class CardApplication(Base):
+    __tablename__ = "card_applications"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    card_id: Mapped[str] = mapped_column(String(80), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    card_type: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class DebitMandate(Base):
+    __tablename__ = "debit_mandates"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    subscription_id: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+
+
+class Reminder(Base):
+    __tablename__ = "subscription_reminders"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    subscription_id: Mapped[str] = mapped_column(String(80))
+    remind_before_days: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="scheduled")
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+
+
+class MerchantOrder(Base):
+    __tablename__ = "merchant_orders"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    item: Mapped[str] = mapped_column(String(32))
+    quote_id: Mapped[str] = mapped_column(String(80))
+    amount_minor: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_date: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(32), default="scheduled")
+    reservation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+
 class PlanRecord(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -37,9 +37,10 @@ class IntentParser:
             return ParsedIntent("monthly_report", "B03", {}, [], [])
         if any(word in normalized for word in ("年度账单", "年报")):
             return ParsedIntent("yearly_report", "B04", {}, [], [])
-        if any(word in normalized for word in ("订阅", "自动扣费")):
+        if any(word in normalized for word in ("订阅", "自动扣费", "会员")):
             if any(word in normalized for word in ("取消", "不要了", "停止")):
-                return ParsedIntent("cancel_subscription", "S03", {}, ["subscription_id"], [])
+                subscription_id = "sub_video" if "视频" in normalized else "sub_ai" if "AI" in normalized else ""
+                return ParsedIntent("cancel_subscription", "S03", ({"subscription_id": subscription_id} if subscription_id else {}), ([] if subscription_id else ["subscription_id"]), [])
             return ParsedIntent("subscriptions", "S01", {}, [], [])
         if any(word in normalized for word in ("冻结卡", "卡冻结", "卡丢了")):
             return ParsedIntent("freeze_card", "C07", {}, [], [])
