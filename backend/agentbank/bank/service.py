@@ -169,7 +169,7 @@ class TransferService:
                                   {"cooling_id": cooling_id, "expires_at": expires.isoformat(),
                                    "reason_codes": assessment.reason_codes})
                 session.commit()
-                return TransferResult("", "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
+                return TransferResult(cooling_id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
             bucket = self._bucket(session, user_id)
             projected = bucket.completed_minor + bucket.pending_minor + int(args["amount_minor"])
             if projected > 100_000:

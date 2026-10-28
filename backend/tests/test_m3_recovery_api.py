@@ -25,6 +25,9 @@ def test_m3_api_exposes_form_direct_fraud_and_self_test(tmp_path: Path, monkeypa
     client = TestClient(app)
     token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
+    balance = client.get("/v1/accounts/balance", headers=headers)
+    assert balance.status_code == 200
+    assert balance.json()["fragments"][0]["type"] == "fact"
     direct = client.post("/v1/forms/transfer", headers=headers,
                          json={"recipient_name": "房东", "amount_minor": 1_000})
     assert direct.status_code == 200
@@ -39,3 +42,20 @@ def test_m3_api_exposes_form_direct_fraud_and_self_test(tmp_path: Path, monkeypa
     handoff = client.post("/v1/handoffs", headers=headers, json={"operation_type": "transfer", "reason": "U07"})
     assert handoff.status_code == 200
     assert handoff.json()["status"] == "open"
+
+
+def test_cooling_release_api_requires_reconfirmation(tmp_path: Path) -> None:
+    app = create_app(f"sqlite:///{tmp_path / 'cooling-api.db'}")
+    client = TestClient(app)
+    token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    prepared = client.post("/v1/transfers/prepare", headers=headers,
+                           json={"recipient_name": "房东", "amount_minor": 1_000,
+                                 "memo": "对方让我别告诉别人，给房东转账"}).json()
+    confirmed = client.post(f"/v1/plans/{prepared['plan_id']}/confirm", headers=headers,
+                            json={"receipt_id": prepared["receipt_id"], "display_hash": prepared["display_hash"]})
+    cooling_id = confirmed.json()["operation_id"]
+    blocked = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": False})
+    assert blocked.status_code == 400
+    released = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": True})
+    assert released.status_code == 200

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import os
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any
@@ -22,12 +23,14 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.db import CoolingPeriod, Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.security.explain import explain_denial
 from agentbank.security.fraud import FraudDetector
+from agentbank.security.fragments import ReplyFragmentChecker
+from agentbank.security.cooling import CoolingPeriodService
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 
 
@@ -114,8 +117,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/v1/accounts/balance")
     def get_balance(user_id: str = Depends(current_user)) -> dict[str, Any]:
         account = transfer.balance(user_id)
+        fragments = ReplyFragmentChecker().validate([{"type": "fact", "label": "可用余额",
+                                                     "value_minor": account.available_minor, "currency": "CNY"}])
         return {"account_id": account.id, "available_minor": account.available_minor,
-                "ledger_balance_minor": account.ledger_balance_minor, "currency": "CNY"}
+                "ledger_balance_minor": account.ledger_balance_minor, "currency": "CNY", "as_of": datetime.now(timezone.utc).isoformat(),
+                "fragments": fragments}
 
     @app.post("/v1/capabilities/{capability_id}")
     def execute_capability(capability_id: str, payload: CapabilityCommandRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -245,6 +251,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
         recovered = UnknownRecoveryService(database).recover(operation_id)
         return {"operation_id": recovered.operation_id, "status": recovered.status,
                 "idempotency_key": recovered.idempotency_key}
+
+    @app.post("/v1/cooling/{cooling_id}/release")
+    def release_cooling(cooling_id: str, payload: dict[str, bool], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            cooling = session.get(CoolingPeriod, cooling_id)
+            if cooling is None or cooling.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            expires_at = cooling.expires_at.replace(tzinfo=timezone.utc)
+        released = CoolingPeriodService(database).release(cooling_id, now=expires_at, reconfirmed=bool(payload.get("reconfirmed", False)))
+        return {"cooling_id": cooling_id, "status": "released" if released else "active", "reconfirmed": bool(payload.get("reconfirmed", False))}
 
     @app.get("/device/v1/inbox")
     def device_inbox(x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
