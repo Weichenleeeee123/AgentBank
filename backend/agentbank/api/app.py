@@ -315,7 +315,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def device_inbox(x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
         if not x_device_token:
             raise HTTPException(status_code=401, detail={"code": "DEVICE_UNAUTHORIZED"})
-        return {"messages": DeviceService(database).inbox(x_device_token)}
+        device_service = DeviceService(database)
+        device_user = device_service.user_for_token(x_device_token)
+        capabilities.device_tokens[device_user] = x_device_token
+        return {"messages": device_service.inbox(x_device_token)}
 
     @app.get("/v1/audit/traces/{trace_id}")
     def get_audit_trace(trace_id: str, user_id: str = Depends(current_user)) -> dict[str, object]:

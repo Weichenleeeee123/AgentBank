@@ -52,6 +52,13 @@ class DeviceService:
             if device is None:
                 raise DomainError("DEVICE_UNAUTHORIZED")
 
+    def user_for_token(self, device_token: str) -> str:
+        with self.database.sessions() as session:
+            device = session.scalar(select(Device).where(Device.token_hash == _hash(device_token), Device.active.is_(True)))
+            if device is None:
+                raise DomainError("DEVICE_UNAUTHORIZED")
+            return device.user_id
+
     def verify(self, user_id: str, code: str) -> Challenge:
         with self.database.sessions.begin() as session:
             challenge = session.scalar(select(Challenge).where(Challenge.user_id == user_id,
