@@ -18,3 +18,13 @@ def test_birthday_plan_has_dag_dependencies_authorization_and_compensation(tmp_p
     graph = service.graph(plan.plan_id, "user_001")
     assert graph["nodes"][1]["authorization"] == "confirm"
     assert graph["nodes"][2]["compensation"] == "funds.release"
+
+
+def test_plan_pause_cancel_resume_state_machine(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'plan-state.db'}")
+    load_seed(database)
+    service = BusinessPlanService(database)
+    plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
+    assert service.pause("user_001", plan.plan_id)["status"] == "paused"
+    assert service.resume("user_001", plan.plan_id)["status"] == "awaiting_confirmation"
+    assert service.cancel("user_001", plan.plan_id)["status"] == "cancelled"

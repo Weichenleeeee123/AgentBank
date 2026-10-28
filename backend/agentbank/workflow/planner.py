@@ -148,3 +148,22 @@ class BusinessPlanService:
             if receipt is not None and final_status == "succeeded":
                 receipt.status = "consumed"
         return {"plan_id": plan_id, "status": final_status, "nodes": results}
+
+    def pause(self, user_id: str, plan_id: str) -> dict[str, str]:
+        return self._set_status(user_id, plan_id, "paused", {"awaiting_confirmation", "running"})
+
+    def cancel(self, user_id: str, plan_id: str) -> dict[str, str]:
+        return self._set_status(user_id, plan_id, "cancelled", {"draft", "prepared", "awaiting_confirmation", "paused"})
+
+    def resume(self, user_id: str, plan_id: str) -> dict[str, str]:
+        return self._set_status(user_id, plan_id, "awaiting_confirmation", {"paused"})
+
+    def _set_status(self, user_id: str, plan_id: str, target: str, allowed: set[str]) -> dict[str, str]:
+        with self.database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if plan.status not in allowed:
+                raise DomainError("PLAN_STATE_INVALID")
+            plan.status = target
+            return {"plan_id": plan_id, "status": target}

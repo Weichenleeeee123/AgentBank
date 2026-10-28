@@ -83,7 +83,7 @@ class IntentParser:
             slots["phone"] = phone.group(1)
             capability_id = "T02"
         else:
-            recipient_match = re.search(r"(?:给|转给|付给)([^，。\s]+)", text)
+            recipient_match = re.search(r"(?:给|转给|付给)([^，。\s\d元块]+)", text)
             recipient = recipient_match.group(1) if recipient_match else ""
             recipient = re.sub(r"(转账|转钱|转款|付款|汇款|转)$", "", recipient)
             if recipient in {"房租", "房东"} or "房租" in text:
