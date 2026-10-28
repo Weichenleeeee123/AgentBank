@@ -266,8 +266,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
             cooling = session.get(CoolingPeriod, cooling_id)
             if cooling is None or cooling.user_id != user_id:
                 raise DomainError("NOT_OWNER")
-            expires_at = cooling.expires_at.replace(tzinfo=timezone.utc)
-        released = CoolingPeriodService(database).release(cooling_id, now=expires_at, reconfirmed=bool(payload.get("reconfirmed", False)))
+        released = CoolingPeriodService(database).release(cooling_id, reconfirmed=bool(payload.get("reconfirmed", False)))
         return {"cooling_id": cooling_id, "status": "released" if released else "active", "reconfirmed": bool(payload.get("reconfirmed", False))}
 
     @app.get("/device/v1/inbox")

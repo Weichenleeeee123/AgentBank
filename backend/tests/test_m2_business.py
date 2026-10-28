@@ -42,6 +42,18 @@ def test_risk_questionnaire_is_deterministic_and_filters_products(database: Data
     assert all(item.risk_level <= "R2" for item in products)
 
 
+def test_expired_risk_profile_cannot_recommend_or_subscribe(database: Database) -> None:
+    service = RiskService(database)
+    service.submit("user_001", [1] * 10)
+    from agentbank.db import RiskProfile
+    with database.sessions.begin() as session:
+        profile = session.get(RiskProfile, "user_001")
+        assert profile is not None
+        profile.expires_on = "2020-01-01"
+    with pytest.raises(DomainError, match="RISK_PROFILE_EXPIRED"):
+        service.recommend("user_001")
+
+
 def test_card_protection_state_transitions(database: Database) -> None:
     cards = CardService(database)
     card_id = cards.freeze("user_001")

@@ -7,7 +7,7 @@ from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agentbank.clock import BusinessClock
+from agentbank.clock import BusinessClock, business_date
 from agentbank.db import Account, Card, Database, Event, Mandate, Payee, Product, Reservation, RiskProfile, Subscription
 from agentbank.errors import AmbiguousRecipient, DomainError
 
@@ -78,6 +78,8 @@ class RiskService:
             profile = session.get(RiskProfile, user_id)
             if profile is None:
                 raise DomainError("RISK_PROFILE_REQUIRED")
+            if profile.expires_on < business_date():
+                raise DomainError("RISK_PROFILE_EXPIRED")
             max_level = int(profile.level[1:])
             return list(session.scalars(select(Product).where(Product.risk_level <= f"R{max_level}")).all())
 

@@ -1,8 +1,11 @@
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from agentbank.api.app import create_app
 from agentbank.db import Database, Operation
+from agentbank.db import CoolingPeriod
+from agentbank.clock import utc_now_naive
 from agentbank.seed.loader import load_seed
 from agentbank.workflow.recovery import UnknownRecoveryService
 
@@ -57,5 +60,9 @@ def test_cooling_release_api_requires_reconfirmation(tmp_path: Path) -> None:
     cooling_id = confirmed.json()["operation_id"]
     blocked = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": False})
     assert blocked.status_code == 400
+    with app.state.database.sessions.begin() as session:
+        cooling = session.get(CoolingPeriod, cooling_id)
+        assert cooling is not None
+        cooling.expires_at = utc_now_naive() - timedelta(seconds=1)
     released = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": True})
     assert released.status_code == 200

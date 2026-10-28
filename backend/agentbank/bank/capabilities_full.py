@@ -13,7 +13,7 @@ from agentbank.audit.store import PersistentAudit
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
-from agentbank.clock import BusinessClock
+from agentbank.clock import BusinessClock, business_date
 from agentbank.contracts import CapabilityResult
 from agentbank.db import Account, Card, CapabilityRecord, Database, Product, Reservation, Transaction
 from agentbank.errors import DomainError
@@ -409,7 +409,7 @@ class CapabilityService:
         from agentbank.db import RiskProfile
         with self.database.sessions() as session:
             profile = session.get(RiskProfile, user_id)
-            return profile is not None and int(product_risk[1:]) <= int(profile.level[1:])
+            return profile is not None and profile.expires_on >= business_date() and int(product_risk[1:]) <= int(profile.level[1:])
 
     @staticmethod
     def _product_data(product: Product) -> dict[str, Any]:
