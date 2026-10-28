@@ -70,6 +70,13 @@ def test_investment_debit_card_restriction_and_scheduler_have_business_state(ser
     assert service.dispatch_due("user_001") == []
 
 
+def test_scheduled_transfer_dispatch_writes_ledger_and_rechecks_daily_limit(service: CapabilityService) -> None:
+    service.execute("user_001", "T04", {"recipient_name": "房东", "amount_minor": 1_000, "max_uses": 1}, "schedule-ledger")
+    result = service.dispatch_due("user_001")
+    assert result[0].data["operation_id"]
+    assert service._account("user_001").available_minor == 499_000
+
+
 def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) -> None:
     prepared = service.execute("user_001", "T01", {"recipient_name": "房东", "amount_minor": 1_000}, "state-T01")
     assert prepared.status == "prepared"
@@ -77,6 +84,19 @@ def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) ->
     assert pending.status == "partially_completed"
     finished = service.execute("user_001", "X05", {"card_id": "card_001", "mfa_verified": True}, "state-X05-mfa")
     assert finished.status == "succeeded"
+
+
+def test_physical_card_and_reserved_funds_can_progress_and_release(service: CapabilityService) -> None:
+    physical = service.execute("user_001", "C01", {"virtual": False, "assurance": "mfa"}, "physical-card")
+    assert physical.data["status"] == "pending"
+    progressed = service.advance_business_state("user_001")
+    assert any(item.record_id == physical.record_id and item.data["status"] == "active" for item in progressed)
+    before = service._account("user_001").available_minor
+    reserved = service.execute("user_001", "X02", {"amount_minor": 10_000}, "release-reservation")
+    assert service._account("user_001").available_minor == before - 10_000
+    released = service.release_reservation("user_001", reserved.record_id)
+    assert released.data["status"] == "released"
+    assert service._account("user_001").available_minor == before
 
 
 def test_phone_and_alias_transfers_can_be_confirmed_into_ledger(service: CapabilityService) -> None:

@@ -15,7 +15,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityResult
-from agentbank.db import Account, Card, CapabilityRecord, Database, Product, Transaction
+from agentbank.db import Account, Card, CapabilityRecord, Database, Product, Reservation, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.tools import CAPABILITIES
@@ -73,6 +73,32 @@ class CapabilityService:
                 raise DomainError("NOT_OWNER")
             return self._result(record)
 
+    def release_reservation(self, user_id: str, record_id: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id or record.capability_id != "X02":
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+        with self.database.sessions.begin() as session:
+            reservation = session.get(Reservation, str(data["reservation_id"]))
+            if reservation is None or reservation.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if reservation.status == "active":
+                account = session.get(Account, reservation.account_id)
+                if account is None:
+                    raise DomainError("ACCOUNT_NOT_FOUND")
+                account.available_minor += reservation.amount_minor
+                reservation.status = "released"
+            data["status"] = "released"
+            record = session.get(CapabilityRecord, record_id)
+            if record is None:
+                raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
+            record.status = "released"
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record_id}", user_id, "funds.reservation.released",
+                              {"record_id": record_id, "reservation_id": reservation.id})
+            return self._result(record)
+
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:
             record = session.get(CapabilityRecord, record_id)
@@ -128,8 +154,12 @@ class CapabilityService:
                     "assurance": prepared.assurance.value, "display": prepared.display}, "prepared"
         if capability_id == "T04":
             period = str(payload.get("period", "monthly"))
-            return {"schedule_id": f"schedule_{uuid.uuid4().hex}", "period": period, "next_due": payload.get("next_due", self.clock.business_date()),
-                    "max_uses": int(payload.get("max_uses", 1)), "operation_template": f"op_{idempotency_key}"}, "scheduled"
+            recipient_name = str(payload.get("recipient_name", "房东"))
+            recipient = RecipientResolver(self.database).by_name(user_id, recipient_name)
+            return {"schedule_id": f"schedule_{uuid.uuid4().hex}", "period": period,
+                    "next_due": payload.get("next_due", self.clock.business_date()),
+                    "max_uses": int(payload.get("max_uses", 1)), "amount_minor": int(payload.get("amount_minor", 1_000)),
+                    "recipient_id": recipient.id, "operation_template": f"op_{idempotency_key}"}, "scheduled"
         if capability_id == "T05":
             participants = [str(item) for item in payload.get("participant_ids", [user_id, "user_002", "user_003"])]
             return {"shares": split_bill(int(payload.get("total_minor", 10_000)), participants, user_id),
@@ -243,9 +273,10 @@ class CapabilityService:
             return {"card_id": card_id, "status": "lost", "payment_blocked": True}, "succeeded"
         if capability_id == "C01":
             card_id = f"card_{uuid.uuid4().hex[:12]}"
+            card_status = "active" if payload.get("virtual", True) else "pending"
             with self.database.sessions.begin() as session:
-                session.add(Card(id=card_id, user_id=user_id, status="active" if payload.get("virtual", True) else "pending"))
-            return {"card_id": card_id, "status": "active" if payload.get("virtual", True) else "pending", "card_type": "virtual" if payload.get("virtual", True) else "physical"}, "succeeded"
+                session.add(Card(id=card_id, user_id=user_id, status=card_status))
+            return {"card_id": card_id, "status": card_status, "card_type": "virtual" if payload.get("virtual", True) else "physical"}, "succeeded" if card_status == "active" else "pending"
         if capability_id == "C02":
             card_id = str(payload.get("card_id", "card_001"))
             with self.database.sessions.begin() as session:
@@ -293,30 +324,62 @@ class CapabilityService:
     def dispatch_due(self, user_id: str | None = None) -> list[CapabilityResult]:
         today = self.clock.business_date()
         changed: list[CapabilityRecord] = []
-        with self.database.sessions.begin() as session:
+        with self.database.sessions() as session:
             query = select(CapabilityRecord).where(CapabilityRecord.status == "scheduled",
                                                     CapabilityRecord.capability_id.in_(["T04", "X03", "X04"]))
             if user_id:
                 query = query.where(CapabilityRecord.user_id == user_id)
             records = list(session.scalars(query).all())
-            for record in records:
-                data = json.loads(record.data_json)
-                due = str(data.get("next_due") or data.get("delivery_date") or "9999-12-31")
-                if due > today:
+        for record in records:
+            data = json.loads(record.data_json)
+            due = str(data.get("next_due") or data.get("delivery_date") or "9999-12-31")
+            if due > today:
+                continue
+            status = "succeeded"
+            if record.capability_id == "T04":
+                try:
+                    transfer = TransferService(self.database).commit_scheduled(
+                        record.user_id, str(data["recipient_id"]), int(data["amount_minor"]),
+                        str(data["schedule_id"]), record.id, f"{record.id}-period-{int(data.get('dispatched_count', 0)) + 1}")
+                    data["operation_id"] = transfer.operation_id
+                    data["dispatched_count"] = int(data.get("dispatched_count", 0)) + 1
+                    data["max_uses"] = int(data.get("max_uses", 1)) - 1
+                    if data["max_uses"] > 0:
+                        data["next_due"] = (datetime.fromisoformat(due) + timedelta(days=30)).date().isoformat()
+                        status = "scheduled"
+                except DomainError as error:
+                    data["error_code"] = error.code
+                    status = "paused"
+            else:
+                data["operation_id"] = f"{record.id}-operation"
+                data["status"] = "succeeded"
+            with self.database.sessions.begin() as session:
+                current = session.get(CapabilityRecord, record.id)
+                if current is None:
                     continue
-                if record.capability_id == "T04" and int(data.get("max_uses", 1)) > 1:
-                    data["max_uses"] = int(data["max_uses"]) - 1
-                    operation_ids = list(data.get("operation_ids", []))
-                    operation_ids.append(f"{record.id}-period-{len(operation_ids) + 1}")
-                    data["operation_ids"] = operation_ids
-                    record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
-                    if data["max_uses"] <= 0:
-                        record.status = "succeeded"
-                else:
-                    data["operation_id"] = f"{record.id}-operation"
-                    data["status"] = "succeeded"
-                    record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
-                    record.status = "succeeded"
+                current.status = status
+                current.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                self.audit.append(session, f"trace_{record.id}", record.user_id, f"capability.{record.capability_id}.dispatched",
+                                  {"record_id": record.id, "status": status, "data": data})
+                session.flush()
+                changed.append(current)
+        return [self._result(record) for record in changed]
+
+    def advance_business_state(self, user_id: str | None = None) -> list[CapabilityResult]:
+        changed: list[CapabilityRecord] = []
+        with self.database.sessions.begin() as session:
+            query = select(CapabilityRecord).where(CapabilityRecord.status == "pending",
+                                                    CapabilityRecord.capability_id == "C01")
+            if user_id:
+                query = query.where(CapabilityRecord.user_id == user_id)
+            for record in session.scalars(query).all():
+                data = json.loads(record.data_json)
+                data["status"] = "active"
+                data["application_stage"] = "delivered"
+                record.status = "succeeded"
+                record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                self.audit.append(session, f"trace_{record.id}", record.user_id, "card.application.progressed",
+                                  {"record_id": record.id, "status": "active"})
                 changed.append(record)
         return [self._result(record) for record in changed]
 
