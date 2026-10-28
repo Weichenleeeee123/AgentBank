@@ -26,8 +26,13 @@ def test_every_declared_capability_has_a_business_result(service: CapabilityServ
     if capability_id == "W04":
         service.execute("user_001", "W03", {"answers": [1] * 10}, "setup-W03-W04")
     if capability_id == "C06":
-        service.execute("user_001", "C05", {"card_id": "card_001"}, "setup-C05-C06")
-    result = service.execute("user_001", capability_id, {"amount_minor": 1_000, "recipient_name": "房东"}, f"cap-{capability_id}-1")
+        service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, "setup-C05-C06")
+    payload = {"amount_minor": 1_000, "recipient_name": "房东"}
+    if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08", "X05"}:
+        payload["assurance"] = "mfa"
+    if capability_id == "C01":
+        payload["virtual"] = True
+    result = service.execute("user_001", capability_id, payload, f"cap-{capability_id}-1")
     assert result.capability_id == capability_id
     assert result.record_id
     assert result.status not in {"unimplemented", "stub"}
@@ -42,10 +47,18 @@ def test_capability_commands_are_idempotent_and_owner_bound(service: CapabilityS
         service.get("user_002", first.record_id)
 
 
+def test_red_capabilities_require_explicit_mfa(service: CapabilityService) -> None:
+    service.execute("user_001", "W03", {"answers": [2] * 10}, "mfa-setup")
+    with pytest.raises(DomainError, match="MFA_REQUIRED"):
+        service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1000}, "mfa-missing")
+    accepted = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1000, "assurance": "mfa"}, "mfa-present")
+    assert accepted.status == "succeeded"
+
+
 def test_investment_debit_card_restriction_and_scheduler_have_business_state(service: CapabilityService) -> None:
     before = service._account("user_001").available_minor
     service.execute("user_001", "W03", {"answers": [2] * 10}, "state-W03")
-    subscribed = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 10_000}, "state-W04")
+    subscribed = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 10_000, "assurance": "mfa"}, "state-W04")
     assert subscribed.data["funds_status"] == "debited"
     assert service._account("user_001").available_minor == before - 10_000
     restricted = service.execute("user_001", "C03", {"card_id": "card_001", "restriction": "online"}, "state-C03")

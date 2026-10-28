@@ -64,7 +64,7 @@ def _run_case(case: dict[str, Any]) -> bool:
         if capability_id == "W04":
             service.execute("user_001", "W03", {"answers": [2] * 10}, "eval-setup-W04")
         if capability_id == "C06":
-            service.execute("user_001", "C05", {"card_id": "card_001"}, f"eval-setup-C06-{case.get('variant')}")
+            service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, f"eval-setup-C06-{case.get('variant')}")
         try:
             result = service.execute("user_001", capability_id, payload, f"eval-{capability_id}-{case.get('variant')}")
         except Exception:
@@ -102,17 +102,20 @@ def _capability_payload(capability_id: str, variant: int) -> dict[str, Any]:
     if capability_id == "W03":
         return {"answers": [variant] * 10}
     if capability_id == "W04":
-        return {"product_id": "product_R1", "amount_minor": 1_000 * variant}
+        return {"product_id": "product_R1", "amount_minor": 1_000 * variant, "assurance": "mfa"}
     if capability_id == "W05":
-        return {"order_id": f"eval-order-{variant}"}
+        return {"order_id": f"eval-order-{variant}", "assurance": "mfa"}
     if capability_id in {"C01"}:
-        return {"virtual": variant != 2}
+        return {"virtual": variant != 2, **({"assurance": "mfa"} if variant == 2 else {})}
     if capability_id == "C02":
         return {"limit_minor": 100_000 - variant * 1_000}
     if capability_id in {"C03", "C04"}:
-        return {"restriction": "online"}
+        return {"restriction": "online", **({"assurance": "mfa"} if capability_id == "C04" else {})}
     if capability_id in {"C05", "C06", "C07", "C08"}:
-        return {"card_id": "card_001", **({"new_pin": f"{1234 + variant}"} if capability_id == "C08" else {})}
+        data: dict[str, Any] = {"card_id": "card_001", **({"new_pin": f"{1234 + variant}"} if capability_id == "C08" else {})}
+        if capability_id in {"C05", "C06", "C08"}:
+            data["assurance"] = "mfa"
+        return data
     if capability_id == "S02":
         return {"days": variant}
     if capability_id == "S03":

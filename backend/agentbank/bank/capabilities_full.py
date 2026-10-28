@@ -37,6 +37,9 @@ class CapabilityService:
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
             raise DomainError("CAPABILITY_NOT_REGISTERED")
+        if capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))):
+            if payload.get("assurance") != "mfa":
+                raise DomainError("MFA_REQUIRED")
         read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "S01", "X01"}
         protective = capability_id in {"C02", "C03", "C07", "X05"}
         if not read_only and not protective and self.breaker.is_locked(user_id):
