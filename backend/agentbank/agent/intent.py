@@ -51,7 +51,15 @@ class IntentParser:
         if any(word in normalized for word in ("对比产品", "产品对比")):
             return ParsedIntent("product_comparison", "W02", {}, [], [])
         if any(word in normalized for word in ("申购", "买理财")):
-            return ParsedIntent("investment_subscribe", "W04", {}, ["product_id", "amount_minor"], [])
+            slots: dict[str, Any] = {}
+            product = re.search(r"R[1-5]", normalized, re.IGNORECASE)
+            amount = self._amount.search(normalized)
+            if product:
+                slots["product_id"] = f"product_{product.group(0).upper()}"
+            if amount:
+                slots["amount_minor"] = parse_amount_minor(amount.group("amount"))
+            missing = [item for item in ("product_id", "amount_minor") if item not in slots]
+            return ParsedIntent("investment_subscribe", "W04", slots, missing, [])
         if any(word in normalized for word in ("赎回", "卖理财")):
             return ParsedIntent("investment_redeem", "W05", {}, ["order_id"], [])
         if any(word in normalized for word in ("转账", "转钱", "汇款", "打钱", "付款", "转")):
