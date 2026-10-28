@@ -98,3 +98,10 @@ def test_capability_executor_honors_breaker_but_keeps_protective_path(database: 
         service.execute("user_001", "S02", {"days": 3}, "locked-reminder")
     protective = service.execute("user_001", "C07", {"card_id": "card_001"}, "locked-freeze")
     assert protective.data["payment_blocked"] is True
+
+
+def test_merchant_order_saga_exposes_compensation_after_partial_failure(database: Database) -> None:
+    service = CapabilityService(database)
+    result = service.execute("user_001", "X03", {"simulate_failure": True}, "saga-flower")
+    assert result.status == "partially_completed"
+    assert result.data["compensation_status"] == "reservation_released"

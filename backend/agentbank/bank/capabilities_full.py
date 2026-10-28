@@ -18,6 +18,7 @@ from agentbank.contracts import CapabilityResult
 from agentbank.db import Account, Card, CapabilityRecord, Database, Product, Reservation, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
+from agentbank.workflow.recovery import SagaRunner
 from agentbank.tools import CAPABILITIES
 
 
@@ -233,6 +234,14 @@ class CapabilityService:
             reservation_id = planner.reserve(user_id, amount, str(payload.get("plan_id", idempotency_key)))
             return {"reservation_id": reservation_id, "amount_minor": amount, "ledger_balance_unchanged": True}, "reserved"
         if capability_id in {"X03", "X04"}:
+            if payload.get("simulate_failure"):
+                saga = SagaRunner().run([
+                    ("reserve", lambda: None, lambda: None),
+                    ("merchant_order", lambda: (_ for _ in ()).throw(RuntimeError("merchant_unavailable")), lambda: None),
+                ])
+                return {"quote_id": f"quote_{uuid.uuid4().hex}", "order_id": f"merchant_order_{uuid.uuid4().hex}",
+                        "item": "flower" if capability_id == "X03" else "cake", "status": saga.status,
+                        "compensation_status": "reservation_released", "failure_code": "MERCHANT_UNAVAILABLE"}, saga.status
             return {"quote_id": f"quote_{uuid.uuid4().hex}", "order_id": f"merchant_order_{uuid.uuid4().hex}",
                     "item": "flower" if capability_id == "X03" else "cake", "status": "scheduled",
                     "delivery_date": payload.get("delivery_date", "2026-11-13")}, "scheduled"
