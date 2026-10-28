@@ -29,6 +29,8 @@ uvicorn agentbank.api.run:app --reload
 
 通过 `POST /v1/sessions` 获取演示会话令牌，再调用余额、转账准备、确认和验证接口。模拟手机只通过配对后的设备令牌访问 `/device/v1/inbox`，不会复用 App 会话。
 
+渠道入口包括：PWA `/app/`、对话 API `/v1/conversations/{id}/messages`、签名 Web IM `/v1/im/webim/events` 和签名飞书适配器 `/v1/im/feishu/events`。飞书生产联调时设置 `AGENTBANK_FEISHU_SECRET`；没有租户凭证时使用 Web IM 或开发 secret 复现相同 Agent 流程。
+
 所有能力也可以通过统一入口调用：
 
 ```json

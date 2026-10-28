@@ -32,5 +32,6 @@ simulated bank ledger / orders / cards / subscriptions
 
 - `/v1/conversations/{id}/messages`：App/PWA 对话入口；
 - `/v1/im/webim/events`：签名和事件去重后的 Web IM 入口；
+- `/v1/im/feishu/events`：签名、事件去重和 Agent 路由的飞书适配器；
 - `/app/`：静态 PWA 壳，调用同一套 API；
 - `device/v1/inbox`：模拟手机 OTP 入口。
