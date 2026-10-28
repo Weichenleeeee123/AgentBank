@@ -4,7 +4,8 @@ import pytest
 
 from agentbank.analysis.dsl import DslExecutor
 from agentbank.analysis.insights import detect_anomalies, detect_subscriptions, monthly_report
-from agentbank.db import Database
+from agentbank.db import AuditLog, Database
+from sqlalchemy import select
 from agentbank.seed.loader import load_seed
 
 
@@ -27,6 +28,9 @@ def test_dsl_is_user_scoped_and_returns_traceable_transaction_ids(database: Data
     assert all(row["user_id"] == "user_001" for row in result.rows)
     assert result.query_hash.startswith("sha256:")
     assert all("txn_ids" in row for row in result.rows)
+    with database.sessions() as session:
+        event = session.scalar(select(AuditLog).where(AuditLog.event_type == "analysis.dsl.executed"))
+        assert event is not None
 
 
 def test_dsl_rejects_unknown_fields_and_large_limits(database: Database) -> None:

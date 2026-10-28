@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from agentbank.audit.store import PersistentAudit
 from agentbank.db import Database, Transaction
 
 ALLOWED_FIELDS = {"category", "merchant", "posted_at", "amount_minor", "direction"}
@@ -49,6 +50,10 @@ class DslExecutor:
         else:
             rows = [self._record_row(record) for record in records]
         rows = rows[:limit]
+        with self.database.sessions.begin() as session:
+            PersistentAudit(self.database).append(session, f"trace_dsl_{query_hash[7:19]}", user_id,
+                                                   "analysis.dsl.executed",
+                                                   {"query_hash": query_hash, "row_count": len(rows)})
         return DslResult(rows=rows, query_hash=query_hash, row_count=len(rows))
 
     def _matches(self, record: Transaction, filters: list[dict[str, Any]]) -> bool:

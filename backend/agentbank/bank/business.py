@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentbank.clock import BusinessClock
-from agentbank.db import Card, Database, Event, Mandate, Payee, Product, RiskProfile, Subscription
+from agentbank.db import Account, Card, Database, Event, Mandate, Payee, Product, Reservation, RiskProfile, Subscription
 from agentbank.errors import AmbiguousRecipient, DomainError
 
 
@@ -189,3 +189,29 @@ class BirthdayPlanner:
         with self.database.sessions() as session:
             events = list(session.scalars(select(Event).where(Event.user_id == user_id, Event.event_type == "birthday")).all())
         return [{"event_id": event.id, "title": event.title, "event_date": event.event_date} for event in events]
+
+    def reserve(self, user_id: str, amount_minor: int, plan_id: str) -> str:
+        if amount_minor <= 0:
+            raise DomainError("INVALID_AMOUNT")
+        with self.database.sessions.begin() as session:
+            account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+            if account is None or account.available_minor < amount_minor:
+                raise DomainError("INSUFFICIENT_FUNDS")
+            account.available_minor -= amount_minor
+            reservation = Reservation(id=f"rsv_{uuid.uuid4().hex}", user_id=user_id, account_id=account.id,
+                                      amount_minor=amount_minor, status="active", plan_id=plan_id)
+            session.add(reservation)
+            return reservation.id
+
+    def release(self, user_id: str, reservation_id: str) -> None:
+        with self.database.sessions.begin() as session:
+            reservation = session.get(Reservation, reservation_id)
+            if reservation is None or reservation.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if reservation.status != "active":
+                return
+            account = session.get(Account, reservation.account_id)
+            if account is None:
+                raise DomainError("ACCOUNT_NOT_FOUND")
+            account.available_minor += reservation.amount_minor
+            reservation.status = "released"

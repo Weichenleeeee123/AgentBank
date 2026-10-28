@@ -69,6 +69,8 @@ def test_mandate_is_bounded_and_business_clock_drives_due_orders(database: Datab
     assert mandates.consume(mandate.id, 10_000) is False
     planner = BirthdayPlanner(database, clock, mandates)
     assert planner.discover("user_001")
+    reservation_id = planner.reserve("user_001", 5_000, "birthday-plan")
+    planner.release("user_001", reservation_id)
 
 
 def test_tool_registry_covers_all_declared_capabilities() -> None:
