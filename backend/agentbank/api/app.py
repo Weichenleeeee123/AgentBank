@@ -15,11 +15,13 @@ from sqlalchemy import select
 
 from agentbank.auth.devices import DeviceService
 from agentbank.bank.service import TransferService
+from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.analysis.dsl import DslExecutor
 from agentbank.bank.business import CardService, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
+from agentbank.contracts import CapabilityCommandRequest
 from agentbank.db import Database, Operation, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
@@ -77,11 +79,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
     database = Database(resolved_database_url)
     load_seed(database)
     transfer = TransferService(database)
+    capabilities = CapabilityService(database)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
     business_clock = BusinessClock()
     app = FastAPI(title="AgentBank", version="0.1.0")
     app.state.database = database
     app.state.transfer = transfer
+    app.state.capabilities = capabilities
     app.state.session_secret = secret
     app.state.business_clock = business_clock
     app.state.webim_events = set()
@@ -112,6 +116,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
         account = transfer.balance(user_id)
         return {"account_id": account.id, "available_minor": account.available_minor,
                 "ledger_balance_minor": account.ledger_balance_minor, "currency": "CNY"}
+
+    @app.post("/v1/capabilities/{capability_id}")
+    def execute_capability(capability_id: str, payload: CapabilityCommandRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        if payload.capability_id != capability_id:
+            raise DomainError("CAPABILITY_ID_MISMATCH")
+        result = capabilities.execute(user_id, capability_id, payload.payload, payload.idempotency_key)
+        return result.model_dump(mode="json")
+
+    @app.get("/v1/capability-records/{record_id}")
+    def get_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.get(user_id, record_id).model_dump(mode="json")
 
     @app.get("/v1/transactions")
     def get_transactions(user_id: str = Depends(current_user)) -> dict[str, Any]:

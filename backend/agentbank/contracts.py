@@ -82,6 +82,20 @@ class MandateRequest(Contract):
     expires_on: str
 
 
+class CapabilityCommandRequest(Contract):
+    capability_id: str = Field(pattern="^[QTBWCSX][0-9]{2}$")
+    payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=1, max_length=160)
+
+
+class CapabilityResult(Contract):
+    capability_id: str
+    record_id: str
+    status: str
+    data: dict[str, Any] = Field(default_factory=dict)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class OperationMetadata(Contract):
     operation_id: str
     idempotency_key: str
