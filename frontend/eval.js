@@ -1,0 +1,1 @@
+const form=document.getElementById('run');const result=document.getElementById('result');form.onsubmit=async event=>{event.preventDefault();result.textContent='运行中…';const response=await fetch('/admin/v1/self-test',{method:'POST',headers:{'X-Admin-Token':document.getElementById('token').value}});const data=await response.json();result.textContent=JSON.stringify(data,null,2)};
