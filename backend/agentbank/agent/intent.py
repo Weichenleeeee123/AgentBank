@@ -27,7 +27,15 @@ class IntentParser:
             return ParsedIntent("balance", "Q01", {}, [], [])
         if any(word in normalized for word in ("交易记录", "流水", "消费明细")):
             return ParsedIntent("transactions", "Q02", {}, [], [])
+        if any(word in normalized for word in ("异常交易", "可疑交易", "异常消费")):
+            return ParsedIntent("anomalies", "B02", {}, [], [])
         if any(word in normalized for word in ("生日", "纪念日")):
+            if any(word in normalized for word in ("鲜花", "花束")):
+                return ParsedIntent("birthday_flower", "X03", {}, [], [])
+            if any(word in normalized for word in ("蛋糕", "甜点")):
+                return ParsedIntent("birthday_cake", "X04", {}, [], [])
+            if any(word in normalized for word in ("预留", "锁定", "管住")):
+                return self._reserve(normalized)
             return ParsedIntent("birthday_discovery", "X01", {}, [], [])
         if any(word in normalized for word in ("风险测评", "风险评估", "投资风险")):
             return ParsedIntent("risk_assessment", "W03", {}, ["answers"], [])
@@ -37,34 +45,81 @@ class IntentParser:
             return ParsedIntent("monthly_report", "B03", {}, [], [])
         if any(word in normalized for word in ("年度账单", "年报")):
             return ParsedIntent("yearly_report", "B04", {}, [], [])
+        if any(word in normalized for word in ("收益", "持仓", "理财余额")):
+            return ParsedIntent("investment_positions", "W06", {}, [], [])
+        if any(word in normalized for word in ("预留", "锁定", "管住")):
+            return self._reserve(normalized)
+        if any(word in normalized for word in ("定时", "每月", "每周", "周期转账")):
+            transfer = self._transfer(normalized)
+            scheduled_slots = dict(transfer.slots)
+            if "alias" in scheduled_slots:
+                scheduled_slots["recipient_name"] = scheduled_slots.pop("alias")
+            return ParsedIntent("scheduled_transfer", "T04", {**scheduled_slots, "period": "monthly"},
+                                transfer.missing, transfer.ambiguities)
+        if any(word in normalized for word in ("AA", "分摊", "聚餐收款", "一起吃饭")):
+            amount = self._amount.search(normalized)
+            slots: dict[str, Any] = {}
+            missing: list[str] = []
+            if amount:
+                slots["total_minor"] = parse_amount_minor(amount.group("amount"))
+            else:
+                missing.append("total_minor")
+            slots["participant_ids"] = re.findall(r"user_[0-9]+", normalized)
+            if len(slots["participant_ids"]) < 2:
+                slots["participant_ids"] = ["user_001", "user_002", "user_003"]
+            return ParsedIntent("aa_collect", "T05", slots, missing, [])
         if any(word in normalized for word in ("订阅", "自动扣费", "会员")):
+            if any(word in normalized for word in ("提醒", "续费提醒", "到期通知")):
+                subscription_id = "sub_video" if "视频" in normalized else "sub_ai" if "AI" in normalized else "sub_video"
+                return ParsedIntent("subscription_reminder", "S02", {"subscription_id": subscription_id, "days": 3}, [], [])
             if any(word in normalized for word in ("取消", "不要了", "停止")):
                 subscription_id = "sub_video" if "视频" in normalized else "sub_ai" if "AI" in normalized else ""
                 return ParsedIntent("cancel_subscription", "S03", ({"subscription_id": subscription_id} if subscription_id else {}), ([] if subscription_id else ["subscription_id"]), [])
             return ParsedIntent("subscriptions", "S01", {}, [], [])
-        if any(word in normalized for word in ("冻结卡", "卡冻结", "卡丢了")):
+        if any(word in normalized for word in ("解挂", "解除挂失")):
+            return ParsedIntent("card_loss_release", "C06", {"card_id": "card_001", "assurance": "mfa"}, [], [])
+        if any(word in normalized for word in ("盗刷", "被盗刷", "挂失", "卡丢了")):
+            return ParsedIntent("card_loss", "X05", {"card_id": "card_001"}, [], [])
+        if any(word in normalized for word in ("申请卡", "申请一张卡", "虚拟卡", "实体卡")):
+            return ParsedIntent("card_apply", "C01", {"virtual": "实体" not in normalized}, [], [])
+        if any(word in normalized for word in ("提高额度", "调高额度", "降低额度", "调低额度", "额度")):
+            amount = self._amount.search(normalized)
+            limit_slots = {"limit_minor": parse_amount_minor(amount.group("amount"))} if amount else {}
+            return ParsedIntent("card_limit", "C02", {"card_id": "card_001", **limit_slots}, ["limit_minor"] if not limit_slots else [], [])
+        if any(word in normalized for word in ("限制网购", "限制交易", "禁止网购")):
+            return ParsedIntent("card_restriction_add", "C03", {"card_id": "card_001", "restriction": "online"}, [], [])
+        if any(word in normalized for word in ("解除限制", "解除网购", "取消网购限制")):
+            return ParsedIntent("card_restriction_remove", "C04", {"card_id": "card_001", "restriction": "online"}, [], [])
+        if any(word in normalized for word in ("修改密码", "修改PIN", "改密码", "银行卡密码")):
+            pin = re.search(r"(?<!\d)(\d{4})(?!\d)", normalized)
+            return ParsedIntent("pin_change", "C08", {"card_id": "card_001", "new_pin": pin.group(1) if pin else ""},
+                                [] if pin else ["new_pin"], [])
+        if any(word in normalized for word in ("冻结卡", "卡冻结")):
             return ParsedIntent("freeze_card", "C07", {}, [], [])
-        if any(word in normalized for word in ("挂失", "被盗刷")):
-            return ParsedIntent("card_loss", "C05", {}, ["card_id"], [])
         if any(word in normalized for word in ("推荐理财", "推荐产品")):
             return ParsedIntent("product_recommendation", "W01", {}, [], [])
         if any(word in normalized for word in ("对比产品", "产品对比")):
             return ParsedIntent("product_comparison", "W02", {}, [], [])
         if any(word in normalized for word in ("申购", "买理财")):
-            slots: dict[str, Any] = {}
+            subscribe_slots: dict[str, Any] = {}
             product = re.search(r"R[1-5]", normalized, re.IGNORECASE)
             amount = self._amount.search(normalized)
             if product:
-                slots["product_id"] = f"product_{product.group(0).upper()}"
+                subscribe_slots["product_id"] = f"product_{product.group(0).upper()}"
             if amount:
-                slots["amount_minor"] = parse_amount_minor(amount.group("amount"))
-            missing = [item for item in ("product_id", "amount_minor") if item not in slots]
-            return ParsedIntent("investment_subscribe", "W04", slots, missing, [])
+                subscribe_slots["amount_minor"] = parse_amount_minor(amount.group("amount"))
+            missing = [item for item in ("product_id", "amount_minor") if item not in subscribe_slots]
+            return ParsedIntent("investment_subscribe", "W04", subscribe_slots, missing, [])
         if any(word in normalized for word in ("赎回", "卖理财")):
             return ParsedIntent("investment_redeem", "W05", {}, ["order_id"], [])
         if any(word in normalized for word in ("转账", "转钱", "汇款", "打钱", "付款", "转")):
             return self._transfer(normalized)
         return ParsedIntent("unknown", None, {}, [], ["intent"])
+
+    def _reserve(self, text: str) -> ParsedIntent:
+        amount = self._amount.search(text)
+        slots = {"amount_minor": parse_amount_minor(amount.group("amount"))} if amount else {}
+        return ParsedIntent("funds_reserve", "X02", slots, [] if amount else ["amount_minor"], [])
 
     def _transfer(self, text: str) -> ParsedIntent:
         amount_match = self._amount.search(text)

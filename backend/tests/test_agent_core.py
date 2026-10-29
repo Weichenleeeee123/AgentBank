@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from agentbank.agent.orchestrator import AgentOrchestrator
+from agentbank.agent.intent import IntentParser
 from agentbank.db import Database
 from agentbank.seed.loader import load_seed
 
@@ -95,3 +96,41 @@ def test_pending_slots_survive_agent_recreation_without_assistant_text(tmp_path:
         assert state is not None
         assert state.pending_intent_json is None
         assert "assistant" not in state.recent_user_messages_json
+
+
+def test_intent_parser_routes_the_remaining_m2_capabilities() -> None:
+    parser = IntentParser()
+    cases = {
+        "每月给房东转100元": "T04",
+        "AA聚餐100元 user_002 user_003": "T05",
+        "看看异常交易": "B02",
+        "查看理财持仓收益": "W06",
+        "申请一张虚拟卡": "C01",
+        "把额度调低到900元": "C02",
+        "限制网购": "C03",
+        "解除网购限制": "C04",
+        "解除挂失": "C06",
+        "修改银行卡密码1234": "C08",
+        "提醒我视频会员续费": "S02",
+        "先预留1000元": "X02",
+        "生日订鲜花": "X03",
+        "生日订蛋糕": "X04",
+        "卡被盗刷了": "X05",
+    }
+    assert {parser.parse(text).capability_id for text in cases} == set(cases.values())
+    for text, capability_id in cases.items():
+        assert parser.parse(text).capability_id == capability_id
+
+
+def test_agent_executes_card_application_and_scheduled_transfer_routes(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    card = agent.handle("user_001", "card-route", "申请一张虚拟卡")
+    assert card.capability_id == "C01" and card.kind == "confirmation"
+    card_result = agent.confirm("user_001", card.record_id, card.display_hash, card.data["receipt_id"])
+    assert card_result.data["status"] == "active"
+
+    scheduled = agent.handle("user_001", "schedule-route", "每月给房东转100元")
+    assert scheduled.capability_id == "T04" and scheduled.kind == "confirmation"
+    scheduled_result = agent.confirm("user_001", scheduled.record_id, scheduled.display_hash,
+                                     scheduled.data["receipt_id"])
+    assert scheduled_result.data["schedule_id"]
