@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import hashlib
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 
 from agentbank.contracts import Plan, PlanNode
-from agentbank.db import Database, Event, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord
+from agentbank.db import Account, CapabilityRecord, Database, Event, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord, Reservation
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
@@ -23,24 +23,37 @@ class BusinessPlanService:
             "merchant.order.create": {"kind": "command"}, "funds.release": {"kind": "command"},
         }
 
-    def create_birthday_plan(self, user_id: str, event_id: str, reserve_minor: int) -> Plan:
+    def create_birthday_plan(self, user_id: str, event_id: str, reserve_minor: int,
+                             planned_event_date: str | None = None) -> Plan:
+        if reserve_minor <= 0:
+            raise DomainError("PLAN_AMOUNT_INVALID")
         with self.database.sessions() as session:
             event = session.get(Event, event_id)
             if event is None or event.user_id != user_id:
                 raise DomainError("EVENT_NOT_FOUND")
+            event_date = planned_event_date or event.event_date
+        try:
+            event_date = date.fromisoformat(event_date).isoformat()
+        except ValueError as error:
+            raise DomainError("EVENT_DATE_INVALID") from error
+        dispatch_on = (datetime.fromisoformat(event_date).date() - timedelta(days=2)).isoformat()
         plan_id = f"plan_{uuid.uuid4().hex}"
         nodes = [
-            PlanNode(id="event", tool="events.lookup", args={"event_id": event_id}, idempotency_key=f"{plan_id}-event"),
+            PlanNode(id="event", tool="events.lookup", args={"event_id": event_id, "event_date": event_date},
+                     idempotency_key=f"{plan_id}-event"),
             PlanNode(id="reserve", tool="funds.reserve", args={"amount_minor": reserve_minor, "event_id": event_id},
                      depends_on=["event"], compensation="funds.release", idempotency_key=f"{plan_id}-reserve"),
-            PlanNode(id="flowers", tool="merchant.order.create", args={"item": "flower", "event_id": event_id},
+            PlanNode(id="flowers", tool="merchant.order.create", args={"item": "flower", "event_id": event_id,
+                     "delivery_date": event_date, "dispatch_on": dispatch_on},
                      depends_on=["reserve"], compensation="funds.release", idempotency_key=f"{plan_id}-flowers"),
-            PlanNode(id="cake", tool="merchant.order.create", args={"item": "cake", "event_id": event_id},
+            PlanNode(id="cake", tool="merchant.order.create", args={"item": "cake", "event_id": event_id,
+                     "delivery_date": event_date, "dispatch_on": dispatch_on},
                      depends_on=["reserve"], compensation="funds.release", idempotency_key=f"{plan_id}-cake"),
         ]
         PlanValidator(self.registry).validate([node.model_dump() for node in nodes])
         created = datetime.now(timezone.utc).replace(tzinfo=None)
-        display = [{"label": "活动", "value": event_id}, {"label": "资金预留（分）", "value": str(reserve_minor)},
+        display = [{"label": "活动", "value": event_id}, {"label": "活动日期", "value": event_date},
+                   {"label": "下单日期", "value": dispatch_on}, {"label": "资金预留（分）", "value": str(reserve_minor)},
                    {"label": "计划订单", "value": "鲜花、蛋糕"}]
         display_json = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         action_json = json.dumps([node.model_dump(mode="json") for node in sorted(nodes, key=lambda item: item.id)], ensure_ascii=False,
@@ -92,8 +105,16 @@ class BusinessPlanService:
                                                                        PlanNodeRecord.tool == "events.lookup"))
             if event_node is None:
                 raise DomainError("PLAN_INVALID")
-            event_id = json.loads(event_node.args_json)["args"]["event_id"]
+            event_args = json.loads(event_node.args_json)["args"]
+            event_id = event_args["event_id"]
+            event_date = str(changes.get("event_date", event_args.get("event_date", "")))
             reserve_minor = int(changes.get("reserve_minor", 100_000))
+        if reserve_minor <= 0:
+            raise DomainError("PLAN_AMOUNT_INVALID")
+        try:
+            event_date = date.fromisoformat(event_date).isoformat()
+        except ValueError as error:
+            raise DomainError("EVENT_DATE_INVALID") from error
         with self.database.sessions.begin() as session:
             current = session.get(PlanRecord, plan_id)
             if current is None:
@@ -102,12 +123,15 @@ class BusinessPlanService:
             from agentbank.db import ReceiptRecord
             for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id)).all():
                 receipt.status = "invalidated"
-        revised = self.create_birthday_plan(user_id, event_id, reserve_minor)
+        revised = self.create_birthday_plan(user_id, event_id, reserve_minor, event_date)
         with self.database.sessions.begin() as session:
             new_record = session.get(PlanRecord, revised.plan_id)
+            new_revision = (current.revision + 1) if current else 2
             if new_record is not None:
-                new_record.revision = current.revision + 1 if current else 2
-        return Plan(plan_id=revised.plan_id, revision=2, status=revised.status, user_id=user_id,
+                new_record.revision = new_revision
+                for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == revised.plan_id)).all():
+                    receipt.plan_revision = new_revision
+        return Plan(plan_id=revised.plan_id, revision=new_revision, status=revised.status, user_id=user_id,
                     nodes=revised.nodes, display=revised.display, created_at=revised.created_at)
 
     def execute_plan(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str) -> dict[str, Any]:
@@ -170,6 +194,13 @@ class BusinessPlanService:
             plan.status = "running"
         capabilities = CapabilityService(self.database)
         reservation_id: str | None = None
+        with self.database.sessions() as session:
+            reserve_record = session.scalar(select(CapabilityRecord).where(
+                CapabilityRecord.user_id == user_id,
+                CapabilityRecord.idempotency_key == f"{plan_id}-reserve",
+            ))
+            if reserve_record is not None:
+                reservation_id = str(json.loads(reserve_record.data_json).get("reservation_id", "")) or None
         results: list[dict[str, Any]] = []
         for record in records:
             data = json.loads(record.args_json)
@@ -194,7 +225,10 @@ class BusinessPlanService:
                     status, result_data = result.status, result.data
                 else:
                     capability_id = "X03" if data["args"]["item"] == "flower" else "X04"
-                    result = capabilities.execute(user_id, capability_id, {"delivery_date": "2026-11-13", "reservation_id": reservation_id}, f"{plan_id}-{data['id']}")
+                    result = capabilities.execute(user_id, capability_id,
+                                                   {"delivery_date": data["args"]["delivery_date"],
+                                                    "dispatch_on": data["args"]["dispatch_on"],
+                                                    "reservation_id": reservation_id}, f"{plan_id}-{data['id']}")
                     status, result_data = result.status, result.data
             except DomainError as error:
                 status, result_data = "failed", {"error_code": error.code}
@@ -208,13 +242,23 @@ class BusinessPlanService:
             results.append({"node_id": data["id"], "status": status, "data": result_data})
             if status not in {"succeeded", "scheduled", "reserved"}:
                 break
+            with self.database.sessions() as session:
+                current_plan = session.get(PlanRecord, plan_id)
+                if current_plan is None or current_plan.status != "running":
+                    break
         with self.database.sessions() as session:
             current_nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
             node_statuses = [node.status for node in current_nodes]
-        final_status = "succeeded" if all(status in {"succeeded", "scheduled", "reserved"} for status in node_statuses) else "partially_completed"
+        with self.database.sessions() as session:
+            current_plan = session.get(PlanRecord, plan_id)
+            interrupted_status = current_plan.status if current_plan and current_plan.status in {"paused", "cancelled"} else None
+        final_status = interrupted_status or (
+            "succeeded" if all(status in {"succeeded", "scheduled", "reserved"} for status in node_statuses)
+            else "partially_completed"
+        )
         with self.database.sessions.begin() as session:
             plan = session.get(PlanRecord, plan_id)
-            if plan is not None:
+            if plan is not None and plan.status == "running":
                 plan.status = final_status
             receipt = session.get(ReceiptRecord, receipt_id)
             if receipt is not None and final_status == "succeeded":
@@ -225,7 +269,25 @@ class BusinessPlanService:
         return self._set_status(user_id, plan_id, "paused", {"awaiting_confirmation", "running"})
 
     def cancel(self, user_id: str, plan_id: str) -> dict[str, str]:
-        return self._set_status(user_id, plan_id, "cancelled", {"draft", "prepared", "awaiting_confirmation", "paused"})
+        with self.database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if plan.status not in {"draft", "prepared", "awaiting_confirmation", "paused"}:
+                raise DomainError("PLAN_STATE_INVALID")
+            reservations = session.scalars(select(Reservation).where(Reservation.user_id == user_id,
+                                                                       Reservation.plan_id == plan_id,
+                                                                       Reservation.status == "active")).all()
+            for reservation in reservations:
+                account = session.get(Account, reservation.account_id)
+                if account is None:
+                    raise DomainError("ACCOUNT_NOT_FOUND")
+                account.available_minor += reservation.amount_minor
+                reservation.status = "released"
+            for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id)).all():
+                receipt.status = "invalidated"
+            plan.status = "cancelled"
+            return {"plan_id": plan_id, "status": "cancelled"}
 
     def resume(self, user_id: str, plan_id: str) -> dict[str, str]:
         with self.database.sessions.begin() as session:

@@ -55,15 +55,15 @@ INPUT_FIELDS: dict[str, set[str]] = {
     "C08": {"card_id", "new_pin", "assurance", "device_token", "otp"},
     "S01": {"subscription_id"}, "S02": {"subscription_id", "days"}, "S03": {"subscription_id"},
     "X01": set(), "X02": {"amount_minor", "plan_id"},
-    "X03": {"delivery_date", "amount_minor", "reservation_id", "simulate_failure"},
-    "X04": {"delivery_date", "amount_minor", "reservation_id", "simulate_failure"},
+    "X03": {"delivery_date", "dispatch_on", "amount_minor", "reservation_id", "simulate_failure"},
+    "X04": {"delivery_date", "dispatch_on", "amount_minor", "reservation_id", "simulate_failure"},
     "X05": {"card_id", "assurance", "device_token", "otp"},
 }
 
 STRICT_INTEGER_FIELDS = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit"}
 STRING_FIELDS = {"recipient_name", "phone", "alias", "memo", "period", "next_due", "start_date", "end_date",
                  "start_month", "end_month", "year", "product_id", "order_id", "card_id", "restriction",
-                 "subscription_id", "bill_id", "plan_id", "delivery_date", "assurance", "device_token", "otp", "new_pin", "action"}
+                 "subscription_id", "bill_id", "plan_id", "delivery_date", "dispatch_on", "assurance", "device_token", "otp", "new_pin", "action"}
 
 
 def validate_capability_payload(capability_id: str, payload: dict[str, Any]) -> None:

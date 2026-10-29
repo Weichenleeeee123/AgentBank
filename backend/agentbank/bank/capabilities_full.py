@@ -17,7 +17,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date, utc_now_naive
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, Mandate, MerchantOrder, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -647,7 +647,8 @@ class CapabilityService:
                                           delivery_date=str(payload.get("delivery_date", "2026-11-13")), status="scheduled",
                                           reservation_id=payload.get("reservation_id")))
             return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "scheduled",
-                    "delivery_date": payload.get("delivery_date", "2026-11-13")}, "scheduled"
+                    "delivery_date": payload.get("delivery_date", "2026-11-13"),
+                    "dispatch_on": payload.get("dispatch_on", self.clock.business_date())}, "scheduled"
         if capability_id == "X05":
             card_id = str(payload.get("card_id", "card_001"))
             if payload.get("_mfa_verified"):
@@ -787,7 +788,7 @@ class CapabilityService:
             records = list(session.scalars(query).all())
         for record in records:
             data = json.loads(record.data_json)
-            due = str(data.get("next_due") or data.get("delivery_date") or "9999-12-31")
+            due = str(data.get("next_due") or data.get("dispatch_on") or data.get("delivery_date") or "9999-12-31")
             if due > today:
                 continue
             status = "succeeded"
@@ -826,27 +827,82 @@ class CapabilityService:
                     data["error_code"] = error.code
                     status = "paused"
             else:
-                data["operation_id"] = f"{record.id}-operation"
+                order_id = str(data.get("order_id", ""))
+                operation_id = f"op_merchant_{order_id}"
+                data["operation_id"] = operation_id
                 data["status"] = "succeeded"
                 with self.database.sessions.begin() as order_session:
-                    merchant = order_session.get(MerchantOrder, str(data.get("order_id", "")))
+                    merchant = order_session.get(MerchantOrder, order_id)
                     if merchant is not None:
+                        reservation = order_session.get(Reservation, merchant.reservation_id) if merchant.reservation_id else None
+                        account = order_session.get(Account, reservation.account_id) if reservation else order_session.scalar(
+                            select(Account).where(Account.user_id == record.user_id).order_by(Account.id)
+                        )
+                        operation = order_session.get(Operation, operation_id)
                         if merchant.status == "partially_completed":
                             merchant.status = "failed"
-                            if merchant.reservation_id:
-                                reservation = order_session.get(Reservation, merchant.reservation_id)
-                                if reservation is not None and reservation.status == "active":
-                                    account = order_session.get(Account, reservation.account_id)
-                                    if account is not None:
-                                        account.available_minor += reservation.amount_minor
-                                    reservation.status = "released"
                             data["status"] = "failed"
+                        elif operation is None:
+                            if account is None:
+                                raise DomainError("ACCOUNT_NOT_FOUND")
+                            if reservation is not None and (reservation.status != "active"
+                                                            or reservation.amount_minor < merchant.amount_minor):
+                                merchant.status = "failed"
+                                data["status"] = "failed"
+                                data["error_code"] = "RESERVATION_INSUFFICIENT"
+                            elif reservation is None and account.available_minor < merchant.amount_minor:
+                                merchant.status = "failed"
+                                data["status"] = "failed"
+                                data["error_code"] = "INSUFFICIENT_FUNDS"
+                            else:
+                                if reservation is None:
+                                    account.available_minor -= merchant.amount_minor
+                                else:
+                                    reservation.amount_minor -= merchant.amount_minor
+                                account.ledger_balance_minor -= merchant.amount_minor
+                                merchant.status = "delivered"
+                                order_session.add(Operation(
+                                    id=operation_id, user_id=record.user_id,
+                                    idempotency_key=f"merchant-{order_id}",
+                                    plan_id=reservation.plan_id if reservation else order_id,
+                                    node_id=record.id, status="succeeded", amount_minor=merchant.amount_minor,
+                                    recipient_id=f"merchant:{merchant.item}",
+                                ))
+                                order_session.add_all([
+                                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                                account_id=account.id, amount_minor=-merchant.amount_minor,
+                                                direction="debit"),
+                                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                                account_id=f"merchant_settlement:{merchant.item}",
+                                                amount_minor=merchant.amount_minor, direction="credit"),
+                                ])
+                                order_session.add(Transaction(
+                                    id=f"txn_{uuid.uuid4().hex}", user_id=record.user_id,
+                                    posted_at=self.clock.business_date(), amount_minor=merchant.amount_minor,
+                                    merchant="鲜花商户" if merchant.item == "flower" else "蛋糕商户",
+                                    category="礼品", direction="debit", memo=f"生日计划{merchant.item}订单",
+                                    account_id=account.id,
+                                ))
+                                data["status"] = "delivered"
                         else:
                             merchant.status = "delivered"
-                            if merchant.reservation_id:
-                                reservation = order_session.get(Reservation, merchant.reservation_id)
-                                if reservation is not None and reservation.status == "active":
+                            data["status"] = "delivered"
+                        if reservation is not None:
+                            order_session.flush()
+                            pending_orders = order_session.scalars(select(MerchantOrder).where(
+                                MerchantOrder.reservation_id == reservation.id,
+                                MerchantOrder.status.notin_(["delivered", "failed", "cancelled"]),
+                            )).all()
+                            if not pending_orders and reservation.status == "active":
+                                if reservation.amount_minor > 0 and account is not None:
+                                    account.available_minor += reservation.amount_minor
+                                    reservation.status = "released"
+                                else:
                                     reservation.status = "consumed"
+                            self.audit.append(order_session, f"trace_{operation_id}", record.user_id,
+                                              "merchant.order.settled",
+                                              {"order_id": order_id, "status": merchant.status,
+                                               "reservation_id": reservation.id})
             with self.database.sessions.begin() as session:
                 current = session.get(CapabilityRecord, record.id)
                 if current is None:
