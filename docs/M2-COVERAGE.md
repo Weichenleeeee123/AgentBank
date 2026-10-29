@@ -24,7 +24,9 @@
 - 33 项能力：`test_capability_matrix.py`、各集群不变量测试；
 - HTTP 端到端入口：`test_m2_api_matrix.py`、`test_m2_red_api_flow.py`（Q01-X05 逐项调用统一能力 API，包含红色 OTP 接续）；
 - 生日 DAG/mandate/计划图：`test_plan_orchestration.py`、`test_plan_execution.py`、`test_m2_qt_invariants.py`；
+- 计划状态机（pause/cancel/resume）和拓扑执行：`test_plan_orchestration.py`、`test_plan_execution.py`；
 - DSL 沙箱边界和用户隔离：`test_m2_gate.py`、`test_m2_analysis.py`；
-- Web IM 事件签名/去重/Agent 路由：`test_m2_gate.py`、`test_m2_api.py`；
+- Web IM 事件签名/去重/Agent 路由/卡片 nonce/群聊脱敏：`test_m2_gate.py`、`test_m2_api.py`、`test_webim_callbacks.py`；
+- 计划可视化和决策链：`test_m2_plan_ui.py`、`test_plan_orchestration.py`；
 - 保护性操作快速通道：`test_m3_security.py`、`test_m2_gate.py`；
 - 主动发现：`test_agent_core.py`、`test_m2_gate.py`。

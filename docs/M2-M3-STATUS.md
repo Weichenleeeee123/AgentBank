@@ -8,6 +8,8 @@ M2/M3 仍在开发中。已新增确定性 Agent 编排器：自然语言槽位�
 
 M2 六个业务集群（Q/T、B、W、C、S、X）已经分别补充业务不变量测试并标记在 `docs/M2-COVERAGE.md`；这表示业务层逐项验收已建立，不表示 M3 安全门禁或 M4 发布门禁已经通过。
 
+M2 方案级门禁已补齐：计划 pause/cancel/resume、依赖拓扑执行、receipt 节点消费、DSL 只读隔离、Web IM callback nonce、R 级 App deep link、群聊脱敏和计划图决策链均有代码与确定性测试。M3/M4 仍单独验收。
+
 ## M2 能力入口
 
 33 项能力全部由 `CapabilityService.execute(user_id, capability_id, payload, idempotency_key)` 处理，并通过 `POST /v1/capabilities/{capability_id}` 对外暴露。命令或查询都会生成 `CapabilityRecord`，结果包含 `record_id`、状态、业务数据和审计事件名。
