@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.db import Account, Database, LedgerEntry, Operation, ScheduledJob
+from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 
 
@@ -46,3 +49,9 @@ def test_t04_runs_two_periods_and_deduplicates_dispatch(tmp_path: Path) -> None:
         assert session.query(ScheduledJob).filter(ScheduledJob.schedule_id == scheduled.data["schedule_id"]).count() >= 2
         account = session.query(Account).filter(Account.user_id == "user_001").one()
         assert account.available_minor == 498_000
+
+
+def test_t04_does_not_silently_replace_unknown_recipient(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    with pytest.raises(DomainError, match="RECIPIENT_NOT_FOUND"):
+        service.execute("user_001", "T04", {"recipient_name": "不存在的人", "amount_minor": 1_000}, "qt-t04-unknown")

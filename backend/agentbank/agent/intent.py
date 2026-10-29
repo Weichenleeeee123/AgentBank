@@ -78,7 +78,9 @@ class IntentParser:
             return ParsedIntent("subscriptions", "S01", {}, [], [])
         if any(word in normalized for word in ("解挂", "解除挂失")):
             return ParsedIntent("card_loss_release", "C06", {"card_id": "card_001", "assurance": "mfa"}, [], [])
-        if any(word in normalized for word in ("盗刷", "被盗刷", "挂失", "卡丢了")):
+        if "挂失" in normalized and not any(word in normalized for word in ("盗刷", "被盗刷", "卡丢了")):
+            return ParsedIntent("card_loss_report", "C05", {"card_id": "card_001", "assurance": "mfa"}, [], [])
+        if any(word in normalized for word in ("盗刷", "被盗刷", "卡丢了")):
             return ParsedIntent("card_loss", "X05", {"card_id": "card_001"}, [], [])
         if any(word in normalized for word in ("申请卡", "申请一张卡", "虚拟卡", "实体卡")):
             return ParsedIntent("card_apply", "C01", {"virtual": "实体" not in normalized}, [], [])
@@ -94,11 +96,13 @@ class IntentParser:
             pin = re.search(r"(?<!\d)(\d{4})(?!\d)", normalized)
             return ParsedIntent("pin_change", "C08", {"card_id": "card_001", "new_pin": pin.group(1) if pin else ""},
                                 [] if pin else ["new_pin"], [])
+        if any(word in normalized for word in ("解冻", "解除冻结")):
+            return ParsedIntent("unfreeze_card", "C07", {"card_id": "card_001", "action": "unfreeze", "assurance": "mfa"}, [], [])
         if any(word in normalized for word in ("冻结卡", "卡冻结")):
-            return ParsedIntent("freeze_card", "C07", {}, [], [])
+            return ParsedIntent("freeze_card", "C07", {"card_id": "card_001"}, [], [])
         if any(word in normalized for word in ("推荐理财", "推荐产品")):
             return ParsedIntent("product_recommendation", "W01", {}, [], [])
-        if any(word in normalized for word in ("对比产品", "产品对比")):
+        if any(word in normalized for word in ("对比产品", "产品对比", "对比理财产品", "比较产品", "比较理财")):
             return ParsedIntent("product_comparison", "W02", {}, [], [])
         if any(word in normalized for word in ("申购", "买理财")):
             subscribe_slots: dict[str, Any] = {}
@@ -111,7 +115,9 @@ class IntentParser:
             missing = [item for item in ("product_id", "amount_minor") if item not in subscribe_slots]
             return ParsedIntent("investment_subscribe", "W04", subscribe_slots, missing, [])
         if any(word in normalized for word in ("赎回", "卖理财")):
-            return ParsedIntent("investment_redeem", "W05", {}, ["order_id"], [])
+            order_match = re.search(r"(?:订单|order[_-]?)\s*([A-Za-z0-9_-]+)", normalized, re.IGNORECASE)
+            order_id = f"order_{order_match.group(1)}" if order_match and order_match.group(1).isdigit() else (order_match.group(1) if order_match else "")
+            return ParsedIntent("investment_redeem", "W05", ({"order_id": order_id} if order_id else {}), ([] if order_id else ["order_id"]), [])
         if any(word in normalized for word in ("转账", "转钱", "汇款", "打钱", "付款", "转")):
             return self._transfer(normalized)
         return ParsedIntent("unknown", None, {}, [], ["intent"])
@@ -122,7 +128,10 @@ class IntentParser:
         return ParsedIntent("funds_reserve", "X02", slots, [] if amount else ["amount_minor"], [])
 
     def _transfer(self, text: str) -> ParsedIntent:
-        amount_match = self._amount.search(text)
+        # Remove a recognized phone number before scanning amounts. Otherwise the
+        # amount regex can consume the phone prefix and produce a huge transfer.
+        amount_text = self._phone.sub("", text)
+        amount_match = self._amount.search(amount_text)
         slots: dict[str, Any] = {}
         missing: list[str] = []
         if amount_match:

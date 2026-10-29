@@ -449,7 +449,15 @@ class CapabilityService:
                     "assurance": prepared.assurance.value, "display": prepared.display}, "prepared"
         if capability_id == "T04":
             period = str(payload.get("period", "monthly"))
-            recipient_id = str(payload.get("recipient_id", "payee_landlord"))
+            recipient_id_value = payload.get("recipient_id")
+            if recipient_id_value:
+                recipient_id = str(recipient_id_value)
+            else:
+                recipient_name = str(payload.get("recipient_name") or payload.get("alias") or "")
+                if recipient_name:
+                    recipient_id = RecipientResolver(self.database).by_name(user_id, recipient_name).id
+                else:
+                    recipient_id = "payee_landlord"
             with self.database.sessions() as lookup_session:
                 recipient = lookup_session.get(Payee, recipient_id)
             if recipient is None or recipient.owner_user_id != user_id:
@@ -592,16 +600,26 @@ class CapabilityService:
             return {"subscriptions": detect_subscriptions(self.database, user_id)}, "succeeded"
         if capability_id == "S02":
             subscription_id = str(payload.get("subscription_id", "sub_video"))
-            reminder_id = f"rem_{uuid.uuid4().hex}"
             with self.database.sessions.begin() as session:
                 subscription = session.get(__import__("agentbank.db", fromlist=["Subscription"]).Subscription, subscription_id)
                 if subscription is None or subscription.user_id != user_id:
                     raise DomainError("NOT_OWNER")
+                days = int(payload.get("days", 3))
+                existing = session.scalar(select(Reminder).where(
+                    Reminder.user_id == user_id,
+                    Reminder.subscription_id == subscription_id,
+                    Reminder.remind_before_days == days,
+                    Reminder.status == "scheduled",
+                ).order_by(Reminder.id))
+                if existing is not None:
+                    return {"reminder_id": existing.id, "subscription_id": subscription_id,
+                            "remind_before_days": days, "dedupe_key": existing.idempotency_key}, "scheduled"
+                reminder_id = f"rem_{uuid.uuid4().hex}"
                 session.add(Reminder(id=reminder_id, user_id=user_id, subscription_id=subscription_id,
-                                     remind_before_days=int(payload.get("days", 3)), status="scheduled",
+                                     remind_before_days=days, status="scheduled",
                                      idempotency_key=idempotency_key))
             return {"reminder_id": reminder_id, "subscription_id": subscription_id,
-                    "remind_before_days": int(payload.get("days", 3)), "dedupe_key": idempotency_key}, "scheduled"
+                    "remind_before_days": days, "dedupe_key": idempotency_key}, "scheduled"
         if capability_id == "S03":
             subscription_id = str(payload.get("subscription_id", "sub_video"))
             SubscriptionService(self.database).cancel(user_id, subscription_id)

@@ -122,6 +122,38 @@ def test_intent_parser_routes_the_remaining_m2_capabilities() -> None:
         assert parser.parse(text).capability_id == capability_id
 
 
+def test_intent_parser_normalizes_common_m2_phrasing_without_slot_corruption() -> None:
+    parser = IntentParser()
+
+    phone_transfer = parser.parse("给 13800000001 转 100 元")
+    assert phone_transfer.capability_id == "T02"
+    assert phone_transfer.slots["phone"] == "13800000001"
+    assert phone_transfer.slots["amount_minor"] == 10_000
+
+    comparison = parser.parse("对比理财产品")
+    assert comparison.capability_id == "W02"
+
+    loss_report = parser.parse("挂失我的卡")
+    assert loss_report.capability_id == "C05"
+
+    stolen_card = parser.parse("我的卡被盗刷了")
+    assert stolen_card.capability_id == "X05"
+
+    unfreeze = parser.parse("解冻我的卡")
+    assert unfreeze.capability_id == "C07"
+    assert unfreeze.slots["action"] == "unfreeze"
+
+    redemption = parser.parse("赎回订单 order_123")
+    assert redemption.capability_id == "W05"
+    assert redemption.slots["order_id"] == "order_123"
+    redemption_uuid = parser.parse("赎回订单 order_abc123")
+    assert redemption_uuid.slots["order_id"] == "order_abc123"
+
+    named_transfer = parser.parse("给张三转 100 元")
+    assert named_transfer.capability_id == "T01"
+    assert named_transfer.slots["recipient_name"] == "张三"
+
+
 def test_agent_executes_card_application_and_scheduled_transfer_routes(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     card = agent.handle("user_001", "card-route", "申请一张虚拟卡")
@@ -134,3 +166,19 @@ def test_agent_executes_card_application_and_scheduled_transfer_routes(tmp_path:
     scheduled_result = agent.confirm("user_001", scheduled.record_id, scheduled.display_hash,
                                      scheduled.data["receipt_id"])
     assert scheduled_result.data["schedule_id"]
+
+
+def test_agent_phone_transfer_and_product_comparison_reach_business_results(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    phone_transfer = agent.handle("user_001", "phone-transfer", "给 13800000001 转 100 元")
+    assert phone_transfer.kind == "confirmation"
+    assert phone_transfer.capability_id == "T02"
+    assert phone_transfer.data["display"]
+    completed = agent.confirm("user_001", phone_transfer.record_id, phone_transfer.display_hash)
+    assert completed.data["transfer_result"]["status"] == "succeeded"
+    assert completed.data["transfer_result"]["amount_minor"] == 10_000
+
+    comparison = agent.handle("user_001", "compare-products", "对比理财产品")
+    assert comparison.kind == "facts"
+    assert comparison.capability_id == "W02"
+    assert len(comparison.data["products"]) >= 2

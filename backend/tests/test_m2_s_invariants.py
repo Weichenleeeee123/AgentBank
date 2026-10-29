@@ -27,6 +27,15 @@ def test_s02_reminder_is_persisted_and_idempotent(tmp_path: Path) -> None:
         assert session.query(Reminder).filter(Reminder.id == first.data["reminder_id"]).count() == 1
 
 
+def test_s02_deduplicates_same_active_reminder_across_request_keys(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    first = service.execute("user_001", "S02", {"subscription_id": "sub_video", "days": 3}, "s02-first")
+    second = service.execute("user_001", "S02", {"subscription_id": "sub_video", "days": 3}, "s02-retry-with-new-key")
+    assert second.data["reminder_id"] == first.data["reminder_id"]
+    with service.database.sessions() as session:
+        assert session.query(Reminder).filter(Reminder.subscription_id == "sub_video", Reminder.status == "scheduled").count() == 1
+
+
 def test_s03_cancels_subscription_and_revokes_mandate(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.execute("user_001", "S03", {"subscription_id": "sub_video"}, "s03-cancel")
