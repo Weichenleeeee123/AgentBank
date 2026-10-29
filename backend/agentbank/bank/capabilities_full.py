@@ -591,6 +591,7 @@ class CapabilityService:
                 if investment_account is None or investment_account.available_minor < amount_minor:
                     raise DomainError("INSUFFICIENT_FUNDS")
                 investment_account.available_minor -= amount_minor
+                investment_account.ledger_balance_minor -= amount_minor
                 order_id = f"order_{uuid.uuid4().hex}"
                 shares_count = amount_minor // 100
                 session.add(InvestmentOrder(id=order_id, user_id=user_id, product_id=product_id, side="subscribe",
@@ -598,8 +599,19 @@ class CapabilityService:
                 session.add(Position(id=f"pos_{uuid.uuid4().hex}", user_id=user_id, product_id=product_id,
                                      shares=shares_count, cost_minor=amount_minor, market_value_minor=amount_minor,
                                      as_of=datetime.now(timezone.utc).replace(tzinfo=None)))
+                operation_id = f"op_invest_sub_{order_id}"
+                session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=idempotency_key,
+                                      plan_id=idempotency_key, node_id=order_id, status="succeeded",
+                                      amount_minor=amount_minor, recipient_id=f"investment:{product_id}"))
+                session.add_all([
+                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                account_id=investment_account.id, amount_minor=-amount_minor, direction="debit"),
+                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                account_id=f"investment:{product_id}", amount_minor=amount_minor, direction="credit"),
+                ])
             return {"order_id": order_id, "product_id": product_id, "status": "subscribed",
-                    "shares": shares_count, "amount_minor": amount_minor, "funds_status": "debited"}, "succeeded"
+                    "shares": shares_count, "amount_minor": amount_minor, "funds_status": "debited",
+                    "operation_id": operation_id}, "succeeded"
         if capability_id == "W05":
             order_id = str(payload.get("order_id", f"order_{uuid.uuid4().hex}"))
             expected = datetime.now(timezone.utc) + timedelta(days=2)
@@ -814,8 +826,24 @@ class CapabilityService:
             for order in orders:
                 order.status = "settled"
                 redemption_account = session.scalar(select(Account).where(Account.user_id == order.user_id).order_by(Account.id))
+                operation_id = f"op_invest_redeem_{order.id}"
+                existing_operation = session.get(Operation, operation_id)
                 if redemption_account is not None:
                     redemption_account.available_minor += order.amount_minor
+                    redemption_account.ledger_balance_minor += order.amount_minor
+                    if existing_operation is None:
+                        session.add(Operation(id=operation_id, user_id=order.user_id,
+                                              idempotency_key=operation_id, plan_id=order.id,
+                                              node_id=order.id, status="succeeded", amount_minor=order.amount_minor,
+                                              recipient_id=redemption_account.id))
+                        session.add_all([
+                            LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                        account_id=f"investment:{order.product_id}", amount_minor=-order.amount_minor,
+                                        direction="debit"),
+                            LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                        account_id=redemption_account.id, amount_minor=order.amount_minor,
+                                        direction="credit"),
+                        ])
                 position = session.scalar(select(Position).where(Position.user_id == order.user_id,
                                                                   Position.product_id == order.product_id))
                 if position is not None:
@@ -827,6 +855,7 @@ class CapabilityService:
                 if record is not None:
                     data = json.loads(record.data_json)
                     data["status"] = "settled"
+                    data["operation_id"] = operation_id
                     record.status = "succeeded"
                     record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
                     changed.append(record)
