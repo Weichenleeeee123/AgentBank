@@ -49,6 +49,19 @@ def test_s02_dispatches_one_due_notification_to_outbox(tmp_path: Path) -> None:
         assert session.query(OutboxEvent).filter(OutboxEvent.dedupe_key == first[0]["dedupe_key"]).count() == 1
 
 
+def test_s02_outbox_delivery_is_explicit_and_idempotent(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.execute("user_001", "S02", {"subscription_id": "sub_video", "days": 3}, "s02-delivery")
+    service.clock.advance_days(15)
+    due = service.dispatch_reminders("user_001")
+    first = service.deliver_reminders("user_001")
+    second = service.deliver_reminders("user_001")
+    assert first == due and second == []
+    with service.database.sessions() as session:
+        event = session.query(OutboxEvent).filter(OutboxEvent.dedupe_key == due[0]["dedupe_key"]).one()
+        assert event.status == "delivered"
+
+
 def test_s03_cancels_subscription_and_revokes_mandate(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     service.execute("user_001", "S03", {"subscription_id": "sub_video"}, "s03-cancel")

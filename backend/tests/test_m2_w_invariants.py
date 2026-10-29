@@ -44,6 +44,7 @@ def test_w04_suitability_and_w06_position_evidence(tmp_path: Path) -> None:
     positions = service.execute("user_001", "W06", {}, "w06-positions")
     assert positions.data["source"] == "simulated_bank"
     assert positions.data["as_of"] and positions.data["positions"]
+    assert positions.data["positions"][0]["order_ids"]
 
 
 def test_w05_processing_then_settled_restores_cash(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ from typing import Any, cast
 from sqlalchemy import select, update
 
 from agentbank.analysis.dsl import DslExecutor
-from agentbank.analysis.insights import detect_anomalies, detect_subscriptions, monthly_report
+from agentbank.analysis.insights import birthday_history_clues, detect_anomalies, detect_subscriptions, monthly_report
 from agentbank.audit.store import PersistentAudit
 from agentbank.auth.devices import DeviceService
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
@@ -337,6 +337,38 @@ class CapabilityService:
                               {"record_id": record_id, "reservation_id": reservation.id})
             return self._result(record)
 
+    def reject_card_application(self, user_id: str, record_id: str, reason: str) -> CapabilityResult:
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id or record.capability_id != "C01":
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+            if data.get("status") not in {"pending", "reviewing", "production"}:
+                raise DomainError("CARD_APPLICATION_STATE_INVALID")
+            card_id = str(data.get("card_id", ""))
+            card = session.get(Card, card_id)
+            application = session.scalar(select(CardApplication).where(CardApplication.card_id == card_id))
+            if card is not None:
+                card.status = "rejected"
+            if application is not None:
+                application.status = "rejected"
+            data.update({"status": "rejected", "application_stage": "rejected", "rejection_reason": reason})
+            record.status = "failed"
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record.id}", user_id, "card.application.rejected",
+                              {"record_id": record.id, "reason": reason})
+            return self._result(record)
+
+    def retry_card_application(self, user_id: str, record_id: str, idempotency_key: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id or record.capability_id != "C01":
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+            if data.get("status") != "rejected":
+                raise DomainError("CARD_APPLICATION_STATE_INVALID")
+        return self.execute(user_id, "C01", {"virtual": False, "assurance": "mfa"}, idempotency_key)
+
     def revoke_mandate(self, user_id: str, mandate_id: str) -> None:
         with self.database.sessions.begin() as session:
             mandate = session.get(Mandate, mandate_id)
@@ -393,6 +425,19 @@ class CapabilityService:
                 reminder.status = "sent"
                 sent.append({"reminder_id": reminder.id, "dedupe_key": dedupe_key, "status": "sent"})
         return sent
+
+    def deliver_reminders(self, user_id: str | None = None) -> list[dict[str, str]]:
+        delivered: list[dict[str, str]] = []
+        with self.database.sessions.begin() as session:
+            query = select(OutboxEvent).where(OutboxEvent.event_type == "subscription.reminder",
+                                              OutboxEvent.status == "pending")
+            if user_id:
+                query = query.where(OutboxEvent.user_id == user_id)
+            for event in session.scalars(query).all():
+                event.status = "delivered"
+                delivered.append({"reminder_id": json.loads(event.payload_json)["reminder_id"],
+                                  "dedupe_key": event.dedupe_key, "status": "sent"})
+        return delivered
 
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:
@@ -661,9 +706,14 @@ class CapabilityService:
         if capability_id == "W06":
             with self.database.sessions() as session:
                 positions = session.scalars(select(Position).where(Position.user_id == user_id)).all()
+                orders = session.scalars(select(InvestmentOrder).where(InvestmentOrder.user_id == user_id)).all()
+                order_ids_by_product: dict[str, list[str]] = {}
+                for order in orders:
+                    order_ids_by_product.setdefault(order.product_id, []).append(order.id)
             return {"positions": [{"product_id": position.product_id, "shares": position.shares,
                                     "cost_minor": position.cost_minor, "market_value_minor": position.market_value_minor,
-                                    "pnl_minor": position.market_value_minor - position.cost_minor} for position in positions],
+                                    "pnl_minor": position.market_value_minor - position.cost_minor,
+                                    "order_ids": order_ids_by_product.get(position.product_id, [])} for position in positions],
                     "source": "simulated_bank", "as_of": datetime.now(timezone.utc).isoformat()}, "succeeded"
         if capability_id.startswith("C"):
             return self._card(user_id, capability_id, payload)
@@ -706,7 +756,9 @@ class CapabilityService:
         if capability_id == "X01":
             with self.database.sessions() as session:
                 events = session.execute(select(__import__("agentbank.db", fromlist=["Event"]).Event).where(__import__("agentbank.db", fromlist=["Event"]).Event.user_id == user_id)).scalars().all()
-            return {"events": [{"event_id": event.id, "title": event.title, "event_date": event.event_date} for event in events], "recommendation_only": True}, "succeeded"
+            event_data = [{"event_id": event.id, "title": event.title, "event_date": event.event_date} for event in events]
+            clues = [clue for event in event_data for clue in birthday_history_clues(self.database, user_id, event["event_date"])]
+            return {"events": event_data, "history_clues": clues, "recommendation_only": True}, "succeeded"
         if capability_id == "X02":
             amount = int(payload.get("amount_minor", 100_000))
             planner = BirthdayPlanner(self.database, self.clock, MandateService(self.database, self.clock))
@@ -976,6 +1028,10 @@ class CapabilityService:
                                 merchant.status = "failed"
                                 data["status"] = "failed"
                                 data["error_code"] = "MANDATE_INVALID"
+                            elif int(data.get("amount_minor", merchant.amount_minor)) != merchant.amount_minor:
+                                merchant.status = "failed"
+                                data["status"] = "failed"
+                                data["error_code"] = "PRICE_CHANGED"
                             elif reservation is not None and (reservation.status != "active"
                                                             or reservation.amount_minor < merchant.amount_minor):
                                 merchant.status = "failed"

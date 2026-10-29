@@ -44,7 +44,7 @@ INPUT_FIELDS: dict[str, set[str]] = {
     "B01": {"dsl"}, "B02": set(), "B03": {"start_month", "end_month"}, "B04": {"year", "start_month", "end_month"},
     "W01": set(), "W02": {"product_ids"}, "W03": {"answers"},
     "W04": {"product_id", "amount_minor", "assurance", "device_token", "otp"},
-    "W05": {"order_id", "assurance", "device_token", "otp"}, "W06": set(),
+    "W05": {"order_id", "product_id", "assurance", "device_token", "otp"}, "W06": set(),
     "C01": {"virtual", "assurance", "device_token", "otp"},
     "C02": {"card_id", "limit_minor", "assurance", "device_token", "otp"},
     "C03": {"card_id", "restriction"},

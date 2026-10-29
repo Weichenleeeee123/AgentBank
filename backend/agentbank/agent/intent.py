@@ -118,7 +118,11 @@ class IntentParser:
         if any(word in normalized for word in ("赎回", "卖理财")):
             order_match = re.search(r"(?:订单|order[_-]?)\s*([A-Za-z0-9_-]+)", normalized, re.IGNORECASE)
             order_id = f"order_{order_match.group(1)}" if order_match and order_match.group(1).isdigit() else (order_match.group(1) if order_match else "")
-            return ParsedIntent("investment_redeem", "W05", ({"order_id": order_id} if order_id else {}), ([] if order_id else ["order_id"]), [])
+            product = re.search(r"R[1-5]", normalized, re.IGNORECASE)
+            slots = {"order_id": order_id} if order_id else {}
+            if product:
+                slots["product_id"] = f"product_{product.group(0).upper()}"
+            return ParsedIntent("investment_redeem", "W05", slots, ([] if order_id or product else ["order_id"]), [])
         if any(word in normalized for word in ("转账", "转钱", "汇款", "打钱", "付款", "转")):
             return self._transfer(normalized)
         return ParsedIntent("unknown", None, {}, [], ["intent"])

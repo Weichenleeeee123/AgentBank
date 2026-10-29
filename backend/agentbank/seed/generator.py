@@ -48,6 +48,10 @@ def generate_seed(seed: int = 20261028) -> dict[str, list[dict[str, object]]]:
                              "amount_minor": 1_990, "merchant": "AI 工具", "category": "订阅",
                              "direction": "debit", "memo": None})
     transactions.extend([
+        {"id": "txn_history_flower", "user_id": "user_001", "posted_at": "2025-11-13", "amount_minor": 12_800,
+         "merchant": "去年花店", "category": "礼品", "direction": "debit", "memo": "生日礼物"},
+        {"id": "txn_history_cake", "user_id": "user_001", "posted_at": "2025-11-14", "amount_minor": 8_800,
+         "merchant": "去年蛋糕店", "category": "礼品", "direction": "debit", "memo": "生日礼物"},
         {"id": "txn_dup_1", "user_id": "user_001", "posted_at": "2026-10-20T10:00:00", "amount_minor": 9_900,
          "merchant": "重复商户", "category": "购物", "direction": "debit", "memo": None},
         {"id": "txn_dup_2", "user_id": "user_001", "posted_at": "2026-10-20T10:02:00", "amount_minor": 9_900,

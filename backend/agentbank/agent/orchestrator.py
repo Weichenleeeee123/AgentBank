@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from sqlalchemy import select
 
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.contracts import CapabilityResult
@@ -44,11 +45,16 @@ class AgentOrchestrator:
         if parsed.capability_id == "C08" and parsed.slots.get("new_pin"):
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
                                  message="修改密码请在 App 的安全表单中输入，不要在聊天里发送密码。")
-        suggestion = self.llm.classify_intent(text, user_id=user_id, recent_user_messages=recent_messages)
         if parsed.capability_id is None:
             planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
-                                           context={"parsed_intent": suggestion.get("intent", "unknown")})
-            parsed = self._from_planner(planned) or self._apply_intent_hint(parsed, str(suggestion.get("intent", "unknown")))
+                                           context={"parsed_intent": parsed.intent})
+            planned_parsed = self._from_planner(planned)
+            if planned_parsed is not None:
+                parsed = planned_parsed
+            else:
+                suggestion = self.llm.classify_intent(text, user_id=user_id, recent_user_messages=recent_messages)
+                parsed = self._apply_intent_hint(ParsedIntent("unknown", None, {}, [], []),
+                                                 str(suggestion.get("intent", "unknown")))
         pending = self._load_pending(user_id, conversation_id)
         if parsed.capability_id is None and pending is not None:
             parsed = self._continue_pending(pending, text)
@@ -63,6 +69,18 @@ class AgentOrchestrator:
             missing = "、".join(labels.get(item, item) for item in parsed.missing)
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message=f"还需要补充：{missing}。")
+        if parsed.capability_id == "W05" and not parsed.slots.get("order_id") and parsed.slots.get("product_id"):
+            with self.database.sessions() as session:
+                from agentbank.db import InvestmentOrder
+                order = session.scalar(select(InvestmentOrder).where(InvestmentOrder.user_id == user_id,
+                                                                       InvestmentOrder.product_id == parsed.slots["product_id"],
+                                                                       InvestmentOrder.side == "subscribe",
+                                                                       InvestmentOrder.status == "subscribed").order_by(InvestmentOrder.created_at.desc()))
+            if order is None:
+                return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="W05",
+                                     message="没有找到可赎回的该理财持仓，请提供订单号。")
+            parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "order_id": order.id},
+                                  parsed.missing, parsed.ambiguities, parsed.references)
         key = "agent-" + hashlib.sha256(f"{conversation_id}:{text}".encode()).hexdigest()[:32]
         if parsed.capability_id in {"W04", "W05", "C02", "C04", "C05", "C06", "C07", "C08"}:
             parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "assurance": "mfa"}, parsed.missing, parsed.ambiguities)

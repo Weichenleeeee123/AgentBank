@@ -185,6 +185,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
         results = capabilities.dispatch_reminders((payload or {}).get("user_id"))
         return {"dispatched": results, "count": len(results)}
 
+    @app.post("/admin/v1/subscriptions/deliver-reminders")
+    def deliver_subscription_reminders(payload: dict[str, str] | None = None,
+                                       x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        results = capabilities.deliver_reminders((payload or {}).get("user_id"))
+        return {"delivered": results, "count": len(results)}
+
     @app.post("/v1/eval/runs")
     def create_eval_run(user_id: str = Depends(current_user)) -> dict[str, Any]:
         run_id = f"run_{secrets.token_urlsafe(12)}"
@@ -305,6 +314,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = capabilities.execute(user_id, "C07", {"card_id": card_id, "action": "unfreeze",
                                                          "assurance": "mfa"}, f"card-unfreeze-{secrets.token_urlsafe(10)}")
         return result.model_dump(mode="json")
+
+    @app.post("/v1/cards/applications/{record_id}/reject")
+    def reject_card_application(record_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.reject_card_application(user_id, record_id, payload.get("reason", "DOCUMENT_REVIEW")).model_dump(mode="json")
+
+    @app.post("/v1/cards/applications/{record_id}/retry")
+    def retry_card_application(record_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        key = str(payload.get("idempotency_key") or f"card-retry-{secrets.token_urlsafe(12)}")
+        return capabilities.retry_card_application(user_id, record_id, key).model_dump(mode="json")
 
     @app.post("/v1/aa/preview")
     def preview_aa(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -530,6 +548,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
             if callback_meta is None or callback_meta["user_id"] != callback_user:
                 raise DomainError("WEBIM_CALLBACK_INVALID")
             del app.state.webim_nonces[nonce]
+            if payload.get("action") == "confirm":
+                response = agent.confirm(callback_user, str(callback_meta["record_id"]),
+                                         str(payload.get("display_hash", callback_meta.get("display_hash", ""))),
+                                         str(payload.get("receipt_id", callback_meta.get("receipt_id", ""))))
+                return {"event_id": event_id, "type": response.kind, **response.model_dump()}
             return {"event_id": event_id, "type": "callback_ack", "status": "accepted", "record_id": callback_meta.get("record_id")}
         if not event_id or event_id in app.state.webim_events:
             raise DomainError("WEBIM_REPLAYED")
@@ -538,9 +561,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
         text = str(payload.get("text", ""))
         response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
-        if response.kind == "mfa":
+        if response.kind in {"confirmation", "mfa"}:
             nonce = secrets.token_urlsafe(16)
-            app.state.webim_nonces[nonce] = {"user_id": user_id, "record_id": response.record_id}
+            app.state.webim_nonces[nonce] = {"user_id": user_id, "record_id": response.record_id,
+                                             "display_hash": response.display_hash,
+                                             "receipt_id": response.data.get("receipt_id", "")}
             result["app_deep_link"] = f"/app/?record_id={response.record_id}&nonce={nonce}"
         if bool(payload.get("group", False)):
             result = {"event_id": event_id, "type": "generic_status", "message": "已处理，请前往私聊或 App 查看详情。"}

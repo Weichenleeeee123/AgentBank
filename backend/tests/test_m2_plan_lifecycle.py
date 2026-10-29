@@ -54,6 +54,18 @@ def test_repeated_plan_revisions_keep_receipts_and_returned_revision_in_sync(tmp
         assert {order.delivery_date for order in session.query(MerchantOrder).all()} == {"2027-03-01"}
 
 
+def test_plan_revision_invalidates_old_receipt_and_requires_new_confirmation(tmp_path: Path) -> None:
+    database, service = setup_plan(tmp_path)
+    original = service.create_birthday_plan("user_001", "event_birthday", 100_000)
+    with database.sessions() as session:
+        old_receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == original.plan_id).one()
+        old_hash = session.get(PlanRecord, original.plan_id).display_hash
+    revised = service.revise_birthday_plan("user_001", original.plan_id, {"reserve_minor": 90_000})
+    with pytest.raises(DomainError, match="RECEIPT_REPLAYED"):
+        service.execute_plan("user_001", original.plan_id, old_receipt.id, old_hash)
+    assert revised.revision == 2
+
+
 def test_pause_after_reservation_stops_orders_and_resume_reuses_reservation(tmp_path: Path, monkeypatch) -> None:
     database, service = setup_plan(tmp_path)
     plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)

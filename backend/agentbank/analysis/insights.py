@@ -69,6 +69,28 @@ def detect_subscriptions(database: Database, user_id: str) -> list[dict[str, Any
     return output
 
 
+def birthday_history_clues(database: Database, user_id: str, event_date: str) -> list[dict[str, Any]]:
+    target = date.fromisoformat(event_date)
+    records = _transactions(database, user_id)
+    groups: dict[str, list[str]] = defaultdict(list)
+    for record in records:
+        if record.direction != "debit":
+            continue
+        try:
+            posted = date.fromisoformat(record.posted_at[:10]).replace(year=target.year)
+        except ValueError:
+            continue
+        distance = abs((posted - target).days)
+        if distance > 7 and distance < 358:
+            continue
+        merchant = record.merchant.lower()
+        category = "flower" if "花" in merchant or "flower" in merchant else "cake" if "蛋糕" in merchant or "cake" in merchant else ""
+        if category:
+            groups[category].append(record.id)
+    return [{"category": category, "txn_ids": txn_ids, "source": "historical_transactions"}
+            for category, txn_ids in sorted(groups.items())]
+
+
 def detect_anomalies(database: Database, user_id: str) -> list[dict[str, Any]]:
     records = _transactions(database, user_id)
     output: list[dict[str, Any]] = []

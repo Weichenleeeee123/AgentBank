@@ -42,6 +42,18 @@ def test_c01_physical_application_exposes_review_and_production_stages(tmp_path:
     assert third[0].record_id == physical.record_id
 
 
+def test_c01_rejected_application_can_be_retried_as_new_application(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    physical = service.execute("user_001", "C01", {"virtual": False, "assurance": "mfa"}, "c01-reject")
+    service.advance_business_state("user_001")
+    rejected = service.reject_card_application("user_001", physical.record_id, "DOCUMENT_REVIEW")
+    assert rejected.data["status"] == "rejected"
+    retried = service.retry_card_application("user_001", physical.record_id, "c01-retry")
+    assert retried.data["status"] == "pending"
+    assert retried.data["application_stage"] == "application"
+    assert retried.record_id != physical.record_id
+
+
 def test_c02_limits_and_c03_c04_restrictions_affect_payment(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     lowered = service.execute("user_001", "C02", {"card_id": "card_001", "limit_minor": 90_000}, "c02-down")

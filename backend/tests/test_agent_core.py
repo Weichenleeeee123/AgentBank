@@ -212,6 +212,19 @@ def test_agent_completes_remaining_m2_slot_followups(tmp_path: Path) -> None:
     assert completed.kind == "confirmation" and completed.capability_id == "T04"
 
 
+def test_agent_can_select_only_redeemable_order_from_positions(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    from agentbank.bank.capabilities_full import CapabilityService
+    direct = CapabilityService(agent.database)
+    direct.execute("user_001", "W03", {"answers": [2] * 10}, "redeem-select-risk-direct")
+    direct.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000,
+                                         "assurance": "mfa"}, "redeem-select-buy-direct")
+    response = agent.handle("user_001", "redeem-select", "赎回R1理财")
+    assert response.kind == "confirmation"
+    assert response.capability_id == "W05"
+    assert response.data["payload"]["order_id"]
+
+
 def test_agent_uses_llm_planner_for_intent_outside_deterministic_parser(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'planner-agent.db'}")
     load_seed(database)
@@ -228,6 +241,23 @@ def test_agent_uses_llm_planner_for_intent_outside_deterministic_parser(tmp_path
     response = AgentOrchestrator(database, llm=gateway).handle("user_001", "llm-route", "提醒我续费")
     assert response.capability_id == "S02"
     assert response.kind == "confirmation"
+
+
+def test_agent_uses_planner_without_extra_classifier_call(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'single-plan-call.db'}")
+    load_seed(database)
+    roles: list[str] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        roles.append(role)
+        return {"intent": "subscription_reminder", "capability_id": "S02",
+                "slots": {"subscription_id": "sub_video", "days": 3},
+                "missing": [], "ambiguities": [], "suggested_next_action": "execute"}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    AgentOrchestrator(database, llm=gateway).handle("user_001", "single-plan-call", "提醒我续费")
+    assert roles == ["planner"]
 
 
 def test_agent_uses_llm_reply_role_for_structured_fact_response(tmp_path: Path) -> None:

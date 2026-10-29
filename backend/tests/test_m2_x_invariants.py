@@ -20,6 +20,15 @@ def test_x01_uses_trusted_event_and_does_not_spend(tmp_path: Path) -> None:
     assert service._account("user_001").available_minor == before
 
 
+def test_x01_surfaces_historical_gift_clues_without_spending(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    result = service.execute("user_001", "X01", {}, "x01-history")
+    assert result.data["recommendation_only"] is True
+    assert result.data["history_clues"]
+    assert {clue["category"] for clue in result.data["history_clues"]} >= {"flower", "cake"}
+    assert all(clue["txn_ids"] for clue in result.data["history_clues"])
+
+
 def test_x02_reserve_then_release_preserves_ledger_balance(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     before = service._account("user_001")
@@ -62,3 +71,18 @@ def test_x03_order_has_bounded_mandate_and_consumes_it_once(tmp_path: Path) -> N
     with service.database.sessions() as session:
         mandate = session.query(Mandate).filter(Mandate.plan_id == "x03-mandate").one()
         assert mandate.used_count == 1
+
+
+def test_x03_dispatch_rejects_changed_amount_after_prepare(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    order = service.execute("user_001", "X03", {"delivery_date": service.clock.business_date(),
+                                                 "dispatch_on": service.clock.business_date(),
+                                                 "amount_minor": 5_000}, "x03-price")
+    with service.database.sessions.begin() as session:
+        record = session.get(__import__("agentbank.db", fromlist=["CapabilityRecord"]).CapabilityRecord, order.record_id)
+        data = __import__("json").loads(record.data_json)
+        data["amount_minor"] = 8_000
+        record.data_json = __import__("json").dumps(data)
+    progressed = service.dispatch_due("user_001")
+    assert progressed[0].data["status"] == "failed"
+    assert progressed[0].data["error_code"] == "PRICE_CHANGED"
