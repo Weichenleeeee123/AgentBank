@@ -5,6 +5,7 @@ import pytest
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.db import Database
 from agentbank.seed.loader import load_seed
+from agentbank.evals.runner import CAPABILITY_IDS, run_cases
 
 
 CAP_CASES = {
@@ -60,3 +61,13 @@ def test_capability_has_three_business_state_cases(tmp_path: Path, capability_id
     result = service.execute("user_001", capability_id, dict(payload), f"cap-{capability_id}-{hash(str(payload))}")
     assert result.record_id and result.evidence["audit_event"]
     assert result.status not in {"stub", "unimplemented"}
+
+
+def test_capability_matrix_report_keeps_case_level_outcomes() -> None:
+    report = run_cases(Path(__file__).resolve().parents[2] / "evals")
+    cases = [item for item in report.cases if item.kind == "capability"]
+    assert report.total == 223
+    assert report.passed == 223
+    assert len(cases) == len(CAPABILITY_IDS) * 3
+    assert all(item.case_id.startswith("CAP-") for item in cases)
+    assert all(item.evidence.get("capability_id") in CAPABILITY_IDS for item in cases)

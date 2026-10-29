@@ -1,2 +1,89 @@
 case_id: CAP-M2-M3-MATRIX
 kind: capability_matrix
+version: m2-cap-acceptance-v2
+deterministic: true
+variants:
+  - variant: 1
+    journey: normal
+    runner_branch: strict_prepare_confirm_otp
+    evidence: persisted business terminal state plus capability audit event
+  - variant: 2
+    journey: colloquial
+    runner_branch: deterministic_agent_multiround
+    evidence: AgentOrchestrator conversation, confirmation/OTP, then persisted state
+  - variant: 3
+    journey: boundary
+    runner_branch: boundary_recovery
+    evidence: capability-specific denial, replay, dedupe, expiry, or compensation state
+special_case:
+  capability_id: C08
+  variant: 2
+  runner_branch: secure_form_direct_C08
+  reason: PIN is accepted only through the secure form and is redacted from conversation history.
+traceability:
+  - capability_id: Q01
+    terminal_evidence: account.available_minor, account.ledger_balance_minor, as_of
+  - capability_id: Q02
+    terminal_evidence: transactions.user_id scoped to user_001
+  - capability_id: T01
+    terminal_evidence: two balanced ledger entries and transfer operation_id
+  - capability_id: T02
+    terminal_evidence: masked payee plus balanced ledger entries
+  - capability_id: T03
+    terminal_evidence: alias resolved to payee plus balanced ledger entries
+  - capability_id: T04
+    terminal_evidence: two period-specific jobs, distinct operation IDs, duplicate dispatch deduped
+  - capability_id: T05
+    terminal_evidence: AA bill and cent-exact participant shares
+  - capability_id: B01
+    terminal_evidence: grouped rows with txn_ids
+  - capability_id: B02
+    terminal_evidence: every anomaly has txn_ids and reason_code
+  - capability_id: B03
+    terminal_evidence: monthly income, expense, transfer, missing fields
+  - capability_id: B04
+    terminal_evidence: twelve-month report and explicit missing months
+  - capability_id: W01
+    terminal_evidence: risk-bounded products with risk and fee fields
+  - capability_id: W02
+    terminal_evidence: objective product comparison fields
+  - capability_id: W03
+    terminal_evidence: persisted RiskProfile score, level, expires_on
+  - capability_id: W04
+    terminal_evidence: subscribed InvestmentOrder, Position shares, debit operation
+  - capability_id: W05
+    terminal_evidence: redeem order status processing and expected settlement
+  - capability_id: W06
+    terminal_evidence: position pnl with simulated_bank source and as_of
+  - capability_id: C01
+    terminal_evidence: Card and CardApplication both active after physical progression
+  - capability_id: C02
+    terminal_evidence: persisted card limit and over-limit payment rejection
+  - capability_id: C03
+    terminal_evidence: persisted restriction and payment blocked
+  - capability_id: C04
+    terminal_evidence: restriction removed and payment approved
+  - capability_id: C05
+    terminal_evidence: card lost and payment blocked
+  - capability_id: C06
+    terminal_evidence: card active and payment approved after release
+  - capability_id: C07
+    terminal_evidence: card frozen and payment blocked
+  - capability_id: C08
+    terminal_evidence: pin_changed with secret_persisted false
+  - capability_id: S01
+    terminal_evidence: confirmed and suspected subscriptions remain distinct
+  - capability_id: S02
+    terminal_evidence: persisted reminder with dedupe behavior
+  - capability_id: S03
+    terminal_evidence: subscription cancelled and debit mandate revoked
+  - capability_id: X01
+    terminal_evidence: trusted birthday event and recommendation_only true
+  - capability_id: X02
+    terminal_evidence: active reservation and unchanged ledger balance
+  - capability_id: X03
+    terminal_evidence: delivered flower MerchantOrder and settlement
+  - capability_id: X04
+    terminal_evidence: delivered cake MerchantOrder and settlement
+  - capability_id: X05
+    terminal_evidence: lost card and payment blocked after freeze/loss flow
