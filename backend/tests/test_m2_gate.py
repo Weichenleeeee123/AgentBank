@@ -14,6 +14,7 @@ from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.api.app import create_app
+from agentbank.evals.runner import run_cases
 
 
 def make_database(tmp_path: Path) -> Database:
@@ -73,3 +74,12 @@ def test_m2_plan_graph_is_visible_and_mandate_can_be_revoked(tmp_path: Path) -> 
     graph = BusinessPlanService(database).create_birthday_plan("user_001", "event_birthday", 100_000)
     visible = BusinessPlanService(database).graph(graph.plan_id, "user_001")
     assert len(visible["nodes"]) == 4 and all("authorization" in node for node in visible["nodes"])
+
+
+def test_capability_evaluation_matrix_asserts_business_results() -> None:
+    eval_dir = Path(__file__).resolve().parents[2] / "evals"
+    report = run_cases(eval_dir)
+
+    assert report.total == 223
+    assert report.passed == report.total
+    assert report.failed == 0

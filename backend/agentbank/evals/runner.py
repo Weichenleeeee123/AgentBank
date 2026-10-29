@@ -55,30 +55,105 @@ def _run_case(case: dict[str, Any]) -> bool:
         return assessment.level.value == case.get("expected_level")
     if case.get("kind") == "capability":
         from agentbank.bank.capabilities_full import CapabilityService
-        from agentbank.db import Database
+        from agentbank.db import (
+            AABill, Account, Card, Database, InvestmentOrder, LedgerEntry, MerchantOrder,
+            Position, Reminder, ScheduledJob, Subscription,
+        )
         from agentbank.seed.loader import load_seed
 
         database = Database("sqlite:///:memory:")
         load_seed(database)
-        service = CapabilityService(database)
+        service = CapabilityService(database, enforce_prepare=True)
         capability_id = str(case["capability_id"])
         payload = _capability_payload(capability_id, int(case.get("variant", 1)))
         if capability_id in {"W01", "W06"}:
-            service.execute("user_001", "W03", {"answers": [1] * 10}, f"eval-setup-{capability_id}")
+            _complete_capability(service, "user_001", "W03", {"answers": [1] * 10},
+                                 f"eval-setup-{capability_id}")
         if capability_id == "W04":
-            service.execute("user_001", "W03", {"answers": [2] * 10}, "eval-setup-W04")
+            _complete_capability(service, "user_001", "W03", {"answers": [2] * 10}, "eval-setup-W04")
         if capability_id == "W05":
-            service.execute("user_001", "W03", {"answers": [2] * 10}, f"eval-setup-W05-{case.get('variant')}")
-            order = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000,
-                                                         "assurance": "mfa"}, f"eval-setup-order-W05-{case.get('variant')}")
+            _complete_capability(service, "user_001", "W03", {"answers": [2] * 10},
+                                 f"eval-setup-W05-{case.get('variant')}")
+            order = _complete_capability(service, "user_001", "W04", {"product_id": "product_R1",
+                                         "amount_minor": 1_000, "assurance": "mfa"},
+                                         f"eval-setup-order-W05-{case.get('variant')}")
             payload["order_id"] = order.data["order_id"]
         if capability_id == "C06":
-            service.execute("user_001", "C05", {"card_id": "card_001", "assurance": "mfa"}, f"eval-setup-C06-{case.get('variant')}")
+            _complete_capability(service, "user_001", "C05", {"card_id": "card_001", "assurance": "mfa"},
+                                 f"eval-setup-C06-{case.get('variant')}")
         try:
-            result = service.execute("user_001", capability_id, payload, f"eval-{capability_id}-{case.get('variant')}")
+            result = _complete_capability(service, "user_001", capability_id, payload,
+                                          f"eval-{capability_id}-{case.get('variant')}")
         except Exception:
             return False
-        return bool(result.record_id and result.evidence.get("audit_event"))
+        if not result.record_id or not result.evidence.get("audit_event"):
+            return False
+        with database.sessions() as session:
+            account = session.query(Account).filter(Account.user_id == "user_001").one()
+            if capability_id == "Q01":
+                return result.data.get("available_minor") == account.available_minor and "as_of" in result.data
+            if capability_id == "Q02":
+                rows = result.data.get("transactions", [])
+                return len(rows) <= int(payload.get("limit", 100)) and all(row["user_id"] == "user_001" for row in rows)
+            if capability_id in {"T01", "T02", "T03"}:
+                operation_id = result.data.get("transfer_result", {}).get("operation_id")
+                entries = session.query(LedgerEntry).filter(LedgerEntry.operation_id == operation_id).all()
+                return bool(operation_id and entries and sum(entry.amount_minor for entry in entries) == 0)
+            if capability_id == "T04":
+                job = session.query(ScheduledJob).filter(ScheduledJob.schedule_id == result.data["schedule_id"]).one_or_none()
+                return job is not None and result.data.get("mandate_id") is not None
+            if capability_id == "T05":
+                if payload.get("action") in {"preview", "status"}:
+                    return bool(result.data.get("shares") is not None or result.data.get("status"))
+                bill = session.get(AABill, result.data.get("bill_id", ""))
+                if bill is None:
+                    return False
+                shares_total = sum(int(value) for value in result.data.get("shares", {}).values())
+                participant_count = int(result.data.get("participant_count", 0))
+                initiator_share = bill.total_minor - shares_total
+                return (participant_count >= 2 and initiator_share > 0
+                        and initiator_share <= (bill.total_minor + participant_count - 1) // participant_count)
+            if capability_id == "B01":
+                return bool(result.data.get("rows")) and all(row.get("txn_ids") for row in result.data["rows"])
+            if capability_id == "B02":
+                return all(item.get("txn_ids") and item.get("reason_code") for item in result.data.get("anomalies", []))
+            if capability_id in {"B03", "B04"}:
+                months = result.data.get("months", [])
+                return bool(months) and all({"income_minor", "expense_minor", "transfer_minor", "missing"} <= set(row) for row in months)
+            if capability_id in {"W01", "W02"}:
+                return bool(result.data.get("products"))
+            if capability_id == "W03":
+                return bool(result.data.get("level") and result.data.get("expires_on"))
+            if capability_id == "W04":
+                order = session.get(InvestmentOrder, result.data.get("order_id", ""))
+                position = session.query(Position).filter(Position.user_id == "user_001", Position.product_id == "product_R1").first()
+                return order is not None and order.status == "subscribed" and position is not None
+            if capability_id == "W05":
+                order = session.get(InvestmentOrder, result.data.get("order_id", ""))
+                return result.data.get("status") == "processing" and order is not None and order.side == "redeem"
+            if capability_id == "W06":
+                return "source" in result.data and "as_of" in result.data
+            if capability_id.startswith("C"):
+                card_id = result.data.get("card_id", payload.get("card_id", "card_001"))
+                card = session.get(Card, card_id)
+                return card is not None and card.user_id == "user_001" and bool(result.data.get("status") or result.data.get("limit_minor") is not None)
+            if capability_id == "S01":
+                return bool(result.data.get("subscriptions"))
+            if capability_id == "S02":
+                return session.get(Reminder, result.data.get("reminder_id", "")) is not None
+            if capability_id == "S03":
+                subscription = session.get(Subscription, "sub_video")
+                return subscription is not None and subscription.status == "cancelled"
+            if capability_id == "X01":
+                return result.data.get("recommendation_only") is True
+            if capability_id == "X02":
+                return account.available_minor < 500_000 and result.data.get("ledger_balance_unchanged") is True
+            if capability_id in {"X03", "X04"}:
+                order = session.get(MerchantOrder, result.data.get("order_id", ""))
+                return order is not None and order.item == ("flower" if capability_id == "X03" else "cake")
+            if capability_id == "X05":
+                return result.data.get("payment_blocked") is True
+        return False
     if case.get("kind") == "m3":
         from agentbank.bank.capabilities_full import CapabilityService
         from agentbank.db import Database
@@ -124,6 +199,17 @@ def _run_case(case: dict[str, Any]) -> bool:
             return UnknownRecoveryService(database).recover("op_m3").status == "processing"
         return False
     return str(case.get("expected", "pass")) == "pass"
+
+
+def _complete_capability(service: Any, user_id: str, capability_id: str,
+                         payload: dict[str, Any], idempotency_key: str) -> Any:
+    result = service.execute(user_id, capability_id, payload, idempotency_key)
+    if result.status != "awaiting_confirmation":
+        return result
+    if result.data.get("plan_id"):
+        return service.confirm_transfer(user_id, result.record_id, str(result.data["display_hash"]))
+    return service.confirm_capability(user_id, result.record_id, str(result.data["receipt_id"]),
+                                      str(result.data["action_hash"]), str(result.data["display_hash"]))
 
 
 CAPABILITY_IDS = [
