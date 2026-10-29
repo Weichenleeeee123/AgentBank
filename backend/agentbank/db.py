@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, event
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -440,6 +440,13 @@ class Database:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
+        if self.engine.dialect.name == "sqlite":
+            columns = {column["name"] for column in inspect(self.engine).get_columns("capability_records")}
+            if "request_hash" not in columns:
+                with self.engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE capability_records ADD COLUMN request_hash VARCHAR(128) NOT NULL DEFAULT ''"
+                    )
 
 
 def _configure_sqlite(dbapi_connection: Any, _connection_record: Any) -> None:
