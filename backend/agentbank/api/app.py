@@ -176,6 +176,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
         results = capabilities.progress_investments(payload.get("user_id"))
         return {"settled": [result.model_dump(mode="json") for result in results], "count": len(results)}
 
+    @app.post("/admin/v1/subscriptions/dispatch-reminders")
+    def dispatch_subscription_reminders(payload: dict[str, str] | None = None,
+                                        x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+        if not admin_token or x_admin_token != admin_token:
+            raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+        results = capabilities.dispatch_reminders((payload or {}).get("user_id"))
+        return {"dispatched": results, "count": len(results)}
+
     @app.post("/v1/eval/runs")
     def create_eval_run(user_id: str = Depends(current_user)) -> dict[str, Any]:
         run_id = f"run_{secrets.token_urlsafe(12)}"

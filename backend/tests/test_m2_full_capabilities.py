@@ -254,6 +254,8 @@ def test_physical_card_and_reserved_funds_can_progress_and_release(
         "user_001", "C01", {"virtual": False, "assurance": "mfa"}, "physical-card"
     )
     assert physical.data["status"] == "pending"
+    service.advance_business_state("user_001")
+    service.advance_business_state("user_001")
     progressed = service.advance_business_state("user_001")
     assert any(
         item.record_id == physical.record_id and item.data["status"] == "active"

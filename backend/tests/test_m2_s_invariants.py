@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.db import Database, DebitMandate, Reminder, Subscription
+from agentbank.db import Database, DebitMandate, OutboxEvent, Reminder, Subscription
 from agentbank.seed.loader import load_seed
 
 
@@ -34,6 +34,19 @@ def test_s02_deduplicates_same_active_reminder_across_request_keys(tmp_path: Pat
     assert second.data["reminder_id"] == first.data["reminder_id"]
     with service.database.sessions() as session:
         assert session.query(Reminder).filter(Reminder.subscription_id == "sub_video", Reminder.status == "scheduled").count() == 1
+
+
+def test_s02_dispatches_one_due_notification_to_outbox(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.execute("user_001", "S02", {"subscription_id": "sub_video", "days": 3}, "s02-due")
+    service.clock.advance_days(15)
+    first = service.dispatch_reminders("user_001")
+    second = service.dispatch_reminders("user_001")
+    assert len(first) == 1 and second == []
+    with service.database.sessions() as session:
+        reminder = session.query(Reminder).filter(Reminder.id == first[0]["reminder_id"]).one()
+        assert reminder.status == "sent"
+        assert session.query(OutboxEvent).filter(OutboxEvent.dedupe_key == first[0]["dedupe_key"]).count() == 1
 
 
 def test_s03_cancels_subscription_and_revokes_mandate(tmp_path: Path) -> None:

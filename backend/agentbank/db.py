@@ -265,6 +265,17 @@ class Reminder(Base):
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
 
 
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(120))
+    payload_json: Mapped[str] = mapped_column(Text)
+    dedupe_key: Mapped[str] = mapped_column(String(160), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class MerchantOrder(Base):
     __tablename__ = "merchant_orders"
     id: Mapped[str] = mapped_column(String(80), primary_key=True)

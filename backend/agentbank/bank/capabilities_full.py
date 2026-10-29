@@ -17,7 +17,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date, utc_now_naive
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -365,6 +365,34 @@ class CapabilityService:
                                "amount_minor": subscription.amount_minor})
             return {"subscription_id": subscription_id, "charged": True, "transaction_id": transaction_id,
                     "amount_minor": subscription.amount_minor}
+
+    def dispatch_reminders(self, user_id: str | None = None) -> list[dict[str, str]]:
+        today = date.fromisoformat(self.clock.business_date())
+        sent: list[dict[str, str]] = []
+        with self.database.sessions.begin() as session:
+            query = select(Reminder, Subscription).join(Subscription, Subscription.id == Reminder.subscription_id).where(
+                Reminder.status == "scheduled")
+            if user_id:
+                query = query.where(Reminder.user_id == user_id)
+            for reminder, subscription in session.execute(query).all():
+                charge_date = date.fromisoformat(subscription.next_charge_at[:10])
+                due_date = charge_date - timedelta(days=reminder.remind_before_days)
+                if today < due_date:
+                    continue
+                dedupe_key = f"reminder:{reminder.id}"
+                existing = session.scalar(select(OutboxEvent).where(OutboxEvent.dedupe_key == dedupe_key))
+                if existing is None:
+                    session.add(OutboxEvent(id=f"out_{uuid.uuid4().hex}", user_id=reminder.user_id,
+                                            event_type="subscription.reminder", dedupe_key=dedupe_key,
+                                            payload_json=json.dumps({"reminder_id": reminder.id,
+                                                                     "subscription_id": reminder.subscription_id,
+                                                                     "merchant": subscription.merchant,
+                                                                     "charge_date": subscription.next_charge_at},
+                                                                    ensure_ascii=False, sort_keys=True),
+                                            status="pending"))
+                reminder.status = "sent"
+                sent.append({"reminder_id": reminder.id, "dedupe_key": dedupe_key, "status": "sent"})
+        return sent
 
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:
@@ -766,12 +794,14 @@ class CapabilityService:
         if capability_id == "C01":
             card_id = f"card_{uuid.uuid4().hex[:12]}"
             card_status = "active" if payload.get("virtual", True) else "pending"
+            application_stage = "delivered" if payload.get("virtual", True) else "application"
             with self.database.sessions.begin() as session:
                 session.add(Card(id=card_id, user_id=user_id, status=card_status))
                 session.add(CardApplication(id=f"cardapp_{uuid.uuid4().hex}", card_id=card_id, user_id=user_id,
                                             card_type="virtual" if payload.get("virtual", True) else "physical",
                                             status=card_status))
-            return {"card_id": card_id, "status": card_status, "card_type": "virtual" if payload.get("virtual", True) else "physical"}, "succeeded" if card_status == "active" else "pending"
+            return {"card_id": card_id, "status": card_status, "application_stage": application_stage,
+                    "card_type": "virtual" if payload.get("virtual", True) else "physical"}, "succeeded" if card_status == "active" else "pending"
         if capability_id == "C02":
             card_id = str(payload.get("card_id", "card_001"))
             with self.database.sessions.begin() as session:
@@ -1026,12 +1056,26 @@ class CapabilityService:
                 query = query.where(CapabilityRecord.user_id == user_id)
             for record in session.scalars(query).all():
                 data = json.loads(record.data_json)
-                data["status"] = "active"
-                data["application_stage"] = "delivered"
-                record.status = "succeeded"
+                stage = str(data.get("application_stage", "application"))
+                next_state = {"application": ("reviewing", "review"),
+                              "review": ("production", "production"),
+                              "production": ("active", "delivered")}.get(stage)
+                if next_state is None:
+                    continue
+                card_status, application_stage = next_state
+                data["status"] = card_status
+                data["application_stage"] = application_stage
+                record.status = "succeeded" if card_status == "active" else "pending"
+                card_id = str(data.get("card_id", ""))
+                application = session.scalar(select(CardApplication).where(CardApplication.card_id == card_id))
+                card = session.get(Card, card_id)
+                if application is not None:
+                    application.status = card_status
+                if card is not None:
+                    card.status = card_status
                 record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
                 self.audit.append(session, f"trace_{record.id}", record.user_id, "card.application.progressed",
-                                  {"record_id": record.id, "status": "active"})
+                                  {"record_id": record.id, "status": card_status, "stage": application_stage})
                 changed.append(record)
         return [self._result(record) for record in changed]
 

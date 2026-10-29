@@ -22,8 +22,24 @@ def test_c01_application_virtual_and_physical_lifecycle(tmp_path: Path) -> None:
     assert physical.data["status"] == "pending"
     with service.database.sessions() as session:
         assert session.query(CardApplication).filter(CardApplication.card_id == physical.data["card_id"]).one().status == "pending"
+    first = service.advance_business_state("user_001")
+    second = service.advance_business_state("user_001")
     progressed = service.advance_business_state("user_001")
+    assert first[0].data["application_stage"] == "review"
+    assert second[0].data["application_stage"] == "production"
     assert any(item.record_id == physical.record_id and item.data["status"] == "active" for item in progressed)
+
+
+def test_c01_physical_application_exposes_review_and_production_stages(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    physical = service.execute("user_001", "C01", {"virtual": False, "assurance": "mfa"}, "c01-stages")
+    first = service.advance_business_state("user_001")
+    second = service.advance_business_state("user_001")
+    third = service.advance_business_state("user_001")
+    assert first[0].data["application_stage"] == "review"
+    assert second[0].data["application_stage"] == "production"
+    assert third[0].data["application_stage"] == "delivered"
+    assert third[0].record_id == physical.record_id
 
 
 def test_c02_limits_and_c03_c04_restrictions_affect_payment(tmp_path: Path) -> None:
