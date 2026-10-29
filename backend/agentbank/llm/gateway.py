@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from agentbank.audit.store import PersistentAudit
@@ -157,7 +158,8 @@ class LLMGateway:
             self._audit(user_id, "llm.call.skipped", {"role": role, "reason": "no_provider",
                                                        "prompt_version": prompt_version})
             return None
-        request = {"text": redact_text(user_text), "temperature": 0, "prompt_version": prompt_version, **payload}
+        request = {"text": redact_text(user_text), "temperature": 0, "prompt_version": prompt_version,
+                   "system_prompt": self._load_prompt(role), **payload}
         for config in (self.primary, self.backup):
             if config is None:
                 continue
@@ -178,6 +180,14 @@ class LLMGateway:
                                  "attempt": attempt + 1, "error_type": type(error).__name__})
         return None
 
+    @staticmethod
+    def _load_prompt(role: str) -> str:
+        prompt_path = Path(__file__).resolve().parents[1] / "agent" / "prompts" / f"{role}.md"
+        try:
+            return prompt_path.read_text(encoding="utf-8")
+        except OSError:
+            return "Return only structured JSON. The server remains authoritative."
+
     @classmethod
     def from_environment(cls, database: Database) -> LLMGateway:
         primary = _provider_from_environment("AGENTBANK_LLM_PRIMARY")
@@ -196,7 +206,7 @@ class LLMGateway:
         response = httpx.post(f"{config.base_url.rstrip('/')}/chat/completions", timeout=config.timeout_seconds,
                               headers={"Authorization": f"Bearer {config.api_key}"},
                               json={"model": config.model, "temperature": 0, "response_format": {"type": "json_object"},
-                                    "messages": [{"role": "system", "content": f"Return only JSON for task {role}."},
+                                    "messages": [{"role": "system", "content": str(payload.get("system_prompt", f"Return only JSON for task {role}."))},
                                                  {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]})
         response.raise_for_status()
         envelope = response.json()

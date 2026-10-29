@@ -146,3 +146,19 @@ def test_gateway_rejects_reply_fragments_that_invent_facts(tmp_path: Path) -> No
     result = gateway.render_reply("user_001", "Q01", "succeeded", {"available_minor": 500_000},
                                   [{"type": "fact", "label": "可用余额", "value_minor": 500_000, "currency": "CNY"}])
     assert result["source"] == "template_fallback"
+
+
+def test_gateway_sends_versioned_role_prompt_to_transport(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'prompt.db'}")
+    load_seed(database)
+    prompts: list[str] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        prompts.append(str(payload["system_prompt"]))
+        return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                "ambiguities": [], "suggested_next_action": "execute"}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    gateway.plan_intent("查余额", user_id="user_001")
+    assert prompts and "安全边界" in prompts[0]

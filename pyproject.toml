@@ -47,3 +47,6 @@ packages = ["agentbank"]
 
 [tool.setuptools.packages.find]
 where = ["backend"]
+
+[tool.setuptools.package-data]
+agentbank = ["agent/prompts/*.md"]
