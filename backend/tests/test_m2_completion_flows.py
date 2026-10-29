@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.db import Database
+from agentbank.db import Database, LedgerEntry, Operation
 from agentbank.seed.loader import load_seed
 
 
@@ -19,6 +19,12 @@ def test_aa_participant_confirms_and_bill_closes(tmp_path: Path) -> None:
     assert first.data["share_status"] == "paid"
     final = capability.execute("user_003", "T05", {"action": "pay_share", "bill_id": bill_id}, "aa-pay-u3")
     assert final.data["bill_status"] == "settled"
+    with capability.database.sessions() as session:
+        operations = session.query(Operation).filter(Operation.plan_id == bill_id).all()
+        assert len(operations) == 2
+        for operation in operations:
+            entries = session.query(LedgerEntry).filter(LedgerEntry.operation_id == operation.id).all()
+            assert len(entries) == 2 and sum(entry.amount_minor for entry in entries) == 0
 
 
 def test_subscription_charge_is_blocked_after_cancel(tmp_path: Path) -> None:

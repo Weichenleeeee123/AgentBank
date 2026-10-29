@@ -53,3 +53,16 @@ def test_w05_processing_then_settled_restores_cash(tmp_path: Path) -> None:
     settled = service.progress_investments("user_001")
     assert settled and settled[0].data["status"] == "settled"
     assert service._account("user_001").available_minor == before
+
+
+def test_w05_rejects_non_subscribed_order_and_insufficient_position(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    service.execute("user_001", "W03", {"answers": [2] * 10}, "w05-precondition-risk")
+    with pytest.raises(DomainError, match="ORDER_NOT_REDEEMABLE"):
+        service.execute("user_001", "W05", {"order_id": "missing", "assurance": "mfa"}, "w05-missing")
+    subscribed = service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa"}, "w05-precondition-subscribe")
+    with service.database.sessions.begin() as session:
+        position = session.query(Position).filter(Position.user_id == "user_001", Position.product_id == "product_R1").one()
+        position.shares = 0
+    with pytest.raises(DomainError, match="INSUFFICIENT_POSITION"):
+        service.execute("user_001", "W05", {"order_id": subscribed.data["order_id"], "assurance": "mfa"}, "w05-no-position")

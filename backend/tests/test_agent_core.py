@@ -182,3 +182,17 @@ def test_agent_phone_transfer_and_product_comparison_reach_business_results(tmp_
     assert comparison.kind == "facts"
     assert comparison.capability_id == "W02"
     assert len(comparison.data["products"]) >= 2
+
+
+def test_agent_never_accepts_or_persists_pin_in_chat(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'pin-chat.db'}")
+    load_seed(database)
+    agent = AgentOrchestrator(database)
+    response = agent.handle("user_001", "pin-chat", "修改银行卡密码 1234")
+    assert response.kind == "clarification"
+    assert "App" in response.message
+    from agentbank.db import ConversationState
+    with database.sessions() as session:
+        state = session.get(ConversationState, ("user_001", "pin-chat"))
+        assert state is not None
+        assert "1234" not in state.recent_user_messages_json

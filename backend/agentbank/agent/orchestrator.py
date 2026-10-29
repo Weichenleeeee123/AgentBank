@@ -40,6 +40,9 @@ class AgentOrchestrator:
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
         parsed = self.parser.parse(text)
+        if parsed.capability_id == "C08" and parsed.slots.get("new_pin"):
+            return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
+                                 message="修改密码请在 App 的安全表单中输入，不要在聊天里发送密码。")
         suggestion = self.llm.classify_intent(text, user_id=user_id, recent_user_messages=recent_messages)
         if parsed.capability_id is None:
             parsed = self._apply_intent_hint(parsed, str(suggestion.get("intent", "unknown")))
@@ -76,10 +79,13 @@ class AgentOrchestrator:
         return self._response(parsed, result)
 
     def _store_user_message(self, user_id: str, conversation_id: str, text: str) -> list[str]:
+        stored_text = text
+        if re.search(r"(?:PIN|密码|口令)", text, re.IGNORECASE):
+            stored_text = re.sub(r"(?<!\d)\d{4}(?!\d)", "[REDACTED]", text)
         with self.database.sessions.begin() as session:
             state = session.get(ConversationState, (user_id, conversation_id))
             messages = json.loads(state.recent_user_messages_json) if state is not None else []
-            messages.append(text)
+            messages.append(stored_text)
             messages = messages[-6:]
             if state is None:
                 state = ConversationState(user_id=user_id, conversation_id=conversation_id,

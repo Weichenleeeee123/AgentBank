@@ -79,7 +79,7 @@ class CapabilityService:
                 assurance = "mfa" if red else "confirm"
             record_id = f"cap_{uuid.uuid4().hex}"
             record_status = "awaiting_confirmation"
-            data = {"capability_id": capability_id, "payload": payload, "action_hash": action_digest,
+            data = {"capability_id": capability_id, "payload": self._safe_payload(capability_id, payload), "action_hash": action_digest,
                     "display_hash": display_digest, "assurance": assurance}
             if capability_id in {"T01", "T02", "T03"}:
                 data.update(prepared)
@@ -121,7 +121,7 @@ class CapabilityService:
             otp = payload.get("otp")
             if self.require_device_mfa and not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
                 record_id = f"cap_{uuid.uuid4().hex}"
-                pending_data = {"payload": payload, "assurance": "mfa", "challenge_record_id": record_id}
+                pending_data = {"payload": self._safe_payload(capability_id, payload), "assurance": "mfa", "challenge_record_id": record_id}
                 with self.database.sessions.begin() as session:
                     session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
                                                  status="awaiting_mfa", data_json=json.dumps(pending_data, ensure_ascii=False),
@@ -412,6 +412,15 @@ class CapabilityService:
                                 evidence={"audit_event": f"capability.{record.capability_id}.completed",
                                           "idempotency_key": record.idempotency_key})
 
+    @staticmethod
+    def _safe_payload(capability_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if capability_id != "C08":
+            return dict(payload)
+        safe = dict(payload)
+        if "new_pin" in safe:
+            safe["new_pin"] = "[REDACTED]"
+        return safe
+
     def _dispatch(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         if capability_id == "Q01":
             account = self._account(user_id)
@@ -507,13 +516,28 @@ class CapabilityService:
                     aa_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
                     if aa_account is None or aa_account.available_minor < share.amount_minor:
                         raise DomainError("INSUFFICIENT_FUNDS")
+                    operation_id = f"aaop_{bill_id}_{user_id}"
+                    existing_operation = session.get(Operation, operation_id)
+                    if existing_operation is not None:
+                        return {"bill_id": bill_id, "share_status": "paid", "bill_status": bill.status,
+                                "amount_minor": share.amount_minor, "operation_id": operation_id}, "succeeded"
                     aa_account.available_minor -= share.amount_minor
+                    aa_account.ledger_balance_minor -= share.amount_minor
                     share.status = "paid"
+                    session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=f"aa-pay-{bill_id}-{user_id}",
+                                          plan_id=bill_id, node_id=share.id, status="succeeded",
+                                          amount_minor=share.amount_minor, recipient_id=f"aa_bill:{bill_id}"))
+                    session.add_all([
+                        LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                    account_id=aa_account.id, amount_minor=-share.amount_minor, direction="debit"),
+                        LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
+                                    account_id=f"aa_bill:{bill_id}", amount_minor=share.amount_minor, direction="credit"),
+                    ])
                     unpaid = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id, AAShare.status != "paid"))
                     if unpaid is None:
                         bill.status = "settled"
                     return {"bill_id": bill_id, "share_status": share.status, "bill_status": bill.status,
-                            "amount_minor": share.amount_minor}, "succeeded"
+                            "amount_minor": share.amount_minor, "operation_id": operation_id}, "succeeded"
             participants = [str(item) for item in payload.get("participant_ids", [user_id, "user_002", "user_003"])]
             total_minor = int(payload.get("total_minor", 10_000))
             allocations = split_bill(total_minor, participants, user_id)
@@ -582,7 +606,14 @@ class CapabilityService:
             with self.database.sessions.begin() as session:
                 order = session.get(InvestmentOrder, order_id)
                 if order is None or order.user_id != user_id:
-                    raise DomainError("ORDER_NOT_FOUND")
+                    raise DomainError("ORDER_NOT_REDEEMABLE")
+                if order.side != "subscribe" or order.status != "subscribed":
+                    raise DomainError("ORDER_NOT_REDEEMABLE")
+                position = session.scalar(select(Position).where(Position.user_id == user_id,
+                                                                  Position.product_id == order.product_id,
+                                                                  Position.shares >= order.shares))
+                if position is None:
+                    raise DomainError("INSUFFICIENT_POSITION")
                 order.status = "processing"
                 order.side = "redeem"
                 order.expected_settlement_at = expected.replace(tzinfo=None)

@@ -52,3 +52,12 @@ def test_c05_c06_c07_state_guards_and_c08_secret_not_persisted(tmp_path: Path) -
         service.execute("user_001", "C07", {"card_id": "card_001", "action": "unfreeze"}, "c07-unfreeze-missing")
     pin = service.execute("user_001", "C08", {"card_id": "card_001", "new_pin": "1234", "assurance": "mfa"}, "c08-pin")
     assert "1234" not in str(pin.data)
+
+
+def test_c08_prepare_record_does_not_persist_pin(tmp_path: Path) -> None:
+    service = CapabilityService(make_service(tmp_path).database, require_device_mfa=True, enforce_prepare=True)
+    prepared = service.execute("user_001", "C08", {"card_id": "card_001", "new_pin": "1234", "assurance": "mfa"}, "c08-redacted")
+    with service.database.sessions() as session:
+        record = session.get(__import__("agentbank.db", fromlist=["CapabilityRecord"]).CapabilityRecord, prepared.record_id)
+        assert record is not None
+        assert "1234" not in record.data_json
