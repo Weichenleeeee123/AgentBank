@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import select, update
@@ -659,14 +659,20 @@ class CapabilityService:
                         "delivery_date": payload.get("delivery_date", self.clock.business_date()),
                         "reservation_id": payload.get("reservation_id"),
                         "compensation_status": "reservation_released", "failure_code": "MERCHANT_UNAVAILABLE"}, saga.status
+            delivery_date = str(payload.get("delivery_date", "2026-11-13"))
+            dispatch_on = str(payload.get("dispatch_on", self.clock.business_date()))
+            mandate_id = f"mdt_{uuid.uuid4().hex}"
             with self.database.sessions.begin() as session:
                 session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
                                           amount_minor=int(payload.get("amount_minor", 5_000)),
-                                          delivery_date=str(payload.get("delivery_date", "2026-11-13")), status="scheduled",
+                                          delivery_date=delivery_date, status="scheduled",
                                           reservation_id=payload.get("reservation_id")))
+                session.add(Mandate(id=mandate_id, user_id=user_id, plan_id=idempotency_key,
+                                    operation_type="merchant.order.create", subject_ref=item,
+                                    max_amount_minor=int(payload.get("amount_minor", 5_000)), max_uses=1,
+                                    starts_on=dispatch_on, expires_on=delivery_date, status="active"))
             return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "scheduled",
-                    "delivery_date": payload.get("delivery_date", "2026-11-13"),
-                    "dispatch_on": payload.get("dispatch_on", self.clock.business_date())}, "scheduled"
+                    "delivery_date": delivery_date, "dispatch_on": dispatch_on, "mandate_id": mandate_id}, "scheduled"
         if capability_id == "X05":
             card_id = str(payload.get("card_id", "card_001"))
             if payload.get("_mfa_verified"):
@@ -863,7 +869,21 @@ class CapabilityService:
                         elif operation is None:
                             if account is None:
                                 raise DomainError("ACCOUNT_NOT_FOUND")
-                            if reservation is not None and (reservation.status != "active"
+                            mandate_id = str(data.get("mandate_id", ""))
+                            mandate = order_session.get(Mandate, mandate_id) if mandate_id else None
+                            today_date = date.fromisoformat(today)
+                            if (mandate is None or mandate.user_id != record.user_id
+                                    or mandate.status != "active"
+                                    or mandate.operation_type != "merchant.order.create"
+                                    or mandate.subject_ref != merchant.item
+                                    or today_date < date.fromisoformat(mandate.starts_on)
+                                    or today_date > date.fromisoformat(mandate.expires_on)
+                                    or merchant.amount_minor > mandate.max_amount_minor
+                                    or mandate.used_count >= mandate.max_uses):
+                                merchant.status = "failed"
+                                data["status"] = "failed"
+                                data["error_code"] = "MANDATE_INVALID"
+                            elif reservation is not None and (reservation.status != "active"
                                                             or reservation.amount_minor < merchant.amount_minor):
                                 merchant.status = "failed"
                                 data["status"] = "failed"
@@ -873,6 +893,7 @@ class CapabilityService:
                                 data["status"] = "failed"
                                 data["error_code"] = "INSUFFICIENT_FUNDS"
                             else:
+                                mandate.used_count += 1
                                 if reservation is None:
                                     account.available_minor -= merchant.amount_minor
                                 else:
