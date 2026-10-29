@@ -50,7 +50,8 @@ def test_plan_validator_requires_refs_to_preceding_dependencies() -> None:
 
 
 def test_business_clock_advances_business_time_only() -> None:
-    clock = BusinessClock(datetime(2026, 10, 28, 8, 0, tzinfo=timezone.utc))
+    security_time = datetime(2026, 10, 28, 8, 0, tzinfo=timezone.utc)
+    clock = BusinessClock(security_time, security_now_fn=lambda: security_time)
     assert clock.now().isoformat().startswith("2026-10-28")
     clock.advance_days(2)
     assert clock.business_date() == "2026-10-30"
