@@ -4,11 +4,13 @@
 
 ## 当前开发阶段
 
-M2 核心业务路径已经实现并持续按业务不变量修复，但方案级 M2 尚未冻结。Agent 现在接入了 planner、reply 和有界 read-only explorer 三类 LLM gateway 角色；模型输出只能提供结构化能力/槽位/事实片段，仍由白名单、解析器、策略和 CapabilityService 裁决，未配置 provider 时安全降级到确定性路径。确定性 Agent 已覆盖 33 项能力的自然语言路由、多轮补槽、收款人消歧、确认卡、设备绑定 MFA 接续和 Web IM/App 共用入口；生日四节点 DAG 已绑定事件日期、支持暂停/恢复/取消、修订作废旧回执，订单履约会写操作、交易和借贷平衡分录并释放未用预留；实体卡生命周期和提醒 outbox 投递也已补齐。统一能力入口、幂等冲突、并发回执消费、X05 分段 MFA、DSL 硬限制和 HTTP 业务终态矩阵均有确定性验证。逐项 3 条真实 CAP 旅程、完整多轮探索接续和 PLAN §6 的全量模型规划运行时仍未完成。
+M2 核心业务路径已经实现并持续按业务不变量修复，但方案级 M2 尚未冻结。Agent 现在接入了 planner、reply 和有界 read-only explorer 三类 LLM gateway 角色；模型输出只能提供结构化能力/槽位/事实片段，仍由白名单、解析器、策略和 CapabilityService 裁决，未配置 provider 时安全降级到确定性路径；explorer 的工具调用会执行真实只读能力并把结构化结果回传给规划器，reply 的事实片段会和服务端事实逐项核对。确定性 Agent 已覆盖 33 项能力的自然语言路由、多轮补槽、收款人消歧、确认卡、设备绑定 MFA 接续和 Web IM/App 共用入口；生日四节点 DAG 已绑定事件日期、支持暂停/恢复/取消、修订作废旧回执，订单履约会写操作、交易和借贷平衡分录并释放未用预留；实体卡生命周期和提醒 outbox 投递也已补齐。统一能力入口、幂等冲突、并发回执消费、X05 分段 MFA、DSL 硬限制、HTTP 业务终态矩阵和 33×3 独立 CAP 旅程均有确定性验证。真实 provider 联调、完整模型提示词/探索策略运行时和 M4 发布仍需单独验收。
 
 M2 六个业务集群（Q/T、B、W、C、S、X）已经分别补充业务不变量测试并标记在 `docs/M2-COVERAGE.md`；这表示业务层逐项验收已建立，不表示 M3 安全门禁或 M4 发布门禁已经通过。
 
 已通过的 M2 子门禁包括：计划 pause/cancel/resume、依赖拓扑执行、receipt 节点消费、DSL 只读隔离与 2 秒/50,000 行硬限制、Web IM callback nonce、R 级 App deep link、群聊脱敏、计划图决策链、订单资金结算、投资现金账务、AA 参与者账务、卡片产品额度上限、实体卡阶段推进和提醒 outbox 去重。M2 仍有上段列出的方案级缺口；M3/M4 仍单独验收。
+
+99 个 CAP journey 已由 `docs/M2-CAP-TRACEABILITY.md` 逐项绑定到 normal、colloquial、boundary/recovery 分支；这证明本地确定性验收闭环，不等同于真实 provider 联调或 M4 发布完成。
 
 ## M2 能力入口
 

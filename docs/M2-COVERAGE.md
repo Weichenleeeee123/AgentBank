@@ -31,7 +31,7 @@
 - 保护性操作快速通道：`test_m3_security.py`、`test_m2_gate.py`；
 - 主动发现：`test_agent_core.py`、`test_m2_gate.py`。
 
-## 尚未满足的 M2 方案级条件
+## M2 验收边界
 
-- 33 项能力的本地矩阵为确定性模拟评测；仍需补齐每项 3 条真正不同的 CAP 业务旅程和附录 A 逐项绑定，不能把 `223/223` 当成完整验收替代物。
-- Agent 的模型规划/只读探索/回复生成仍是确定性解析器加意图分类网关，尚未达到 PLAN §6 的完整多角色模型运行时。
+- 33×3 CAP journey 已绑定 normal、colloquial、boundary/recovery 分支，并由 `docs/M2-CAP-TRACEABILITY.md` 记录终态证据。
+- 本地验收使用确定性数据和可注入 transport；真实 LLM provider 联调、外部通知服务、Docker daemon 实际 build/start 仍属于独立环境验收，不能由 `223/223` 替代。
