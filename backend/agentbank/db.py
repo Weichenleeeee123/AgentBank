@@ -171,6 +171,17 @@ class CapabilityRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class ConversationState(Base):
+    __tablename__ = "conversation_states"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    recent_user_messages_json: Mapped[str] = mapped_column(Text, default="[]")
+    pending_intent_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    current_plan_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    plan_revision: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
+
+
 class AABill(Base):
     __tablename__ = "aa_bills"
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
@@ -273,6 +284,7 @@ class PlanRecord(Base):
     status: Mapped[str] = mapped_column(String(32))
     display_hash: Mapped[str] = mapped_column(String(128))
     action_hash: Mapped[str] = mapped_column(String(128))
+    display_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 

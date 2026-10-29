@@ -61,7 +61,7 @@ class DeviceService:
                 raise DomainError("DEVICE_UNAUTHORIZED")
             challenges = session.scalars(select(Challenge).where(Challenge.user_id == device.user_id,
                                                                   Challenge.consumed.is_(False),
-                                                                  Challenge.expires_at > utc_now_naive())).all()
+                                                                  Challenge.expires_at > utc_now_naive()).order_by(Challenge.expires_at.desc())).all()
             return [{"challenge_id": item.id, "receipt_id": item.receipt_id, "code": item.delivery_code or ""} for item in challenges]
 
     def validate_token(self, user_id: str, device_token: str) -> None:
@@ -79,10 +79,12 @@ class DeviceService:
                 raise DomainError("DEVICE_UNAUTHORIZED")
             return device.user_id
 
-    def verify(self, user_id: str, code: str) -> Challenge:
+    def verify(self, user_id: str, code: str, receipt_id: str | None = None) -> Challenge:
         with self.database.sessions.begin() as session:
-            challenge = session.scalar(select(Challenge).where(Challenge.user_id == user_id,
-                                                               Challenge.consumed.is_(False)).order_by(Challenge.expires_at.desc()))
+            query = select(Challenge).where(Challenge.user_id == user_id, Challenge.consumed.is_(False))
+            if receipt_id is not None:
+                query = query.where(Challenge.receipt_id == receipt_id)
+            challenge = session.scalar(query.order_by(Challenge.expires_at.desc()))
             if challenge is None or challenge.expires_at <= utc_now_naive():
                 raise DomainError("OTP_EXPIRED")
             if challenge.attempts >= 3:

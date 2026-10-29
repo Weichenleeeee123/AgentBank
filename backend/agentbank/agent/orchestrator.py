@@ -7,10 +7,11 @@ from typing import Any
 
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.contracts import CapabilityResult
-from agentbank.db import Database
+from agentbank.db import ConversationState, Database
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.agent.intent import IntentParser, ParsedIntent
+from agentbank.llm.gateway import LLMGateway
 
 
 class AgentResponse:
@@ -29,15 +30,20 @@ class AgentResponse:
 
 
 class AgentOrchestrator:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, llm: LLMGateway | None = None,
+                 capabilities: CapabilityService | None = None) -> None:
         self.database = database
-        self.capabilities = CapabilityService(database, require_device_mfa=True)
+        self.capabilities = capabilities or CapabilityService(database, require_device_mfa=True, enforce_prepare=True)
         self.parser = IntentParser()
-        self._pending: dict[tuple[str, str], ParsedIntent] = {}
+        self.llm = llm or LLMGateway.from_environment(database)
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
+        recent_messages = self._store_user_message(user_id, conversation_id, text)
         parsed = self.parser.parse(text)
-        pending = self._pending.get((user_id, conversation_id))
+        suggestion = self.llm.classify_intent(text, user_id=user_id, recent_user_messages=recent_messages)
+        if parsed.capability_id is None:
+            parsed = self._apply_intent_hint(parsed, str(suggestion.get("intent", "unknown")))
+        pending = self._load_pending(user_id, conversation_id)
         if parsed.capability_id is None and pending is not None:
             parsed = self._continue_pending(pending, text)
         if parsed.capability_id is None:
@@ -46,7 +52,7 @@ class AgentOrchestrator:
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message="请确认收款人：我找到多个同名联系人，请提供手机号或联系人备注。")
         if parsed.missing:
-            self._pending[(user_id, conversation_id)] = parsed
+            self._save_pending(user_id, conversation_id, parsed)
             labels = {"amount": "金额", "recipient": "收款人", "answers": "风险测评答案", "product_id": "产品", "order_id": "订单", "subscription_id": "订阅", "card_id": "卡片"}
             missing = "、".join(labels.get(item, item) for item in parsed.missing)
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
@@ -66,8 +72,50 @@ class AgentOrchestrator:
                 return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
                                      message="这项操作需要模拟手机验证码验证，请输入验证码。")
             return AgentResponse(kind="error", intent=parsed.intent, capability_id=parsed.capability_id, message=error.code)
-        self._pending.pop((user_id, conversation_id), None)
+        self._save_pending(user_id, conversation_id, None)
         return self._response(parsed, result)
+
+    def _store_user_message(self, user_id: str, conversation_id: str, text: str) -> list[str]:
+        with self.database.sessions.begin() as session:
+            state = session.get(ConversationState, (user_id, conversation_id))
+            messages = json.loads(state.recent_user_messages_json) if state is not None else []
+            messages.append(text)
+            messages = messages[-6:]
+            if state is None:
+                state = ConversationState(user_id=user_id, conversation_id=conversation_id,
+                                          recent_user_messages_json=json.dumps(messages, ensure_ascii=False))
+                session.add(state)
+            else:
+                state.recent_user_messages_json = json.dumps(messages, ensure_ascii=False)
+            return messages
+
+    def _load_pending(self, user_id: str, conversation_id: str) -> ParsedIntent | None:
+        with self.database.sessions() as session:
+            state = session.get(ConversationState, (user_id, conversation_id))
+            if state is None or not state.pending_intent_json:
+                return None
+            data = json.loads(state.pending_intent_json)
+            return ParsedIntent(data["intent"], data["capability_id"], data["slots"], data["missing"], data["ambiguities"])
+
+    def _save_pending(self, user_id: str, conversation_id: str, pending: ParsedIntent | None) -> None:
+        with self.database.sessions.begin() as session:
+            state = session.get(ConversationState, (user_id, conversation_id))
+            if state is None:
+                state = ConversationState(user_id=user_id, conversation_id=conversation_id, recent_user_messages_json="[]")
+                session.add(state)
+            state.pending_intent_json = json.dumps({"intent": pending.intent, "capability_id": pending.capability_id,
+                                                    "slots": pending.slots, "missing": pending.missing,
+                                                    "ambiguities": pending.ambiguities}, ensure_ascii=False) if pending else None
+
+    @staticmethod
+    def _apply_intent_hint(parsed: ParsedIntent, hint: str) -> ParsedIntent:
+        routes = {"balance": ("balance", "Q01"), "transactions": ("transactions", "Q02"),
+                  "birthday_discovery": ("birthday_discovery", "X01"), "spending_analysis": ("spending_analysis", "B01"),
+                  "monthly_report": ("monthly_report", "B03"), "yearly_report": ("yearly_report", "B04"),
+                  "product_recommendation": ("product_recommendation", "W01"),
+                  "product_comparison": ("product_comparison", "W02"), "subscriptions": ("subscriptions", "S01")}
+        route = routes.get(hint)
+        return ParsedIntent(route[0], route[1], {}, [], []) if route else parsed
 
     def _continue_pending(self, pending: ParsedIntent, text: str) -> ParsedIntent:
         slots = dict(pending.slots)
@@ -93,9 +141,25 @@ class AgentOrchestrator:
                 missing = [item for item in missing if item != "amount_minor"]
         return ParsedIntent(pending.intent, pending.capability_id, slots, missing, pending.ambiguities)
 
-    def confirm(self, user_id: str, record_id: str, display_hash: str) -> AgentResponse:
-        result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)
-        return AgentResponse(kind="result", intent="transfer", capability_id=result.capability_id,
+    def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
+        with self.database.sessions() as session:
+            from agentbank.db import CapabilityRecord
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+        if data.get("plan_id"):
+            result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)
+        else:
+            result = self.capabilities.confirm_capability(user_id, record_id, receipt_id,
+                                                          str(data.get("action_hash", "")), display_hash)
+        if result.status == "awaiting_mfa":
+            return AgentResponse(kind="mfa", intent="transfer" if result.capability_id.startswith("T") else result.capability_id,
+                                 capability_id=result.capability_id, record_id=record_id,
+                                 display_hash=display_hash, data=result.data,
+                                 message="请在模拟手机中完成强验证。")
+        return AgentResponse(kind="result", intent="transfer" if result.capability_id.startswith("T") else result.capability_id,
+                             capability_id=result.capability_id,
                              record_id=record_id, data=result.data, message="操作结果已从模拟银行账本确认。",
                              fragments=[{"type": "fact", "label": "操作状态", "value_minor": 0, "status": result.status}])
 
@@ -126,6 +190,14 @@ class AgentOrchestrator:
                                  record_id=result.record_id, display_hash=str(data.get("display_hash", "")), data=data,
                                  message="请核对操作详情后确认。" if kind == "confirmation" else "请在模拟手机中完成强验证。",
                                  fragments=fragments)
+        if result.status == "awaiting_confirmation":
+            return AgentResponse(kind="confirmation", intent=parsed.intent, capability_id=parsed.capability_id,
+                                 record_id=result.record_id, display_hash=str(data.get("display_hash", "")),
+                                 data=data, message="请核对操作详情后确认。", fragments=[])
+        if result.status == "awaiting_mfa":
+            return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
+                                 record_id=result.record_id, display_hash=str(data.get("display_hash", "")),
+                                 data=data, message="请在模拟手机中完成强验证。", fragments=[])
         fragments = []
         if parsed.capability_id == "Q01":
             fragments = [{"type": "fact", "label": "可用余额", "value_minor": int(data.get("available_minor", 0)), "currency": "CNY"}]

@@ -33,6 +33,14 @@ def monthly_report(database: Database, user_id: str, start_month: str, end_month
         values = buckets.get(month, {"income_minor": 0, "expense_minor": 0, "transfer_minor": 0})
         rows.append({"month": month, **values, "missing": month not in buckets})
         cursor = date(cursor.year + (cursor.month == 12), 1 if cursor.month == 12 else cursor.month + 1, 1)
+    for index, row in enumerate(rows):
+        previous = rows[index - 1] if index else None
+        previous_year = buckets.get(f"{int(row['month'][:4]) - 1}-{row['month'][5:]}")
+        current_total = row["expense_minor"]
+        previous_total = previous["expense_minor"] if previous else None
+        yoy_total = previous_year["expense_minor"] if previous_year else None
+        row["mom_change"] = None if previous_total in (None, 0) else round((current_total - previous_total) / previous_total, 4)
+        row["yoy_change"] = None if yoy_total in (None, 0) else round((current_total - yoy_total) / yoy_total, 4)
     return rows
 
 

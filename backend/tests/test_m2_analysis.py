@@ -47,6 +47,7 @@ def test_monthly_report_marks_missing_months_and_separates_transfer(database: Da
     assert [row["month"] for row in report] == ["2026-05", "2026-06", "2026-07"]
     assert all("missing" in row for row in report)
     assert all("income_minor" in row and "expense_minor" in row and "transfer_minor" in row for row in report)
+    assert all("mom_change" in row and "yoy_change" in row for row in report)
 
 
 def test_seed_contains_confirmed_and_suspected_subscriptions_and_anomalies(database: Database) -> None:

@@ -4,13 +4,16 @@ import hashlib
 import hmac
 import os
 import secrets
+import json
+import asyncio
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -26,7 +29,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.db import CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, Transaction, User
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
@@ -82,14 +85,20 @@ def _verify(token: str, secret: str) -> str:
     return user_id
 
 
+def _require_eval_admin(token: str | None) -> None:
+    expected = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
+    if not expected or token != expected:
+        raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
+
+
 def create_app(database_url: str | None = None) -> FastAPI:
     resolved_database_url = str(database_url or os.getenv("AGENTBANK_DATABASE_URL") or "sqlite:///agentbank.db")
     database = Database(resolved_database_url)
     load_seed(database)
     transfer = TransferService(database)
-    capabilities = CapabilityService(database, require_device_mfa=True)
+    capabilities = CapabilityService(database, require_device_mfa=True, enforce_prepare=True)
     plans = BusinessPlanService(database)
-    agent = AgentOrchestrator(database)
+    agent = AgentOrchestrator(database, capabilities=capabilities)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
     business_clock = BusinessClock()
     app = FastAPI(title="AgentBank", version="0.1.0")
@@ -145,6 +154,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = capabilities.execute(user_id, capability_id, payload.payload, payload.idempotency_key)
         return result.model_dump(mode="json")
 
+    @app.post("/v1/forms/{kind}")
+    def direct_form(kind: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        capability_id = {"balance": "Q01", "transactions": "Q02", "transfer": "T01", "transfer-name": "T01",
+                         "transfer-phone": "T02", "transfer-alias": "T03"}.get(kind)
+        if capability_id is None:
+            raise DomainError("FORM_KIND_NOT_SUPPORTED")
+        key = str(payload.get("idempotency_key") or f"form-{secrets.token_urlsafe(12)}")
+        result = capabilities.execute(user_id, capability_id, payload, key)
+        return result.model_dump(mode="json")
+
     @app.post("/admin/v1/capabilities/dispatch-due")
     def dispatch_due_capabilities(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
         admin_token = os.getenv("AGENTBANK_ADMIN_TOKEN", "")
@@ -161,13 +180,49 @@ def create_app(database_url: str | None = None) -> FastAPI:
         results = capabilities.progress_investments(payload.get("user_id"))
         return {"settled": [result.model_dump(mode="json") for result in results], "count": len(results)}
 
+    @app.post("/v1/eval/runs")
+    def create_eval_run(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        run_id = f"run_{secrets.token_urlsafe(12)}"
+        report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        with database.sessions.begin() as session:
+            session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
+                                case_total=report.total, case_passed=report.passed))
+        return {"run_id": run_id, "total": report.total, "passed": report.passed, "failed": report.failed,
+                "report": report.to_markdown(), "requested_by": user_id}
+
+    @app.get("/admin/v1/demo-runs")
+    def list_demo_runs(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        _require_eval_admin(x_admin_token)
+        with database.sessions() as session:
+            runs = session.scalars(select(DemoRun).order_by(DemoRun.created_at.desc())).all()
+            return {"runs": [{"run_id": item.id, "status": item.status, "case_total": item.case_total,
+                              "case_passed": item.case_passed, "created_at": item.created_at.isoformat()} for item in runs]}
+
+    @app.post("/admin/v1/demo-runs")
+    def create_demo_run(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, str]:
+        _require_eval_admin(x_admin_token)
+        run_id = f"demo_{secrets.token_urlsafe(12)}"
+        with database.sessions.begin() as session:
+            session.add(DemoRun(id=run_id, status="created", case_total=0, case_passed=0))
+        return {"demo_run_id": run_id, "status": "created"}
+
     @app.get("/v1/capability-records/{record_id}")
     def get_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.get(user_id, record_id).model_dump(mode="json")
 
     @app.post("/v1/capability-records/{record_id}/confirm")
     def confirm_capability_transfer(record_id: str, payload: ConfirmRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
-        return capabilities.confirm_transfer(user_id, record_id, payload.display_hash).model_dump(mode="json")
+        with database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            data = __import__("json").loads(record.data_json)
+        if data.get("plan_id"):
+            result = capabilities.confirm_transfer(user_id, record_id, payload.display_hash)
+        else:
+            result = capabilities.confirm_capability(user_id, record_id, payload.receipt_id,
+                                                     str(data.get("action_hash", "")), payload.display_hash)
+        return result.model_dump(mode="json")
 
     @app.post("/v1/capability-records/{record_id}/verify")
     def verify_capability_transfer(record_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -198,6 +253,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
             return {"transactions": [{"txn_id": row.id, "posted_at": row.posted_at, "amount_minor": row.amount_minor,
                                       "merchant": row.merchant, "category": row.category, "direction": row.direction}
                                      for row in rows]}
+
+    @app.get("/v1/operations/{operation_id}")
+    def get_operation(operation_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            operation = session.get(Operation, operation_id)
+            if operation is None or operation.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            return {"operation_id": operation.id, "status": operation.status,
+                    "amount_minor": operation.amount_minor, "error_code": operation.error_code,
+                    "idempotency_key": operation.idempotency_key}
 
     @app.post("/v1/analysis/run")
     def run_analysis(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -243,9 +308,32 @@ def create_app(database_url: str | None = None) -> FastAPI:
         shares = split_bill(int(payload["total_minor"]), [str(item) for item in payload["participant_ids"]], user_id)
         return {"shares": shares, "status": "preview"}
 
+    @app.post("/v1/aa/bills")
+    def create_aa_bill(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        key = str(payload.get("idempotency_key") or f"aa-{secrets.token_urlsafe(12)}")
+        return capabilities.execute(user_id, "T05", payload, key).model_dump(mode="json")
+
+    @app.get("/v1/aa/bills/{bill_id}")
+    def get_aa_bill(bill_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.execute(user_id, "T05", {"action": "status", "bill_id": bill_id},
+                                    f"aa-status-{bill_id}-{secrets.token_urlsafe(8)}").model_dump(mode="json")
+
+    @app.post("/v1/aa/bills/{bill_id}/pay")
+    def pay_aa_share(bill_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        key = str(payload.get("idempotency_key") or f"aa-pay-{bill_id}-{user_id}")
+        return capabilities.execute(user_id, "T05", {"action": "pay_share", "bill_id": bill_id}, key).model_dump(mode="json")
+
     @app.get("/v1/reports/monthly")
     def get_monthly_report(start_month: str, end_month: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return {"months": monthly_report(database, user_id, start_month, end_month)}
+
+    @app.get("/v1/reports/annual")
+    def get_annual_report(year: int, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        months = monthly_report(database, user_id, f"{year:04d}-01", f"{year:04d}-12")
+        totals = {field: sum(int(item[field]) for item in months)
+                  for field in ("income_minor", "expense_minor", "transfer_minor")}
+        return {"year": year, "months": months, "missing_months": [item["month"] for item in months if item["missing"]],
+                "totals": totals, "source": "simulated_bank"}
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -357,6 +445,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
                     "nodes": [{"node_id": node.id, "tool": node.tool, "status": node.status,
                                "idempotency_key": node.idempotency_key} for node in nodes]}
 
+    @app.post("/v1/plans/{plan_id}/handoff")
+    def handoff_plan(plan_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:
+        with database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if plan.status not in {"running", "paused", "partially_completed", "failed"}:
+                raise DomainError("PLAN_STATE_INVALID")
+            plan.status = "paused"
+        case = HandoffService(database).open(user_id, "plan", f"{plan_id}:{payload.get('reason', 'user_requested')}")
+        return {"plan_id": plan_id, "case_id": case.id, "status": "paused"}
+
     @app.post("/v1/birthday/plans")
     def create_birthday_plan(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         plan = plans.create_birthday_plan(user_id, str(payload.get("event_id", "event_birthday")),
@@ -375,6 +475,25 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/v1/plans/{plan_id}/graph")
     def get_plan_graph(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.graph(plan_id, user_id)
+
+    @app.get("/v1/plans/{plan_id}/events")
+    async def plan_events(plan_id: str, user_id: str = Depends(current_user)) -> StreamingResponse:
+        plans.graph(plan_id, user_id)
+
+        async def stream() -> AsyncIterator[str]:
+            previous = ""
+            for _ in range(80):
+                current = plans.graph(plan_id, user_id)
+                encoded = json.dumps(current, ensure_ascii=False, sort_keys=True)
+                if encoded != previous:
+                    yield f"event: snapshot\ndata: {encoded}\n\n"
+                    previous = encoded
+                if current["status"] in {"succeeded", "partially_completed", "failed", "cancelled"}:
+                    yield "event: done\ndata: {}\n\n"
+                    return
+                await asyncio.sleep(0.25)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     @app.post("/v1/plans/{plan_id}/execute")
     def execute_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -435,7 +554,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/v1/conversations/{conversation_id}/records/{record_id}/confirm")
     def confirm_conversation_record(conversation_id: str, record_id: str, payload: ConfirmRequest,
                                     user_id: str = Depends(current_user)) -> dict[str, Any]:
-        response = agent.confirm(user_id, record_id, payload.display_hash)
+        response = agent.confirm(user_id, record_id, payload.display_hash, payload.receipt_id)
         return {"conversation_id": conversation_id, **response.model_dump()}
 
     @app.post("/v1/conversations/{conversation_id}/records/{record_id}/verify")

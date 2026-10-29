@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from pathlib import Path
 from time import perf_counter
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Iterator, cast
 
 from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.orm import Session, sessionmaker
 
 from agentbank.audit.store import PersistentAudit
 from agentbank.db import Database, Transaction
@@ -53,20 +57,25 @@ class DslExecutor:
             if ordering.get("field") not in ALLOWED_GROUPS | {"sum_amount_minor", "count"} or ordering.get("dir", "asc") not in {"asc", "desc"}:
                 raise ValueError("DSL_ORDER_NOT_ALLOWED")
         started = perf_counter()
-        readonly_connection: Any | None = None
-        with self.database.sessions() as session:
-            if session.bind is not None and session.bind.dialect.name == "sqlite":
-                connection = session.connection()
-                connection.exec_driver_sql("PRAGMA query_only=ON")
-                raw_connection = cast(Any, connection.connection.driver_connection)
-                raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
-                readonly_connection = raw_connection
-            records = list(session.scalars(select(Transaction).where(Transaction.user_id == user_id)).all())
+        with self._readonly_session() as session:
+            statement = select(Transaction).where(Transaction.user_id == user_id)
+            for item in filters:
+                column = getattr(Transaction, str(item["field"]))
+                expected = item.get("value")
+                op = item["op"]
+                if op == "eq":
+                    statement = statement.where(column == expected)
+                elif op == "gte":
+                    statement = statement.where(column >= expected)
+                elif op == "lte":
+                    statement = statement.where(column <= expected)
+                elif op == "between":
+                    if not isinstance(expected, list) or len(expected) != 2:
+                        raise ValueError("DSL_FILTER_VALUE_INVALID")
+                    statement = statement.where(column.between(expected[0], expected[1]))
+            records = list(session.scalars(statement.order_by(Transaction.posted_at).limit(50_000)).all())
             if perf_counter() - started > 2.0:
                 raise ValueError("DSL_TIMEOUT")
-            if readonly_connection is not None:
-                readonly_connection.execute("PRAGMA query_only=OFF")
-        records = [record for record in records if self._matches(record, filters)]
         if groups:
             rows = self._group(records, groups)
         else:
@@ -77,6 +86,41 @@ class DslExecutor:
                                                    "analysis.dsl.executed",
                                                    {"query_hash": query_hash, "row_count": len(rows)})
         return DslResult(rows=rows, query_hash=query_hash, row_count=len(rows))
+
+    @contextmanager
+    def _readonly_session(self) -> Iterator[Session]:
+        source_url = make_url(str(self.database.engine.url))
+        database_path = source_url.database
+        if source_url.get_backend_name() == "sqlite" and database_path not in {None, "", ":memory:"}:
+            resolved = Path(str(database_path)).resolve().as_posix()
+            readonly_url = URL.create("sqlite+pysqlite", database=f"file:{resolved}",
+                                      query={"mode": "ro", "uri": "true"})
+            from sqlalchemy import create_engine
+
+            engine = create_engine(readonly_url, connect_args={"uri": True})
+            factory = sessionmaker(bind=engine, expire_on_commit=False)
+            try:
+                with factory() as session:
+                    connection = session.connection()
+                    raw_connection = cast(Any, connection.connection.driver_connection)
+                    started = perf_counter()
+                    raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
+                    yield session
+                    raw_connection.set_progress_handler(None, 0)
+            finally:
+                engine.dispose()
+            return
+        with self.database.sessions() as session:
+            connection = session.connection()
+            connection.exec_driver_sql("PRAGMA query_only=ON")
+            raw_connection = cast(Any, connection.connection.driver_connection)
+            started = perf_counter()
+            raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
+            try:
+                yield session
+            finally:
+                raw_connection.set_progress_handler(None, 0)
+                raw_connection.execute("PRAGMA query_only=OFF")
 
     def _matches(self, record: Transaction, filters: list[dict[str, Any]]) -> bool:
         for item in filters:

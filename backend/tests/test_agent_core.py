@@ -77,3 +77,20 @@ def test_agent_routes_subscription_and_card_commands(tmp_path: Path) -> None:
     assert cancelled.capability_id == "S03"
     frozen = agent.handle("user_001", "conv-card", "先把我的卡冻结")
     assert frozen.capability_id == "C07"
+
+
+def test_pending_slots_survive_agent_recreation_without_assistant_text(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'agent-state.db'}")
+    load_seed(database)
+    first_agent = AgentOrchestrator(database)
+    first = first_agent.handle("user_001", "restart-conv", "给房东转账")
+    assert first.kind == "clarification"
+    restarted_agent = AgentOrchestrator(database)
+    completed = restarted_agent.handle("user_001", "restart-conv", "20元")
+    assert completed.kind == "confirmation"
+    from agentbank.db import ConversationState
+    with database.sessions() as session:
+        state = session.get(ConversationState, ("user_001", "restart-conv"))
+        assert state is not None
+        assert state.pending_intent_json is None
+        assert "assistant" not in state.recent_user_messages_json

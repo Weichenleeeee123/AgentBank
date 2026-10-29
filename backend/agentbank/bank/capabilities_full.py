@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -14,9 +15,9 @@ from agentbank.auth.devices import DeviceService
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
-from agentbank.clock import BusinessClock, business_date
+from agentbank.clock import BusinessClock, business_date, utc_now_naive
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, Mandate, MerchantOrder, Payee, Position, Product, Reminder, Reservation, ScheduledJob, Subscription, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, Mandate, MerchantOrder, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -30,13 +31,14 @@ class CapabilityService:
     evaluator can assert state and audit evidence instead of only observing a tool call.
     """
 
-    def __init__(self, database: Database, clock: BusinessClock | None = None, *, require_device_mfa: bool = False) -> None:
+    def __init__(self, database: Database, clock: BusinessClock | None = None, *, require_device_mfa: bool = False, enforce_prepare: bool = False) -> None:
         self.database = database
         self.clock = clock or BusinessClock()
         self.audit = PersistentAudit(database)
         self.breaker = CircuitBreaker(database)
         self.device_tokens: dict[str, str] = {}
         self.require_device_mfa = require_device_mfa
+        self.enforce_prepare = enforce_prepare
 
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
@@ -47,6 +49,55 @@ class CapabilityService:
                 if existing.user_id != user_id:
                     raise DomainError("NOT_OWNER")
                 return self._result(existing)
+        write_capability = capability_id not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W03", "W06", "S01", "X01"}
+        if self.enforce_prepare and write_capability and not payload.get("_confirmed") and not payload.get("_mfa_verified"):
+            if capability_id in {"T01", "T02", "T03"}:
+                prepared, _ = self._dispatch(user_id, capability_id, payload, idempotency_key)
+                action_digest = str(prepared["action_hash"])
+                display_digest = str(prepared["display_hash"])
+                assurance = str(prepared["assurance"])
+            else:
+                canonical = json.dumps({"capability_id": capability_id, "payload": payload}, ensure_ascii=False,
+                                       sort_keys=True, separators=(",", ":"))
+                action_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                display_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                red = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True)))
+                if capability_id == "C02":
+                    with self.database.sessions() as session:
+                        card = session.get(Card, str(payload.get("card_id", "card_001")))
+                        red = card is not None and int(payload.get("limit_minor", card.limit_minor)) > card.limit_minor
+                if capability_id == "C07" and payload.get("action") == "unfreeze":
+                    red = True
+                assurance = "mfa" if red else "confirm"
+            record_id = f"cap_{uuid.uuid4().hex}"
+            record_status = "awaiting_confirmation"
+            data = {"capability_id": capability_id, "payload": payload, "action_hash": action_digest,
+                    "display_hash": display_digest, "assurance": assurance}
+            if capability_id in {"T01", "T02", "T03"}:
+                data.update(prepared)
+                data["capability_id"] = capability_id
+                data["payload"] = payload
+                record_status = "awaiting_mfa" if assurance == "mfa" else "awaiting_confirmation"
+            with self.database.sessions.begin() as session:
+                receipt_id = str(data.get("receipt_id") or f"rcp_{uuid.uuid4().hex}")
+                session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
+                                             status=record_status, data_json=json.dumps(data, ensure_ascii=False), idempotency_key=idempotency_key))
+                if capability_id not in {"T01", "T02", "T03"}:
+                    session.add(ReceiptRecord(id=receipt_id, subject_id=user_id, plan_id=record_id, plan_revision=1,
+                                             node_ids_json=json.dumps([record_id]), action_hash=action_digest,
+                                             display_hash=display_digest, assurance=assurance, issued_at=utc_now_naive(),
+                                             expires_at=utc_now_naive() + timedelta(minutes=5), status="pending"))
+                self.audit.append(session, f"trace_{record_id}", user_id, f"capability.{capability_id}.prepared",
+                                  {"record_id": record_id, "receipt_id": receipt_id, "action_hash": action_digest,
+                                   "display_hash": display_digest, "assurance": assurance})
+            data["receipt_id"] = receipt_id
+            with self.database.sessions.begin() as session:
+                record = session.get(CapabilityRecord, record_id)
+                if record is not None:
+                    record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            return CapabilityResult(capability_id=capability_id, record_id=record_id, status=record_status,
+                                    data=data, evidence={"audit_event": f"capability.{capability_id}.prepared",
+                                                         "idempotency_key": idempotency_key})
         red_capability = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True)))
         if capability_id == "C02":
             with self.database.sessions() as session:
@@ -109,7 +160,16 @@ class CapabilityService:
             data = json.loads(record.data_json)
             if record.status != "awaiting_mfa":
                 return self._result(record)
-        DeviceService(self.database).verify(user_id, code)
+        receipt_id = str(data.get("receipt_id") or record_id)
+        DeviceService(self.database).verify(user_id, code, receipt_id)
+        if data.get("assurance") == "mfa" and data.get("receipt_id"):
+            with self.database.sessions.begin() as session:
+                receipt = session.get(ReceiptRecord, receipt_id)
+                if receipt is None or receipt.plan_id != record_id or receipt.subject_id != user_id:
+                    raise DomainError("RECEIPT_INVALID")
+                if receipt.status != "pending" or receipt.expires_at <= utc_now_naive():
+                    raise DomainError("RECEIPT_EXPIRED")
+                receipt.status = "verified"
         payload = dict(data["payload"])
         payload["_mfa_verified"] = True
         result_data, status = self._dispatch(user_id, record.capability_id, payload, record.idempotency_key)
@@ -119,8 +179,73 @@ class CapabilityService:
                 raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
             record.status = status
             record.data_json = json.dumps(result_data, ensure_ascii=False, sort_keys=True)
+            if data.get("assurance") == "mfa" and data.get("receipt_id"):
+                receipt = session.get(ReceiptRecord, receipt_id)
+                if receipt is not None:
+                    receipt.status = "consumed"
+                session.add(ReceiptConsumption(receipt_id=receipt_id, node_id=record_id,
+                                               operation_id=record_id, consumed_at=utc_now_naive()))
+                self.audit.append(session, f"trace_{record_id}", user_id, "authorization.consumed",
+                                  {"record_id": record_id, "receipt_id": receipt_id, "status": status})
             self.audit.append(session, f"trace_{record_id}", user_id, f"capability.{record.capability_id}.mfa_completed",
                               {"record_id": record_id, "status": status})
+            return self._result(record)
+
+    def confirm_capability(self, user_id: str, record_id: str, requested_receipt_id: str,
+                           action_hash_value: str, display_hash_value: str) -> CapabilityResult:
+        with self.database.sessions() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if record.status != "awaiting_confirmation":
+                raise DomainError("RECEIPT_REPLAYED")
+            data = json.loads(record.data_json)
+            receipt_id = str(data.get("receipt_id", ""))
+            if requested_receipt_id != receipt_id:
+                raise DomainError("RECEIPT_INVALID")
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if receipt is None or receipt.subject_id != user_id or receipt.plan_id != record_id:
+                raise DomainError("RECEIPT_INVALID")
+            if receipt.status != "pending":
+                raise DomainError("RECEIPT_REPLAYED")
+            if receipt.expires_at <= utc_now_naive():
+                raise DomainError("RECEIPT_EXPIRED")
+            if receipt.plan_revision != 1:
+                raise DomainError("PLAN_REVISION_MISMATCH")
+            if data.get("action_hash") != action_hash_value or data.get("display_hash") != display_hash_value:
+                raise DomainError("HASH_MISMATCH")
+            if receipt.action_hash != action_hash_value or receipt.display_hash != display_hash_value:
+                raise DomainError("HASH_MISMATCH")
+            assurance = data.get("assurance", "confirm")
+            capability_id = record.capability_id
+            idempotency_key = record.idempotency_key
+        if assurance == "mfa" and self.require_device_mfa:
+            with self.database.sessions.begin() as session:
+                record = session.get(CapabilityRecord, record_id)
+                if record is not None:
+                    record.status = "awaiting_mfa"
+                    self.audit.append(session, f"trace_{record_id}", user_id, "authorization.confirmed.awaiting_mfa",
+                                      {"record_id": record_id, "receipt_id": receipt_id})
+            if user_id in self.device_tokens:
+                DeviceService(self.database).issue_otp(user_id, receipt_id)
+            return self.get(user_id, record_id)
+        payload = dict(data.get("payload", {})) | {"_confirmed": True}
+        result_data, status = self._dispatch(user_id, capability_id, payload, idempotency_key)
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None:
+                raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
+            record.status = status
+            result_data.update({"action_hash": action_hash_value, "display_hash": display_hash_value,
+                                "receipt_id": receipt_id})
+            record.data_json = json.dumps(result_data, ensure_ascii=False, sort_keys=True)
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if receipt is not None:
+                receipt.status = "consumed"
+            session.add(ReceiptConsumption(receipt_id=receipt_id, node_id=record_id,
+                                           operation_id=record_id, consumed_at=utc_now_naive()))
+            self.audit.append(session, f"trace_{record_id}", user_id, "authorization.consumed",
+                              {"record_id": record_id, "receipt_id": receipt_id, "status": status})
             return self._result(record)
 
     def get(self, user_id: str, record_id: str) -> CapabilityResult:

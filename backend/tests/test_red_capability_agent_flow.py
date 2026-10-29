@@ -16,6 +16,9 @@ def test_agent_red_investment_creates_challenge_then_completes(tmp_path: Path) -
     agent.handle("user_001", "risk", "做风险测评")
     agent.handle("user_001", "risk", "1 1 1 1 1 1 1 1 1 1")
     response = agent.handle("user_001", "invest", "申购 R1 20 元")
+    assert response.kind == "confirmation"
+    response = agent.confirm("user_001", response.record_id, response.display_hash,
+                             response.data["receipt_id"])
     assert response.kind == "mfa"
     challenge = device.inbox(token)[0]
     completed = agent.verify("user_001", response.record_id, challenge["code"])

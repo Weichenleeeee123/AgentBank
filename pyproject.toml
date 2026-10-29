@@ -9,6 +9,7 @@ description = "AgentBank: model proposes, code decides."
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
   "pydantic>=2.8,<3",
   "PyYAML>=6.0,<7",
   "SQLAlchemy>=2.0,<3",

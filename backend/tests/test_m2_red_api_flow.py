@@ -21,8 +21,13 @@ def test_generic_red_capability_api_can_finish_with_device_otp(tmp_path: Path) -
     })
     assert pending.status_code == 200
     record_id = pending.json()["record_id"]
+    data = pending.json()["data"]
+    confirmation = client.post(f"/v1/capability-records/{record_id}/confirm", headers=headers, json={
+        "receipt_id": data["receipt_id"], "display_hash": data["display_hash"],
+    })
+    assert confirmation.status_code == 200 and confirmation.json()["status"] == "awaiting_mfa"
     from agentbank.auth.devices import DeviceService as Device
-    code = Device(app.state.database).issue_otp("user_001", record_id)
+    code = Device(app.state.database).issue_otp("user_001", data["receipt_id"])
     completed = client.post(f"/v1/capability-records/{record_id}/verify", headers=headers, json={"otp": code})
     assert completed.status_code == 200
     assert completed.json()["status"] == "succeeded"

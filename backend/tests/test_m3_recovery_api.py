@@ -76,6 +76,11 @@ def test_admin_progresses_due_jobs_and_investments(tmp_path: Path, monkeypatch) 
     headers = {"Authorization": f"Bearer {token}"}
     schedule = client.post("/v1/capabilities/T04", headers=headers, json={"capability_id": "T04", "idempotency_key": "admin-job", "payload": {"next_due": "2026-10-28"}})
     assert schedule.status_code == 200
+    prepared = schedule.json()
+    confirmed = client.post(f"/v1/capability-records/{prepared['record_id']}/confirm", headers=headers,
+                            json={"receipt_id": prepared["data"]["receipt_id"],
+                                  "display_hash": prepared["data"]["display_hash"]})
+    assert confirmed.status_code == 200
     dispatch = client.post("/admin/v1/capabilities/dispatch-due", headers={"X-Admin-Token": "admin-test"})
     assert dispatch.status_code == 200
     assert dispatch.json()["count"] >= 1
