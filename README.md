@@ -18,7 +18,7 @@
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-当前实现包含 M0-M3：M1 的转账授权与账本链路、M2 的 33 项能力处理器与业务状态、M3 的反诈/冷静期/熔断/Saga/人工接管和全量评测入口。逐项证据见 [docs/M2-M3-STATUS.md](docs/M2-M3-STATUS.md)。
+当前实现包含 M0-M3：M1 的转账授权与账本链路、M2 的 33 项能力处理器与业务状态、M3 的反诈/冷静期/熔断/Saga/人工接管和全量评测入口。Agent 默认使用确定性路由、补槽、确认和 MFA 接续；planner、reply、read-only explorer 三类 LLM gateway 已接入，但 provider 未配置时安全降级，完整模型规划运行时仍未完成。逐项证据见 [docs/M2-M3-STATUS.md](docs/M2-M3-STATUS.md)。
 
 ## 本地运行
 
@@ -49,4 +49,4 @@ python -c "from pathlib import Path; from agentbank.evals.runner import run_case
 
 ## 双实例部署
 
-在仓库根目录设置 `PUBLIC_SESSION_SECRET` 和 `EVAL_SESSION_SECRET` 后运行 `docker compose -f deploy/docker-compose.yml up --build`。公共实例使用 8000 端口，评测实例使用 8001 端口，各自使用独立 SQLite 数据卷。
+在仓库根目录设置 `PUBLIC_SESSION_SECRET`、`EVAL_SESSION_SECRET` 和 `EVAL_ADMIN_TOKEN` 后运行 `docker compose -f deploy/docker-compose.yml up --build`。公共实例使用 8000 端口，评测实例使用 8001 端口，各自使用独立 SQLite 数据卷；两个实例都提供 `/healthz`，评测实例的 `/admin/v1/self-test` 使用 `X-Admin-Token: $env:EVAL_ADMIN_TOKEN`。提交前请执行 `docker compose -f deploy/docker-compose.yml config`，再在 Docker daemon 可用时执行 build/start/health 验证。

@@ -12,3 +12,5 @@
 - [ ] 提交版本、文件校验值和回执归档
 
 当前清单仍未完成，不代表可以提交。
+
+部署验证说明：Compose 配置包含公共/评测双实例、独立 SQLite 数据卷和 `/healthz` 健康检查；评测实例通过 `EVAL_ADMIN_TOKEN` 开启 `/admin/v1/self-test`。本地已验证配置可解析，但当前工作机的 Docker Linux daemon 不可用，因此 build/start/health 仍需在 daemon 恢复后完成。
