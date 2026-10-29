@@ -99,6 +99,26 @@ def test_gateway_read_only_exploration_is_bounded_and_structured(tmp_path: Path)
     assert result[-1]["step"] == 5
 
 
+def test_gateway_explorer_executes_only_real_read_only_results(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'explore-real.db'}")
+    load_seed(database)
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"done": True, "tool": "Q01", "payload": {},
+                "observation": {"available_minor": 1}}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    def execute(tool: str, payload: dict[str, object], step: int) -> dict[str, object]:
+        return {"account_id": "acc_001", "ledger_balance_minor": 500_000, "available_minor": 500_000,
+                "currency": "CNY", "as_of": "2026-10-30T00:00:00+00:00"}
+
+    result = gateway.explore_read_only("user_001", "balance", {}, max_steps=5, executor=execute)
+    assert result == [{"step": 1, "tool": "Q01", "observation": {
+        "account_id": "acc_001", "ledger_balance_minor": 500_000, "available_minor": 500_000,
+        "currency": "CNY", "as_of": "2026-10-30T00:00:00+00:00"}}]
+
+
 def test_gateway_rejects_write_tool_and_untrusted_text_from_explorer(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'explore-deny.db'}")
     load_seed(database)

@@ -48,6 +48,14 @@ class AgentOrchestrator:
         if parsed.capability_id is None:
             planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
                                            context={"parsed_intent": parsed.intent})
+            if planned.get("explore") is True:
+                exploration = self.llm.explore_read_only(
+                    user_id, str(planned.get("intent", parsed.intent)), {"slots": planned.get("slots", {})},
+                    executor=lambda capability_id, payload, step: self._execute_exploration(
+                        user_id, conversation_id, capability_id, payload, step),
+                )
+                planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
+                                               context={"parsed_intent": parsed.intent, "exploration": exploration})
             planned_parsed = self._from_planner(planned)
             if planned_parsed is not None:
                 parsed = planned_parsed
@@ -109,6 +117,14 @@ class AgentOrchestrator:
         return ParsedIntent(str(planned.get("intent", "unknown")), str(capability_id),
                             slots, list(planned.get("missing", [])),
                             list(planned.get("ambiguities", [])), list(planned.get("references", [])))
+
+    def _execute_exploration(self, user_id: str, conversation_id: str, capability_id: str,
+                             payload: dict[str, Any], step: int) -> dict[str, Any]:
+        if capability_id not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}:
+            raise DomainError("EXPLORATION_TOOL_NOT_ALLOWED")
+        result = self.capabilities.execute(user_id, capability_id, payload,
+                                           f"explore-{conversation_id}-{step}-{capability_id}")
+        return result.data
 
     def _store_user_message(self, user_id: str, conversation_id: str, text: str) -> list[str]:
         stored_text = text

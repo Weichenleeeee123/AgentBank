@@ -260,6 +260,29 @@ def test_agent_uses_planner_without_extra_classifier_call(tmp_path: Path) -> Non
     assert roles == ["planner"]
 
 
+def test_agent_executes_planner_read_only_exploration_against_bank_facts(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'explorer-agent.db'}")
+    load_seed(database)
+    calls: list[str] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(role)
+        if role == "planner" and len([item for item in calls if item == "planner"]) == 1:
+            return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                    "ambiguities": [], "suggested_next_action": "explore", "explore": True}
+        if role == "explorer":
+            return {"done": True, "tool": "Q01", "payload": {}, "observation": {"available_minor": 0}}
+        return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                "ambiguities": [], "suggested_next_action": "execute", "explore": False}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    response = AgentOrchestrator(database, llm=gateway).handle("user_001", "explore-agent", "最近我的账户情况")
+    assert response.capability_id == "Q01"
+    assert response.kind == "facts"
+    assert calls == ["planner", "explorer", "planner", "reply"]
+
+
 def test_agent_uses_llm_reply_role_for_structured_fact_response(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'reply-agent.db'}")
     load_seed(database)

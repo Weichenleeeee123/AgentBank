@@ -90,6 +90,7 @@ class LLMGateway:
                 "slots": result["slots"], "missing": [str(item) for item in result.get("missing", [])],
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
                 "references": [item for item in result.get("references", []) if isinstance(item, dict)],
+                "explore": bool(result.get("explore", False)),
                 "suggested_next_action": str(result.get("suggested_next_action", "clarify")),
                 "source": result.get("source", "model")}
 
@@ -103,10 +104,25 @@ class LLMGateway:
                                   "response_schema": {"message": "string", "fragments": "array"}})
         if result is None or not isinstance(result.get("message"), str) or not isinstance(result.get("fragments"), list):
             return fallback
+        if not self._reply_facts_match(result["fragments"], fragments):
+            return fallback
         return {"message": result["message"], "fragments": result["fragments"],
                 "source": result.get("source", "model")}
 
-    def explore_read_only(self, user_id: str, intent: str, context: dict[str, Any], *, max_steps: int = 5) -> list[dict[str, Any]]:
+    @staticmethod
+    def _reply_facts_match(candidate: list[Any], facts: list[dict[str, Any]]) -> bool:
+        allowed = {(item.get("label"), item.get("value_minor"), item.get("currency"))
+                   for item in facts if item.get("type") == "fact"}
+        for item in candidate:
+            if not isinstance(item, dict) or item.get("type") != "fact":
+                continue
+            key = (item.get("label"), item.get("value_minor"), item.get("currency"))
+            if key not in allowed:
+                return False
+        return True
+
+    def explore_read_only(self, user_id: str, intent: str, context: dict[str, Any], *, max_steps: int = 5,
+                          executor: Callable[[str, dict[str, Any], int], dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if self.primary is None:
             self._audit(user_id, "llm.exploration.skipped", {"intent": intent, "reason": "no_provider"})
             return []
@@ -122,7 +138,15 @@ class LLMGateway:
             tool = result.get("tool")
             if tool is not None and tool not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}:
                 break
-            observations.append({"step": step, "tool": tool, "observation": result.get("observation", {})})
+            observation = result.get("observation", {})
+            if executor is not None and tool is not None:
+                try:
+                    observation = executor(tool, dict(result.get("payload", {})), step)
+                except Exception as error:
+                    self._audit(user_id, "llm.exploration.failed", {"step": step, "tool": tool,
+                                                                       "error_type": type(error).__name__})
+                    break
+            observations.append({"step": step, "tool": tool, "observation": observation})
             if result.get("done") is True:
                 break
         return observations
