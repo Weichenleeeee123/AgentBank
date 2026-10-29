@@ -20,6 +20,7 @@ ALLOWED_FIELDS = {"category", "merchant", "posted_at", "amount_minor", "directio
 ALLOWED_OPS = {"eq", "between", "gte", "lte"}
 ALLOWED_GROUPS = {"month", "category", "merchant", "direction"}
 ALLOWED_METRICS = {"sum", "count"}
+DSL_FIELDS = {"source", "filters", "group_by", "metrics", "order_by", "limit"}
 
 
 @dataclass(frozen=True)
@@ -34,27 +35,71 @@ class DslExecutor:
         self.database = database
 
     def run(self, user_id: str, dsl: dict[str, Any]) -> DslResult:
+        if not isinstance(dsl, dict) or set(dsl) - DSL_FIELDS:
+            raise ValueError("DSL_FIELD_NOT_ALLOWED")
         canonical = json.dumps(dsl, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         query_hash = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if dsl.get("source") != "transactions":
             raise ValueError("DSL_SOURCE_NOT_ALLOWED")
-        limit = int(dsl.get("limit", 100))
+        raw_limit = dsl.get("limit", 100)
+        if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
+            raise ValueError("DSL_LIMIT_EXCEEDED")
+        limit = raw_limit
         if limit < 1 or limit > 50_000:
             raise ValueError("DSL_LIMIT_EXCEEDED")
         filters = dsl.get("filters", [])
+        if not isinstance(filters, list):
+            raise ValueError("DSL_FILTER_INVALID")
         for item in filters:
-            if item.get("field") not in ALLOWED_FIELDS or item.get("op") not in ALLOWED_OPS:
+            if not isinstance(item, dict) or set(item) != {"field", "op", "value"}:
+                raise ValueError("DSL_FILTER_INVALID")
+            field = item.get("field")
+            op = item.get("op")
+            expected = item.get("value")
+            if not isinstance(field, str) or not isinstance(op, str) or field not in ALLOWED_FIELDS or op not in ALLOWED_OPS:
                 raise ValueError("DSL_FIELD_NOT_ALLOWED")
-        groups = list(dsl.get("group_by", []))
-        if any(group not in ALLOWED_GROUPS for group in groups):
+            if op == "between" and (not isinstance(expected, list) or len(expected) != 2):
+                raise ValueError("DSL_FILTER_VALUE_INVALID")
+            values = cast(list[Any], expected) if op == "between" else [expected]
+            expected_type = int if field == "amount_minor" else str
+            if any(not isinstance(value, expected_type) or isinstance(value, bool) for value in values):
+                raise ValueError("DSL_FILTER_VALUE_INVALID")
+        raw_groups = dsl.get("group_by", [])
+        if not isinstance(raw_groups, list) or any(not isinstance(group, str) for group in raw_groups):
             raise ValueError("DSL_GROUP_NOT_ALLOWED")
-        for metric in dsl.get("metrics", []):
-            if metric.get("fn") not in ALLOWED_METRICS:
+        groups = list(raw_groups)
+        if len(groups) != len(set(groups)) or any(group not in ALLOWED_GROUPS for group in groups):
+            raise ValueError("DSL_GROUP_NOT_ALLOWED")
+        metrics = dsl.get("metrics", [])
+        if not isinstance(metrics, list):
+            raise ValueError("DSL_METRIC_NOT_ALLOWED")
+        for metric in metrics:
+            if not isinstance(metric, dict) or set(metric) - {"fn", "field"}:
                 raise ValueError("DSL_METRIC_NOT_ALLOWED")
-            if metric.get("fn") == "sum" and metric.get("field") not in {"amount_minor"}:
+            if not isinstance(metric.get("fn"), str) or metric.get("fn") not in ALLOWED_METRICS:
+                raise ValueError("DSL_METRIC_NOT_ALLOWED")
+            if metric.get("fn") == "sum" and metric.get("field") != "amount_minor":
                 raise ValueError("DSL_FIELD_NOT_ALLOWED")
-        for ordering in dsl.get("order_by", []):
-            if ordering.get("field") not in ALLOWED_GROUPS | {"sum_amount_minor", "count"} or ordering.get("dir", "asc") not in {"asc", "desc"}:
+            if metric.get("fn") == "count" and "field" in metric:
+                raise ValueError("DSL_METRIC_NOT_ALLOWED")
+        if len({metric["fn"] for metric in metrics}) != len(metrics):
+            raise ValueError("DSL_METRIC_NOT_ALLOWED")
+        orderings = dsl.get("order_by", [])
+        if not isinstance(orderings, list):
+            raise ValueError("DSL_ORDER_NOT_ALLOWED")
+        output_fields = set(groups)
+        if not groups and not metrics:
+            output_fields |= ALLOWED_FIELDS
+        selected_metrics = {metric["fn"] for metric in metrics} or ({"sum", "count"} if groups else set())
+        if "sum" in selected_metrics:
+            output_fields.add("sum_amount_minor")
+        if "count" in selected_metrics:
+            output_fields.add("count")
+        for ordering in orderings:
+            if not isinstance(ordering, dict) or set(ordering) - {"field", "dir"}:
+                raise ValueError("DSL_ORDER_NOT_ALLOWED")
+            if (not isinstance(ordering.get("field"), str) or ordering.get("field") not in output_fields
+                    or ordering.get("dir", "asc") not in {"asc", "desc"}):
                 raise ValueError("DSL_ORDER_NOT_ALLOWED")
         started = perf_counter()
         with self._readonly_session() as session:
@@ -70,16 +115,19 @@ class DslExecutor:
                 elif op == "lte":
                     statement = statement.where(column <= expected)
                 elif op == "between":
-                    if not isinstance(expected, list) or len(expected) != 2:
-                        raise ValueError("DSL_FILTER_VALUE_INVALID")
                     statement = statement.where(column.between(expected[0], expected[1]))
-            records = list(session.scalars(statement.order_by(Transaction.posted_at).limit(50_000)).all())
+            records = list(session.scalars(statement.order_by(Transaction.posted_at).limit(50_001)).all())
             if perf_counter() - started > 2.0:
                 raise ValueError("DSL_TIMEOUT")
-        if groups:
-            rows = self._group(records, groups)
+        if len(records) > 50_000:
+            raise ValueError("DSL_ROW_LIMIT_EXCEEDED")
+        if groups or metrics:
+            rows = self._group(records, groups, metrics)
         else:
             rows = [self._record_row(record) for record in records]
+        for ordering in reversed(orderings):
+            key = str(ordering["field"])
+            rows.sort(key=lambda row: cast(Any, row[key]), reverse=ordering.get("dir", "asc") == "desc")
         rows = rows[:limit]
         with self.database.sessions.begin() as session:
             PersistentAudit(self.database).append(session, f"trace_dsl_{query_hash[7:19]}", user_id,
@@ -144,7 +192,8 @@ class DslExecutor:
                 "merchant": record.merchant, "category": record.category,
                 "direction": record.direction}
 
-    def _group(self, records: list[Transaction], groups: list[str]) -> list[dict[str, Any]]:
+    def _group(self, records: list[Transaction], groups: list[str],
+               metrics: list[dict[str, Any]]) -> list[dict[str, Any]]:
         grouped: dict[tuple[Any, ...], list[Transaction]] = defaultdict(list)
         for record in records:
             key = tuple(self._group_value(record, group) for group in groups)
@@ -152,8 +201,11 @@ class DslExecutor:
         rows: list[dict[str, Any]] = []
         for key, items in sorted(grouped.items(), key=lambda pair: pair[0]):
             row: dict[str, Any] = {group: value for group, value in zip(groups, key, strict=True)}
-            row.update({"user_id": items[0].user_id, "sum_amount_minor": sum(item.amount_minor for item in items),
-                        "count": len(items), "txn_ids": [item.id for item in items]})
+            if "sum" in {metric["fn"] for metric in metrics} or not metrics:
+                row["sum_amount_minor"] = sum(item.amount_minor for item in items)
+            if "count" in {metric["fn"] for metric in metrics} or not metrics:
+                row["count"] = len(items)
+            row.update({"user_id": items[0].user_id, "txn_ids": [item.id for item in items]})
             rows.append(row)
         return rows
 
