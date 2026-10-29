@@ -63,7 +63,7 @@ def _run_case(case: dict[str, Any]) -> bool:
 
         database = Database("sqlite:///:memory:")
         load_seed(database)
-        service = CapabilityService(database, enforce_prepare=True)
+        service = CapabilityService(database, require_device_mfa=True, enforce_prepare=True)
         capability_id = str(case["capability_id"])
         payload = _capability_payload(capability_id, int(case.get("variant", 1)))
         if capability_id in {"W01", "W06"}:
@@ -203,13 +203,25 @@ def _run_case(case: dict[str, Any]) -> bool:
 
 def _complete_capability(service: Any, user_id: str, capability_id: str,
                          payload: dict[str, Any], idempotency_key: str) -> Any:
+    device_token: str | None = None
+    if capability_id in {"W04", "W05", "C01", "C04", "C05", "C06", "C08", "X05"}:
+        from agentbank.auth.devices import DeviceService
+
+        device_token = DeviceService(service.database).register(user_id)
+        service.device_tokens[user_id] = device_token
     result = service.execute(user_id, capability_id, payload, idempotency_key)
-    if result.status != "awaiting_confirmation":
-        return result
-    if result.data.get("plan_id"):
-        return service.confirm_transfer(user_id, result.record_id, str(result.data["display_hash"]))
-    return service.confirm_capability(user_id, result.record_id, str(result.data["receipt_id"]),
-                                      str(result.data["action_hash"]), str(result.data["display_hash"]))
+    if result.status == "awaiting_confirmation":
+        if result.data.get("plan_id"):
+            result = service.confirm_transfer(user_id, result.record_id, str(result.data["display_hash"]))
+        else:
+            result = service.confirm_capability(user_id, result.record_id, str(result.data["receipt_id"]),
+                                                str(result.data["action_hash"]), str(result.data["display_hash"]))
+    if result.status == "awaiting_mfa" and device_token is not None:
+        from agentbank.auth.devices import DeviceService
+
+        challenge = DeviceService(service.database).inbox(device_token)[0]
+        result = service.verify_mfa(user_id, result.record_id, challenge["code"])
+    return result
 
 
 CAPABILITY_IDS = [
@@ -293,5 +305,5 @@ def _capability_payload(capability_id: str, variant: int) -> dict[str, Any]:
     if capability_id in {"X03", "X04"}:
         return {"delivery_date": "2026-11-13"}
     if capability_id == "X05":
-        return {"card_id": "card_001", "mfa_verified": True}
+        return {"card_id": "card_001"}
     return {}

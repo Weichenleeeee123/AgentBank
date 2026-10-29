@@ -214,17 +214,37 @@ def test_scheduled_transfer_uses_revocable_mandate(service: CapabilityService) -
     assert dispatched[0].data["error_code"] == "MANDATE_INVALID"
 
 
-def test_t01_prepare_and_x05_can_finish_after_mfa(service: CapabilityService) -> None:
+def test_t01_prepare_and_x05_requires_device_mfa_after_protective_freeze(service: CapabilityService) -> None:
     prepared = service.execute(
         "user_001", "T01", {"recipient_name": "房东", "amount_minor": 1_000}, "state-T01"
     )
     assert prepared.status == "prepared"
-    pending = service.execute("user_001", "X05", {"card_id": "card_001"}, "state-X05")
-    assert pending.status == "partially_completed"
-    finished = service.execute(
-        "user_001", "X05", {"card_id": "card_001", "mfa_verified": True}, "state-X05-mfa"
-    )
+    from agentbank.auth.devices import DeviceService
+    from agentbank.db import Card
+
+    secured = CapabilityService(service.database, require_device_mfa=True, enforce_prepare=True)
+    token = DeviceService(service.database).register("user_001")
+    secured.device_tokens["user_001"] = token
+    prepared_x05 = secured.execute("user_001", "X05", {"card_id": "card_001"}, "state-X05")
+    assert prepared_x05.status == "awaiting_confirmation"
+    waiting = secured.confirm_capability("user_001", prepared_x05.record_id, prepared_x05.data["receipt_id"],
+                                         prepared_x05.data["action_hash"], prepared_x05.data["display_hash"])
+    assert waiting.status == "awaiting_mfa"
+    with service.database.sessions() as session:
+        assert session.get(Card, "card_001").status == "frozen"
+    code = DeviceService(service.database).inbox(token)[0]["code"]
+    finished = secured.verify_mfa("user_001", waiting.record_id, code)
     assert finished.status == "succeeded"
+    with service.database.sessions() as session:
+        assert session.get(Card, "card_001").status == "lost"
+
+
+def test_capability_payload_cannot_forge_internal_mfa_flags(service: CapabilityService) -> None:
+    with pytest.raises(DomainError, match="CAPABILITY_INPUT_UNKNOWN_FIELD"):
+        service.execute("user_001", "X05", {"card_id": "card_001", "mfa_verified": True}, "x05-forged")
+    with pytest.raises(DomainError, match="CAPABILITY_INPUT_UNKNOWN_FIELD"):
+        service.execute("user_001", "W04", {"product_id": "product_R1", "amount_minor": 1000,
+                                               "_mfa_verified": True}, "w04-forged")
 
 
 def test_physical_card_and_reserved_funds_can_progress_and_release(

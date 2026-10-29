@@ -267,17 +267,42 @@ class CapabilityService:
                     self.audit.append(session, f"trace_{record_id}", user_id,
                                       f"capability.{capability_id}.failed", {"error_code": exc.code})
             raise
+        mfa_receipt_id: str | None = None
+        if capability_id == "X05":
+            card_id = str(result_data.get("card_id", payload.get("card_id", "card_001")))
+            action_digest = "sha256:" + hashlib.sha256(
+                json.dumps({"capability_id": capability_id, "record_id": record_id,
+                            "step": "loss_report", "card_id": card_id}, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            display_digest = action_digest
+            mfa_receipt_id = f"rcp_{uuid.uuid4().hex}"
+            status = "awaiting_mfa"
+            result_data.update({"receipt_id": mfa_receipt_id, "action_hash": action_digest,
+                                "display_hash": display_digest, "assurance": "mfa",
+                                "next_step": "verify_loss_report"})
         with self.database.sessions.begin() as session:
             record = session.get(CapabilityRecord, record_id)
             if record is None or record.status != "executing":
                 raise DomainError("CAPABILITY_RECORD_NOT_FOUND")
             record.status = status
             result_data.update({"action_hash": action_hash_value, "display_hash": display_hash_value,
-                                "receipt_id": receipt_id})
+                                "receipt_id": mfa_receipt_id or receipt_id})
+            if mfa_receipt_id is not None:
+                result_data["payload"] = dict(payload)
             record.data_json = json.dumps(result_data, ensure_ascii=False, sort_keys=True)
+            if mfa_receipt_id is not None:
+                session.add(ReceiptRecord(id=mfa_receipt_id, subject_id=user_id, plan_id=record_id,
+                                          plan_revision=1, node_ids_json=json.dumps([record_id]),
+                                          action_hash=action_digest, display_hash=display_digest,
+                                          assurance="mfa", issued_at=utc_now_naive(),
+                                          expires_at=utc_now_naive() + timedelta(minutes=5), status="pending"))
             self.audit.append(session, f"trace_{record_id}", user_id,
                               f"capability.{capability_id}.confirmed", {"record_id": record_id, "status": status})
-            return self._result(record)
+            result = self._result(record)
+        if mfa_receipt_id is not None and user_id in self.device_tokens:
+            DeviceService(self.database).issue_otp(user_id, mfa_receipt_id)
+        return result
 
     def get(self, user_id: str, record_id: str) -> CapabilityResult:
         with self.database.sessions() as session:
@@ -624,14 +649,16 @@ class CapabilityService:
             return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "scheduled",
                     "delivery_date": payload.get("delivery_date", "2026-11-13")}, "scheduled"
         if capability_id == "X05":
-            card_id = CardService(self.database).freeze(user_id)
-            if payload.get("mfa_verified"):
+            card_id = str(payload.get("card_id", "card_001"))
+            if payload.get("_mfa_verified"):
                 with self.database.sessions.begin() as session:
                     card = session.get(Card, card_id)
-                    if card is not None:
-                        card.status = "lost"
+                    if card is None or card.user_id != user_id or card.status != "frozen":
+                        raise DomainError("INVALID_CARD_STATE")
+                    card.status = "lost"
                 return {"card_id": card_id, "freeze_status": "lost", "loss_report_status": "succeeded",
                         "payment_blocked": True}, "succeeded"
+            CardService(self.database).freeze(user_id, card_id)
             return {"card_id": card_id, "freeze_status": "frozen", "loss_report_status": "awaiting_mfa",
                     "next_step": "verify_loss_report"}, "partially_completed"
         raise DomainError("CAPABILITY_NOT_IMPLEMENTED")

@@ -36,7 +36,7 @@ CAP_CASES = {
     "X01": [{}, {}, {}], "X02": [{"amount_minor": 1000}, {"amount_minor": 2000}, {"amount_minor": 3000}],
     "X03": [{}, {"delivery_date": "2026-11-15"}, {"delivery_date": "2026-11-16"}],
     "X04": [{}, {"delivery_date": "2026-11-15"}, {"delivery_date": "2026-11-16"}],
-    "X05": [{"card_id": "card_001"}, {"card_id": "card_001", "mfa_verified": True}, {"card_id": "card_001", "mfa_verified": True}],
+    "X05": [{"card_id": "card_001"}, {"card_id": "card_001"}, {"card_id": "card_001"}],
 }
 
 

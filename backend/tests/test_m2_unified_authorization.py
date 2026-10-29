@@ -121,3 +121,38 @@ def test_api_write_capability_prepare_confirm_and_mfa_are_one_flow(tmp_path: Pat
     code = DeviceService(app.state.database).inbox(device_token)[0]["code"]
     verified = client.post(f"/v1/capability-records/{pending['record_id']}/verify", headers=headers, json={"otp": code})
     assert verified.status_code == 200 and verified.json()["status"] == "succeeded"
+
+
+def test_x05_api_requires_device_otp_after_freezing_card(tmp_path: Path) -> None:
+    app = create_app(f"sqlite:///{tmp_path / 'x05-api.db'}")
+    device_token = DeviceService(app.state.database).register("user_001")
+    client = TestClient(app)
+    client.get("/device/v1/inbox", headers={"X-Device-Token": device_token})
+    token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    forged = client.post("/v1/capabilities/X05", headers=headers, json={
+        "capability_id": "X05", "idempotency_key": "x05-forged-mfa",
+        "payload": {"card_id": "card_001", "mfa_verified": True},
+    })
+    assert forged.status_code == 400
+
+    prepared = client.post("/v1/capabilities/X05", headers=headers, json={
+        "capability_id": "X05", "idempotency_key": "x05-valid-flow", "payload": {"card_id": "card_001"},
+    }).json()
+    confirmed = client.post(f"/v1/capability-records/{prepared['record_id']}/confirm", headers=headers, json={
+        "receipt_id": prepared["data"]["receipt_id"], "display_hash": prepared["data"]["display_hash"],
+    })
+    assert confirmed.status_code == 200 and confirmed.json()["status"] == "awaiting_mfa"
+    with app.state.database.sessions() as session:
+        from agentbank.db import Card
+
+        assert session.get(Card, "card_001").status == "frozen"
+    code = DeviceService(app.state.database).inbox(device_token)[0]["code"]
+    verified = client.post(f"/v1/capability-records/{prepared['record_id']}/verify", headers=headers,
+                           json={"otp": code})
+    assert verified.status_code == 200 and verified.json()["status"] == "succeeded"
+    with app.state.database.sessions() as session:
+        from agentbank.db import Card
+
+        assert session.get(Card, "card_001").status == "lost"
