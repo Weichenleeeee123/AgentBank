@@ -23,12 +23,9 @@ from agentbank.agent.orchestrator import AgentOrchestrator
 from agentbank.channels.feishu import FeishuAdapter
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.analysis.dsl import DslExecutor
-from agentbank.bank.business import RiskService
-from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, Transaction, User
+from agentbank.db import CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, User
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
@@ -247,11 +244,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/v1/transactions")
     def get_transactions(user_id: str = Depends(current_user)) -> dict[str, Any]:
-        with database.sessions() as session:
-            rows = session.scalars(select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.posted_at)).all()
-            return {"transactions": [{"txn_id": row.id, "posted_at": row.posted_at, "amount_minor": row.amount_minor,
-                                      "merchant": row.merchant, "category": row.category, "direction": row.direction}
-                                     for row in rows]}
+        result = capabilities.execute(user_id, "Q02", {}, f"transactions-list-{secrets.token_urlsafe(10)}")
+        return result.data
 
     @app.get("/v1/operations/{operation_id}")
     def get_operation(operation_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -265,8 +259,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/analysis/run")
     def run_analysis(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        result = DslExecutor(database).run(user_id, payload)
-        return {"query_hash": result.query_hash, "row_count": result.row_count, "rows": result.rows}
+        result = capabilities.execute(user_id, "B01", {"dsl": payload},
+                                      f"analysis-{secrets.token_urlsafe(10)}")
+        return result.data
 
     @app.get("/v1/subscriptions")
     def get_subscriptions(user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -287,10 +282,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/v1/products/recommend")
     def recommend_products(user_id: str = Depends(current_user)) -> dict[str, Any]:
-        products = RiskService(database).recommend(user_id)
-        return {"products": [{"id": item.id, "name": item.name, "risk_level": item.risk_level,
-                              "term_days": item.term_days, "fee_bps": item.fee_bps,
-                              "redemption_days": item.redemption_days} for item in products]}
+        return capabilities.execute(user_id, "W01", {},
+                                    f"product-recommend-{secrets.token_urlsafe(10)}").data
 
     @app.post("/v1/cards/freeze")
     def freeze_card(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, str]:
@@ -329,15 +322,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/v1/reports/monthly")
     def get_monthly_report(start_month: str, end_month: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
-        return {"months": monthly_report(database, user_id, start_month, end_month)}
+        return capabilities.execute(user_id, "B03", {"start_month": start_month, "end_month": end_month},
+                                    f"report-monthly-{start_month}-{end_month}-{secrets.token_urlsafe(6)}").data
 
     @app.get("/v1/reports/annual")
     def get_annual_report(year: int, user_id: str = Depends(current_user)) -> dict[str, Any]:
-        months = monthly_report(database, user_id, f"{year:04d}-01", f"{year:04d}-12")
-        totals = {field: sum(int(item[field]) for item in months)
-                  for field in ("income_minor", "expense_minor", "transfer_minor")}
-        return {"year": year, "months": months, "missing_months": [item["month"] for item in months if item["missing"]],
-                "totals": totals, "source": "simulated_bank"}
+        return capabilities.execute(user_id, "B04", {"year": str(year), "start_month": f"{year:04d}-01",
+                                                       "end_month": f"{year:04d}-12"},
+                                    f"report-annual-{year}-{secrets.token_urlsafe(6)}").data
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
