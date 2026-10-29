@@ -115,8 +115,32 @@ class BusinessPlanService:
                 raise DomainError("RECEIPT_REPLAYED")
             if receipt.display_hash != display_hash or plan.display_hash != display_hash:
                 raise DomainError("HASH_MISMATCH")
-            records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id).order_by(PlanNodeRecord.id)).all())
+            if plan.status in {"cancelled", "invalidated", "succeeded"}:
+                raise DomainError("PLAN_STATE_INVALID")
+            records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all())
             consumed = {item.node_id for item in session.scalars(select(ReceiptConsumption).where(ReceiptConsumption.receipt_id == receipt_id)).all()}
+            record_by_logical = {json.loads(record.args_json)["id"]: record for record in records}
+            indegree = {logical_id: 0 for logical_id in record_by_logical}
+            children: dict[str, list[str]] = {logical_id: [] for logical_id in record_by_logical}
+            for logical_id, record in record_by_logical.items():
+                for dependency in json.loads(record.args_json).get("depends_on", []):
+                    if dependency not in record_by_logical:
+                        raise DomainError("PLAN_DEPENDENCY_MISSING")
+                    indegree[logical_id] += 1
+                    children[dependency].append(logical_id)
+            ready = [logical_id for logical_id, degree in indegree.items() if degree == 0]
+            topo_order: list[str] = []
+            while ready:
+                current = ready.pop(0)
+                topo_order.append(current)
+                for child in children[current]:
+                    indegree[child] -= 1
+                    if indegree[child] == 0:
+                        ready.append(child)
+            if len(topo_order) != len(record_by_logical):
+                raise DomainError("PLAN_CYCLE")
+            records = [record_by_logical[logical_id] for logical_id in topo_order]
+            plan.status = "running"
         capabilities = CapabilityService(self.database)
         reservation_id: str | None = None
         results: list[dict[str, Any]] = []
@@ -125,6 +149,11 @@ class BusinessPlanService:
             logical_id = data["id"]
             if logical_id in consumed:
                 continue
+            with self.database.sessions.begin() as session:
+                current = session.get(PlanNodeRecord, record.id)
+                if current is not None:
+                    current.status = "ready"
+                    current.status = "running"
             if data["id"] == "event":
                 status = "succeeded"
                 result_data = {"event_id": data["args"]["event_id"]}
