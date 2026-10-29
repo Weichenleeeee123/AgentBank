@@ -196,3 +196,16 @@ def test_agent_never_accepts_or_persists_pin_in_chat(tmp_path: Path) -> None:
         state = session.get(ConversationState, ("user_001", "pin-chat"))
         assert state is not None
         assert "1234" not in state.recent_user_messages_json
+
+
+def test_agent_completes_remaining_m2_slot_followups(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    first = agent.handle("user_001", "redeem-followup", "赎回理财")
+    assert first.kind == "clarification" and first.capability_id == "W05"
+    second = agent.handle("user_001", "redeem-followup", "订单 order_abc123")
+    assert second.kind == "confirmation" and second.data["payload"]["order_id"] == "order_abc123"
+
+    scheduled = agent.handle("user_001", "schedule-followup", "每月给房东转账")
+    assert scheduled.kind == "clarification" and scheduled.capability_id == "T04"
+    completed = agent.handle("user_001", "schedule-followup", "100元")
+    assert completed.kind == "confirmation" and completed.capability_id == "T04"

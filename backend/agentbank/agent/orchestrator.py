@@ -145,6 +145,17 @@ class AgentOrchestrator:
             if amount_match:
                 slots["amount_minor"] = self.parser.parse(f"转账 {amount_match.group('amount')}").slots.get("amount_minor")
                 missing = [item for item in missing if item != "amount_minor"]
+        elif pending.capability_id == "W05":
+            order_match = re.search(r"(?:订单|order[_-]?)\s*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
+            if order_match:
+                token = order_match.group(1)
+                slots["order_id"] = f"order_{token}" if token.isdigit() else token
+                missing = [item for item in missing if item != "order_id"]
+        elif pending.capability_id == "T04":
+            amount_match = self.parser._amount.search(text)
+            if amount_match:
+                slots["amount_minor"] = self.parser.parse(f"转账 {amount_match.group('amount')}").slots.get("amount_minor")
+                missing = [item for item in missing if item != "amount"]
         return ParsedIntent(pending.intent, pending.capability_id, slots, missing, pending.ambiguities)
 
     def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
