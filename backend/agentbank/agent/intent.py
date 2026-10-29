@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agentbank.errors import DomainError
@@ -15,6 +15,7 @@ class ParsedIntent:
     slots: dict[str, Any]
     missing: list[str]
     ambiguities: list[str]
+    references: list[dict[str, str]] = field(default_factory=list)
 
 
 class IntentParser:

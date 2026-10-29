@@ -183,6 +183,16 @@ class ConversationState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
 
+class ConversationReference(Base):
+    __tablename__ = "conversation_references"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    reference_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    capability_id: Mapped[str] = mapped_column(String(8))
+    slots_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class AABill(Base):
     __tablename__ = "aa_bills"
     id: Mapped[str] = mapped_column(String(80), primary_key=True)

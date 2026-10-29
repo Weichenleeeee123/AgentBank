@@ -3,6 +3,7 @@ from pathlib import Path
 from agentbank.agent.orchestrator import AgentOrchestrator
 from agentbank.agent.intent import IntentParser
 from agentbank.db import Database
+from agentbank.llm.gateway import LLMGateway, ProviderConfig
 from agentbank.seed.loader import load_seed
 
 
@@ -209,3 +210,38 @@ def test_agent_completes_remaining_m2_slot_followups(tmp_path: Path) -> None:
     assert scheduled.kind == "clarification" and scheduled.capability_id == "T04"
     completed = agent.handle("user_001", "schedule-followup", "100元")
     assert completed.kind == "confirmation" and completed.capability_id == "T04"
+
+
+def test_agent_uses_llm_planner_for_intent_outside_deterministic_parser(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'planner-agent.db'}")
+    load_seed(database)
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        if role == "planner":
+            return {"intent": "subscription_reminder", "capability_id": "S02",
+                    "slots": {"subscription_id": "sub_video", "days": 3},
+                    "missing": [], "ambiguities": [], "suggested_next_action": "execute"}
+        return {"message": "已处理", "fragments": []}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    response = AgentOrchestrator(database, llm=gateway).handle("user_001", "llm-route", "提醒我续费")
+    assert response.capability_id == "S02"
+    assert response.kind == "confirmation"
+
+
+def test_agent_uses_llm_reply_role_for_structured_fact_response(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'reply-agent.db'}")
+    load_seed(database)
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        if role == "reply":
+            return {"message": "模型根据事实生成的结果", "fragments": [{"type": "fact", "label": "可用余额",
+                                                                    "value_minor": 500_000, "currency": "CNY"}]}
+        return {"intent": "unknown", "confidence": 0.1}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    response = AgentOrchestrator(database, llm=gateway).handle("user_001", "reply-route", "查余额")
+    assert response.message == "模型根据事实生成的结果"
+    assert response.fragments[0]["value_minor"] == 500_000
