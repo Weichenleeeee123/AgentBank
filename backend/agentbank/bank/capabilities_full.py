@@ -778,8 +778,11 @@ class CapabilityService:
                 card = session.get(Card, card_id)
                 if card is None or card.user_id != user_id:
                     raise DomainError("NOT_OWNER")
-                card.limit_minor = int(payload.get("limit_minor", card.limit_minor))
-            return {"card_id": card_id, "limit_minor": int(payload.get("limit_minor", 100_000))}, "succeeded"
+                limit_minor = int(payload.get("limit_minor", card.limit_minor))
+                if limit_minor > 500_000:
+                    raise DomainError("CARD_LIMIT_EXCEEDED")
+                card.limit_minor = limit_minor
+            return {"card_id": card_id, "limit_minor": limit_minor}, "succeeded"
         if capability_id == "C03":
             card_id = str(payload.get("card_id", "card_001"))
             restriction = str(payload.get("restriction", "online"))

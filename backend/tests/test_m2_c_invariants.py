@@ -32,6 +32,8 @@ def test_c02_limits_and_c03_c04_restrictions_affect_payment(tmp_path: Path) -> N
     assert lowered.data["limit_minor"] == 90_000
     with pytest.raises(DomainError, match="MFA_REQUIRED"):
         service.execute("user_001", "C02", {"card_id": "card_001", "limit_minor": 110_000}, "c02-up-deny")
+    with pytest.raises(DomainError, match="CARD_LIMIT_EXCEEDED"):
+        service.execute("user_001", "C02", {"card_id": "card_001", "limit_minor": 500_001, "assurance": "mfa"}, "c02-product-cap")
     service.execute("user_001", "C02", {"card_id": "card_001", "limit_minor": 110_000, "assurance": "mfa"}, "c02-up")
     service.execute("user_001", "C03", {"card_id": "card_001", "restriction": "online"}, "c03-add")
     assert service.card_payment("user_001", "card_001", 100) == "CARD_RESTRICTED"
