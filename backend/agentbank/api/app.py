@@ -286,6 +286,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
         result = capabilities.execute(user_id, "S01", {}, f"subscription-list-{secrets.token_urlsafe(10)}")
         return result.model_dump(mode="json")
 
+    @app.get("/v1/notifications")
+    def list_notifications(unread_only: bool = False, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return {"notifications": capabilities.list_notifications(user_id, unread_only)}
+
     @app.post("/v1/subscriptions/{subscription_id}/cancel")
     def cancel_subscription(subscription_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
         result = capabilities.execute(user_id, "S03", {"subscription_id": subscription_id},

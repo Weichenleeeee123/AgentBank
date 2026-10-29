@@ -17,7 +17,7 @@ from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
 from agentbank.clock import BusinessClock, business_date, utc_now_naive
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
@@ -435,9 +435,25 @@ class CapabilityService:
                 query = query.where(OutboxEvent.user_id == user_id)
             for event in session.scalars(query).all():
                 event.status = "delivered"
+                payload = json.loads(event.payload_json)
+                if session.scalar(select(UserNotification).where(UserNotification.dedupe_key == event.dedupe_key)) is None:
+                    session.add(UserNotification(id=f"notice_{uuid.uuid4().hex}", user_id=event.user_id,
+                                                 event_type=event.event_type,
+                                                 title="订阅续费提醒",
+                                                 body=f"{payload.get('merchant', '订阅')}将在{payload.get('charge_date', '')}续费。",
+                                                 dedupe_key=event.dedupe_key, status="unread"))
                 delivered.append({"reminder_id": json.loads(event.payload_json)["reminder_id"],
                                   "dedupe_key": event.dedupe_key, "status": "sent"})
         return delivered
+
+    def list_notifications(self, user_id: str, unread_only: bool = False) -> list[dict[str, Any]]:
+        with self.database.sessions() as session:
+            query = select(UserNotification).where(UserNotification.user_id == user_id).order_by(UserNotification.created_at.desc())
+            if unread_only:
+                query = query.where(UserNotification.status == "unread")
+            return [{"notification_id": item.id, "event_type": item.event_type, "title": item.title,
+                     "body": item.body, "status": item.status, "created_at": item.created_at.isoformat()}
+                    for item in session.scalars(query).all()]
 
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:

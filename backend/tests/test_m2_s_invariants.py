@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.db import Database, DebitMandate, OutboxEvent, Reminder, Subscription
+from agentbank.db import Database, DebitMandate, OutboxEvent, Reminder, Subscription, UserNotification
 from agentbank.seed.loader import load_seed
 
 
@@ -60,6 +60,8 @@ def test_s02_outbox_delivery_is_explicit_and_idempotent(tmp_path: Path) -> None:
     with service.database.sessions() as session:
         event = session.query(OutboxEvent).filter(OutboxEvent.dedupe_key == due[0]["dedupe_key"]).one()
         assert event.status == "delivered"
+        notification = session.query(UserNotification).filter(UserNotification.dedupe_key == due[0]["dedupe_key"]).one()
+        assert notification.user_id == "user_001" and notification.status == "unread"
 
 
 def test_s03_cancels_subscription_and_revokes_mandate(tmp_path: Path) -> None:
