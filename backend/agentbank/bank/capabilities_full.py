@@ -21,7 +21,7 @@ from agentbank.db import AABill, AAShare, Account, Card, CardApplication, Capabi
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import SagaRunner
-from agentbank.tools import CAPABILITIES
+from agentbank.tools import CAPABILITIES, validate_capability_payload
 
 
 class CapabilityService:
@@ -43,13 +43,21 @@ class CapabilityService:
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
             raise DomainError("CAPABILITY_NOT_REGISTERED")
+        validate_capability_payload(capability_id, payload)
+        request_hash = "sha256:" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                                              separators=(",", ":")).encode("utf-8")).hexdigest()
         with self.database.sessions() as session:
             existing = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == idempotency_key))
             if existing is not None:
                 if existing.user_id != user_id:
                     raise DomainError("NOT_OWNER")
+                if existing.request_hash and existing.request_hash != request_hash:
+                    raise DomainError("IDEMPOTENCY_CONFLICT")
                 return self._result(existing)
-        write_capability = capability_id not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W03", "W06", "S01", "X01"}
+        read_only_capabilities = {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}
+        write_capability = capability_id not in read_only_capabilities
+        if capability_id == "T05" and payload.get("action") in {"preview", "status"}:
+            write_capability = False
         if self.enforce_prepare and write_capability and not payload.get("_confirmed") and not payload.get("_mfa_verified"):
             if capability_id in {"T01", "T02", "T03"}:
                 prepared, _ = self._dispatch(user_id, capability_id, payload, idempotency_key)
@@ -61,7 +69,7 @@ class CapabilityService:
                                        sort_keys=True, separators=(",", ":"))
                 action_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
                 display_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-                red = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True)))
+                red = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))) or (capability_id == "C07" and payload.get("action") == "unfreeze")
                 if capability_id == "C02":
                     with self.database.sessions() as session:
                         card = session.get(Card, str(payload.get("card_id", "card_001")))
@@ -81,7 +89,8 @@ class CapabilityService:
             with self.database.sessions.begin() as session:
                 receipt_id = str(data.get("receipt_id") or f"rcp_{uuid.uuid4().hex}")
                 session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
-                                             status=record_status, data_json=json.dumps(data, ensure_ascii=False), idempotency_key=idempotency_key))
+                                             status=record_status, data_json=json.dumps(data, ensure_ascii=False),
+                                             idempotency_key=idempotency_key, request_hash=request_hash))
                 if capability_id not in {"T01", "T02", "T03"}:
                     session.add(ReceiptRecord(id=receipt_id, subject_id=user_id, plan_id=record_id, plan_revision=1,
                                              node_ids_json=json.dumps([record_id]), action_hash=action_digest,
@@ -116,7 +125,7 @@ class CapabilityService:
                 with self.database.sessions.begin() as session:
                     session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
                                                  status="awaiting_mfa", data_json=json.dumps(pending_data, ensure_ascii=False),
-                                                 idempotency_key=idempotency_key))
+                                                 idempotency_key=idempotency_key, request_hash=request_hash))
                 if user_id in self.device_tokens:
                     DeviceService(self.database).issue_otp(user_id, record_id)
                 return CapabilityResult(capability_id=capability_id, record_id=record_id, status="awaiting_mfa",
@@ -132,7 +141,7 @@ class CapabilityService:
                     raise DomainError("MFA_REQUIRED")
         if capability_id == "C07" and payload.get("action") == "unfreeze" and payload.get("assurance") != "mfa":
             raise DomainError("MFA_REQUIRED")
-        read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "S01", "X01"}
+        read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"} or (capability_id == "T05" and payload.get("action") in {"preview", "status"})
         protective = capability_id in {"C02", "C03", "C07", "X05"}
         if not read_only and not protective and self.breaker.is_locked(user_id):
             with self.database.sessions.begin() as session:
@@ -144,7 +153,7 @@ class CapabilityService:
         with self.database.sessions.begin() as session:
             record = CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
                                       status=status, data_json=json.dumps(data, ensure_ascii=False, sort_keys=True),
-                                      idempotency_key=idempotency_key)
+                                      idempotency_key=idempotency_key, request_hash=request_hash)
             session.add(record)
             self.audit.append(session, f"trace_{record_id}", user_id, f"capability.{capability_id}.completed",
                               {"capability_id": capability_id, "record_id": record_id, "status": status,
@@ -289,6 +298,27 @@ class CapabilityService:
             mandate.status = "revoked"
             self.audit.append(session, f"trace_{mandate_id}", user_id, "mandate.revoked", {"mandate_id": mandate_id})
 
+    def simulate_subscription_charge(self, user_id: str, subscription_id: str) -> dict[str, Any]:
+        with self.database.sessions.begin() as session:
+            subscription = session.get(Subscription, subscription_id)
+            if subscription is None or subscription.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if subscription.status != "active":
+                return {"subscription_id": subscription_id, "charged": False, "reason": "CANCELLED"}
+            subscription_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+            if subscription_account is None or subscription_account.available_minor < subscription.amount_minor:
+                return {"subscription_id": subscription_id, "charged": False, "reason": "INSUFFICIENT_FUNDS"}
+            subscription_account.available_minor -= subscription.amount_minor
+            transaction_id = f"txn_sub_{uuid.uuid4().hex}"
+            session.add(Transaction(id=transaction_id, user_id=user_id, posted_at=self.clock.business_date(),
+                                    amount_minor=subscription.amount_minor, merchant=subscription.merchant,
+                                    category="订阅", direction="debit", memo="模拟续费"))
+            self.audit.append(session, f"trace_{transaction_id}", user_id, "subscription.charge.simulated",
+                              {"subscription_id": subscription_id, "transaction_id": transaction_id,
+                               "amount_minor": subscription.amount_minor})
+            return {"subscription_id": subscription_id, "charged": True, "transaction_id": transaction_id,
+                    "amount_minor": subscription.amount_minor}
+
     def confirm_transfer(self, user_id: str, record_id: str, display_hash: str) -> CapabilityResult:
         with self.database.sessions() as session:
             record = session.get(CapabilityRecord, record_id)
@@ -394,6 +424,10 @@ class CapabilityService:
                     "max_uses": int(payload.get("max_uses", 1)), "amount_minor": int(payload.get("amount_minor", 1_000)),
                     "recipient_id": recipient.id, "mandate_id": mandate_id, "operation_template": f"op_{idempotency_key}"}, "scheduled"
         if capability_id == "T05":
+            if payload.get("action") == "preview":
+                participants = [str(item) for item in payload.get("participant_ids", [user_id, "user_002", "user_003"])]
+                total_minor = int(payload.get("total_minor", 10_000))
+                return {"shares": split_bill(total_minor, participants, user_id), "preview_only": True}, "succeeded"
             if payload.get("action") == "status":
                 bill_id = str(payload["bill_id"])
                 with self.database.sessions() as session:
@@ -455,7 +489,11 @@ class CapabilityService:
             return {"products": [self._product_data(product) for product in products]}, "succeeded"
         if capability_id == "W02":
             with self.database.sessions() as session:
-                products = list(session.scalars(select(Product)).all())
+                product_query = select(Product)
+                product_ids = payload.get("product_ids")
+                if product_ids:
+                    product_query = product_query.where(Product.id.in_([str(item) for item in product_ids]))
+                products = list(session.scalars(product_query).all())
                 return {"products": [self._product_data(product) for product in products]}, "succeeded"
         if capability_id == "W03":
             profile = RiskService(self.database).submit(user_id, [int(value) for value in payload.get("answers", [1] * 10)])
@@ -504,24 +542,6 @@ class CapabilityService:
         if capability_id.startswith("C"):
             return self._card(user_id, capability_id, payload)
         if capability_id == "S01":
-            if payload.get("action") == "simulate_charge":
-                subscription_id = str(payload.get("subscription_id", "sub_video"))
-                with self.database.sessions.begin() as session:
-                    subscription = session.get(Subscription, subscription_id)
-                    if subscription is None or subscription.user_id != user_id:
-                        raise DomainError("NOT_OWNER")
-                    if subscription.status != "active":
-                        return {"subscription_id": subscription_id, "charged": False, "reason": "CANCELLED"}, "succeeded"
-                    subscription_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
-                    if subscription_account is None or subscription_account.available_minor < subscription.amount_minor:
-                        return {"subscription_id": subscription_id, "charged": False, "reason": "INSUFFICIENT_FUNDS"}, "succeeded"
-                    subscription_account.available_minor -= subscription.amount_minor
-                    transaction_id = f"txn_sub_{uuid.uuid4().hex}"
-                    session.add(Transaction(id=transaction_id, user_id=user_id, posted_at=self.clock.business_date(),
-                                            amount_minor=subscription.amount_minor, merchant=subscription.merchant,
-                                            category="订阅", direction="debit", memo="模拟续费"))
-                    return {"subscription_id": subscription_id, "charged": True, "transaction_id": transaction_id,
-                            "amount_minor": subscription.amount_minor}, "succeeded"
             return {"subscriptions": detect_subscriptions(self.database, user_id)}, "succeeded"
         if capability_id == "S02":
             subscription_id = str(payload.get("subscription_id", "sub_video"))

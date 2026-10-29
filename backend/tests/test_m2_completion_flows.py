@@ -23,11 +23,11 @@ def test_aa_participant_confirms_and_bill_closes(tmp_path: Path) -> None:
 
 def test_subscription_charge_is_blocked_after_cancel(tmp_path: Path) -> None:
     capability = service(tmp_path)
-    charged = capability.execute("user_001", "S01", {"action": "simulate_charge", "subscription_id": "sub_video"}, "charge-before-cancel")
-    assert charged.data["charged"] is True
+    charged = capability.simulate_subscription_charge("user_001", "sub_video")
+    assert charged["charged"] is True
     capability.execute("user_001", "S03", {"subscription_id": "sub_video"}, "cancel-before-next")
-    blocked = capability.execute("user_001", "S01", {"action": "simulate_charge", "subscription_id": "sub_video"}, "charge-after-cancel")
-    assert blocked.data["charged"] is False
+    blocked = capability.simulate_subscription_charge("user_001", "sub_video")
+    assert blocked["charged"] is False
 
 
 def test_redeem_progresses_from_processing_to_settled(tmp_path: Path) -> None:

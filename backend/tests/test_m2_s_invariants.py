@@ -35,5 +35,5 @@ def test_s03_cancels_subscription_and_revokes_mandate(tmp_path: Path) -> None:
         mandate = session.query(DebitMandate).filter(DebitMandate.subscription_id == "sub_video").one()
         assert subscription is not None and subscription.status == "cancelled"
         assert mandate.status == "revoked"
-    blocked = service.execute("user_001", "S01", {"action": "simulate_charge", "subscription_id": "sub_video"}, "s03-charge")
-    assert blocked.data["charged"] is False
+    blocked = service.simulate_subscription_charge("user_001", "sub_video")
+    assert blocked["charged"] is False

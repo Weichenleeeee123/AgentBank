@@ -167,6 +167,7 @@ class CapabilityRecord(Base):
     status: Mapped[str] = mapped_column(String(48), default="created")
     data_json: Mapped[str] = mapped_column(Text, default="{}")
     idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    request_hash: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive, onupdate=utc_now_naive)
 
