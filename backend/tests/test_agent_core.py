@@ -65,8 +65,9 @@ def test_agent_continues_missing_slots_and_risk_questionnaire(tmp_path: Path) ->
     risk = agent.handle("user_001", "conv-risk", "做风险测评")
     assert risk.kind == "clarification"
     complete = agent.handle("user_001", "conv-risk", "1 1 1 1 1 1 1 1 1 1")
-    assert complete.kind == "facts"
-    assert complete.data["level"] == "C1"
+    assert complete.kind == "confirmation"
+    confirmed = agent.confirm("user_001", complete.record_id, complete.display_hash, complete.data["receipt_id"])
+    assert confirmed.data["level"] == "C1"
 
 
 def test_agent_routes_subscription_and_card_commands(tmp_path: Path) -> None:

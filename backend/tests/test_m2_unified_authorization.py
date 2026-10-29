@@ -60,7 +60,12 @@ def test_api_write_capability_prepare_confirm_and_mfa_are_one_flow(tmp_path: Pat
     })
     assert confirmed.status_code == 200 and confirmed.json()["status"] == "succeeded"
 
-    client.post("/v1/risk/submit", headers=headers, json={"answers": [2] * 10})
+    risk = client.post("/v1/risk/submit", headers=headers, json={"answers": [2] * 10}).json()
+    assert risk["status"] == "awaiting_confirmation"
+    risk_confirm = client.post(f"/v1/capability-records/{risk['record_id']}/confirm", headers=headers,
+                               json={"receipt_id": risk["data"]["receipt_id"],
+                                     "display_hash": risk["data"]["display_hash"]})
+    assert risk_confirm.status_code == 200 and risk_confirm.json()["status"] == "succeeded"
     pending = client.post("/v1/capabilities/W04", headers=headers, json={
         "capability_id": "W04", "idempotency_key": "unified-api-w04", "payload": {
             "product_id": "product_R1", "amount_minor": 1_000,

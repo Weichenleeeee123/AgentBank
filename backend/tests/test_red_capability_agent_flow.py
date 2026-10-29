@@ -14,7 +14,9 @@ def test_agent_red_investment_creates_challenge_then_completes(tmp_path: Path) -
     agent = AgentOrchestrator(database)
     agent.capabilities.device_tokens["user_001"] = token
     agent.handle("user_001", "risk", "做风险测评")
-    agent.handle("user_001", "risk", "1 1 1 1 1 1 1 1 1 1")
+    risk = agent.handle("user_001", "risk", "1 1 1 1 1 1 1 1 1 1")
+    assert risk.kind == "confirmation"
+    agent.confirm("user_001", risk.record_id, risk.display_hash, risk.data["receipt_id"])
     response = agent.handle("user_001", "invest", "申购 R1 20 元")
     assert response.kind == "confirmation"
     response = agent.confirm("user_001", response.record_id, response.display_hash,

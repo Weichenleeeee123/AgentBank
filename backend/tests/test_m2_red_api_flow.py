@@ -13,7 +13,11 @@ def test_generic_red_capability_api_can_finish_with_device_otp(tmp_path: Path) -
     assert client.get("/device/v1/inbox", headers={"X-Device-Token": device_token}).status_code == 200
     token = client.post("/v1/sessions", json={"user_id": "user_001"}).json()["access_token"]
     headers = {"Authorization": f"Bearer {token}"}
-    client.post("/v1/risk/submit", headers=headers, json={"answers": [2] * 10})
+    risk = client.post("/v1/risk/submit", headers=headers, json={"answers": [2] * 10}).json()
+    risk_confirm = client.post(f"/v1/capability-records/{risk['record_id']}/confirm", headers=headers,
+                               json={"receipt_id": risk["data"]["receipt_id"],
+                                     "display_hash": risk["data"]["display_hash"]})
+    assert risk_confirm.status_code == 200
     pending = client.post("/v1/capabilities/W04", headers=headers, json={
         "capability_id": "W04", "idempotency_key": "api-red-w04", "payload": {
             "product_id": "product_R1", "amount_minor": 1_000, "assurance": "mfa",

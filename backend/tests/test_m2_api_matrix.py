@@ -65,6 +65,12 @@ def test_every_m2_capability_has_http_entrypoint(tmp_path: Path, capability_id: 
     if capability_id in {"W01", "W04", "W05", "W06"}:
         risk = client.post("/v1/risk/submit", headers=headers, json={"answers": [2] * 10})
         assert risk.status_code == 200
+        prepared_risk = risk.json()
+        if prepared_risk.get("status") == "awaiting_confirmation":
+            risk_confirm = client.post(f"/v1/capability-records/{prepared_risk['record_id']}/confirm", headers=headers,
+                                       json={"receipt_id": prepared_risk["data"]["receipt_id"],
+                                             "display_hash": prepared_risk["data"]["display_hash"]})
+            assert risk_confirm.status_code == 200
     response = client.post(f"/v1/capabilities/{capability_id}", headers={"Authorization": f"Bearer {token}"},
                            json={"capability_id": capability_id, "idempotency_key": f"http-{capability_id}",
                                  "payload": payload_for(capability_id)})

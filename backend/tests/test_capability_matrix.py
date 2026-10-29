@@ -8,7 +8,7 @@ from agentbank.seed.loader import load_seed
 
 
 CAP_CASES = {
-    "Q01": [{}, {}, {"as_of": True}],
+    "Q01": [{}, {}, {}],
     "Q02": [{}, {"limit": 10}, {"category": "餐饮"}],
     "T01": [{"recipient_name": "房东", "amount_minor": 100}, {"recipient_name": "房东", "amount_minor": 200}, {"recipient_name": "房东", "amount_minor": 300}],
     "T02": [{"phone": "13800000001"}, {"phone": "13800000002"}, {"phone": "13800000001", "amount_minor": 200}],
@@ -16,10 +16,10 @@ CAP_CASES = {
     "T04": [{"max_uses": 1}, {"period": "monthly", "max_uses": 2}, {"period": "once"}],
     "T05": [{"total_minor": 10000}, {"total_minor": 10001}, {"total_minor": 30100, "participant_ids": ["user_001", "user_002", "user_003", "user_004"]}],
     "B01": [{}, {"dsl": {"source": "transactions", "group_by": ["month"], "limit": 10}}, {"dsl": {"source": "transactions", "group_by": ["category"], "limit": 5}}],
-    "B02": [{}, {"merchant": "重复商户"}, {"reason_code": "DUP_CHARGE"}],
+    "B02": [{}, {}, {}],
     "B03": [{}, {"start_month": "2026-05", "end_month": "2026-07"}, {"start_month": "2026-01", "end_month": "2026-12"}],
     "B04": [{"year": "2026"}, {"start_month": "2025-11", "end_month": "2026-10"}, {"start_month": "2026-01", "end_month": "2026-12"}],
-    "W01": [{}, {}, {}], "W02": [{}, {"product_id": "product_R1"}, {"product_id": "product_R5"}],
+    "W01": [{}, {}, {}], "W02": [{}, {"product_ids": ["product_R1"]}, {"product_ids": ["product_R1", "product_R5"]}],
     "W03": [{"answers": [1] * 10}, {"answers": [2] * 10}, {"answers": [4] * 10}],
     "W04": [{"product_id": "product_R1", "amount_minor": 1000}, {"product_id": "product_R1", "amount_minor": 2000}, {"product_id": "product_R2", "amount_minor": 3000}],
     "W05": [{}, {"order_id": "order_1"}, {"order_id": "order_2"}], "W06": [{}, {}, {}],

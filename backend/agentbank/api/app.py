@@ -24,8 +24,7 @@ from agentbank.channels.feishu import FeishuAdapter
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.analysis.dsl import DslExecutor
-from agentbank.bank.business import CardService, RiskService, SubscriptionService
-from agentbank.bank.capabilities import split_bill
+from agentbank.bank.business import RiskService
 from agentbank.analysis.insights import monthly_report
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
@@ -271,20 +270,20 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.get("/v1/subscriptions")
     def get_subscriptions(user_id: str = Depends(current_user)) -> dict[str, Any]:
-        subscriptions = SubscriptionService(database).list(user_id)
-        return {"subscriptions": [{"id": item.id, "merchant": item.merchant, "amount_minor": item.amount_minor,
-                                    "status": item.status, "next_charge_at": item.next_charge_at}
-                                   for item in subscriptions]}
+        result = capabilities.execute(user_id, "S01", {}, f"subscription-list-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.post("/v1/subscriptions/{subscription_id}/cancel")
     def cancel_subscription(subscription_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
-        SubscriptionService(database).cancel(user_id, subscription_id)
-        return {"subscription_id": subscription_id, "status": "cancelled"}
+        result = capabilities.execute(user_id, "S03", {"subscription_id": subscription_id},
+                                      f"subscription-cancel-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.post("/v1/risk/submit")
     def submit_risk(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        profile = RiskService(database).submit(user_id, [int(value) for value in payload.get("answers", [])])
-        return {"level": profile.level, "score": profile.score, "expires_on": profile.expires_on}
+        result = capabilities.execute(user_id, "W03", {"answers": [int(value) for value in payload.get("answers", [])]},
+                                      f"risk-submit-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.get("/v1/products/recommend")
     def recommend_products(user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -295,23 +294,28 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/cards/freeze")
     def freeze_card(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, str]:
-        card_id = CardService(database).freeze(user_id, payload.get("card_id"))
-        return {"card_id": card_id, "status": "frozen"}
+        result = capabilities.execute(user_id, "C07", {"card_id": payload.get("card_id")},
+                                      f"card-freeze-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.post("/v1/cards/{card_id}/unfreeze")
     def unfreeze_card(card_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:
-        CardService(database).unfreeze(user_id, card_id, assurance=payload.get("assurance", ""))
-        return {"card_id": card_id, "status": "active"}
+        result = capabilities.execute(user_id, "C07", {"card_id": card_id, "action": "unfreeze",
+                                                         "assurance": "mfa"}, f"card-unfreeze-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.post("/v1/aa/preview")
     def preview_aa(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        shares = split_bill(int(payload["total_minor"]), [str(item) for item in payload["participant_ids"]], user_id)
-        return {"shares": shares, "status": "preview"}
+        result = capabilities.execute(user_id, "T05", {"action": "preview", "total_minor": int(payload["total_minor"]),
+                                                         "participant_ids": [str(item) for item in payload["participant_ids"]]},
+                                      f"aa-preview-{secrets.token_urlsafe(10)}")
+        return result.model_dump(mode="json")
 
     @app.post("/v1/aa/bills")
     def create_aa_bill(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        key = str(payload.get("idempotency_key") or f"aa-{secrets.token_urlsafe(12)}")
-        return capabilities.execute(user_id, "T05", payload, key).model_dump(mode="json")
+        command = dict(payload)
+        key = str(command.pop("idempotency_key", "") or f"aa-{secrets.token_urlsafe(12)}")
+        return capabilities.execute(user_id, "T05", command, key).model_dump(mode="json")
 
     @app.get("/v1/aa/bills/{bill_id}")
     def get_aa_bill(bill_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:

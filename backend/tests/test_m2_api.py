@@ -24,7 +24,11 @@ def test_m2_api_exposes_analysis_subscription_card_and_plan_views(tmp_path: Path
 
     subscriptions = client.get("/v1/subscriptions", headers=headers)
     assert subscriptions.status_code == 200
-    assert subscriptions.json()["subscriptions"]
+    assert subscriptions.json()["status"] == "awaiting_confirmation"
+    sub_data = subscriptions.json()["data"]
+    sub_confirm = client.post(f"/v1/capability-records/{subscriptions.json()['record_id']}/confirm", headers=headers,
+                              json={"receipt_id": sub_data["receipt_id"], "display_hash": sub_data["display_hash"]})
+    assert sub_confirm.status_code == 200
 
     prepared = client.post("/v1/transfers/prepare", headers=headers, json={"recipient_name": "房东", "amount_minor": 1_000})
     plan = client.get(f"/v1/plans/{prepared.json()['plan_id']}", headers=headers)
