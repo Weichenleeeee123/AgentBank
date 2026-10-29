@@ -1,9 +1,12 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+from time import sleep
 
 import pytest
 
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.db import Database, Subscription
+from agentbank.db import AABill, Database, Subscription
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from fastapi.testclient import TestClient
@@ -42,6 +45,45 @@ def test_red_capability_requires_confirmation_then_device_mfa(tmp_path: Path) ->
     ready = service.confirm_capability("user_001", prepared.record_id, prepared.data["receipt_id"],
                                        prepared.data["action_hash"], prepared.data["display_hash"])
     assert ready.status == "awaiting_mfa"
+
+
+def test_concurrent_receipt_confirmation_dispatches_only_once(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'concurrent-confirm.db'}")
+    load_seed(database)
+    service = CapabilityService(database, enforce_prepare=True)
+    prepared = service.execute(
+        "user_001", "T05", {"total_minor": 10_000, "participant_ids": ["user_001", "user_002"]},
+        "concurrent-aa",
+    )
+    original_dispatch = service._dispatch
+    dispatch_count = 0
+    dispatch_lock = Lock()
+
+    def delayed_dispatch(user_id, capability_id, payload, idempotency_key):
+        nonlocal dispatch_count
+        with dispatch_lock:
+            dispatch_count += 1
+        sleep(0.1)
+        return original_dispatch(user_id, capability_id, payload, idempotency_key)
+
+    service._dispatch = delayed_dispatch
+
+    def confirm():
+        try:
+            return service.confirm_capability(
+                "user_001", prepared.record_id, prepared.data["receipt_id"],
+                prepared.data["action_hash"], prepared.data["display_hash"],
+            ).status
+        except DomainError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: confirm(), range(2)))
+
+    assert sorted(outcomes) == ["RECEIPT_REPLAYED", "created"]
+    assert dispatch_count == 1
+    with database.sessions() as session:
+        assert session.query(AABill).filter(AABill.user_id == "user_001").count() == 1
 
 
 def test_api_write_capability_prepare_confirm_and_mfa_are_one_flow(tmp_path: Path) -> None:
