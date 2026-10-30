@@ -37,6 +37,7 @@ def test_dockerfile_builds_the_same_application_used_by_compose() -> None:
     assert "COPY pyproject.toml README.md ./" in dockerfile
     assert "COPY backend ./backend" in dockerfile
     assert "COPY frontend ./frontend" in dockerfile
+    assert "COPY evals ./evals" in dockerfile
     assert '"agentbank.api.run:app"' in dockerfile
     assert '"--host", "0.0.0.0"' in dockerfile
     assert '"--port", "8000"' in dockerfile

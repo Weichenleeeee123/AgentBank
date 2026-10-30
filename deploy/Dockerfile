@@ -4,6 +4,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY backend ./backend
 COPY frontend ./frontend
+COPY evals ./evals
 RUN pip install --no-cache-dir .
 
 ENV PYTHONPATH=/app/backend
