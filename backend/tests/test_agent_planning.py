@@ -45,14 +45,14 @@ def test_llm_planner_references_are_persisted_and_sent_back(tmp_path: Path) -> N
         if role == "planner":
             payloads.append(payload)
             return {"intent": "transfer", "capability_id": "T01",
-                    "slots": {"recipient_name": "张三", "amount_minor": 10000},
+                    "slots": {"recipient_name": "房东", "amount_minor": 10000},
                     "missing": [], "ambiguities": [],
-                    "references": [{"slot": "recipient_name", "source": "user", "text": "张三"}],
+                    "references": [{"slot": "recipient_name", "source": "user", "text": "房东"}],
                     "suggested_next_action": "execute"}
         return {"message": "请确认", "fragments": []}
 
     agent = make_agent(tmp_path, transport)
-    response = agent.handle("user_001", "reference-round", "给张三转100元")
+    response = agent.handle("user_001", "reference-round", "给房东转100元")
     assert response.kind in {"confirmation", "mfa"}
     agent.handle("user_001", "reference-round", "继续")
     assert any("references" in payload for payload in payloads[1:])
