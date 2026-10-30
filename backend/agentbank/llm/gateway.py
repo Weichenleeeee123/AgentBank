@@ -93,7 +93,8 @@ class LLMGateway:
         missing = list(result.get("missing", []))
         grounded = self._grounded_values(user_text, self._sanitize_context(context or {}))
         provenance_required = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit",
-                               "recipient_name", "phone", "alias", "product_id", "order_id", "card_id",
+                               "recipient_name", "recipient_id", "phone", "alias", "product_id", "order_id", "card_id",
+                               "product_ids", "participant_ids", "answers",
                                "subscription_id", "bill_id", "plan_id", "start_date", "end_date",
                                "start_month", "end_month", "year", "next_due", "delivery_date", "dispatch_on"}
         for key in list(slots):
@@ -106,7 +107,7 @@ class LLMGateway:
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
                 "references": [],
                 "explore": result.get("explore", False),
-                "suggested_next_action": str(result.get("suggested_next_action", "clarify")),
+                "suggested_next_action": "clarify" if missing else str(result.get("suggested_next_action", "clarify")),
                 "source": result.get("source", "model")}
 
     def render_reply(self, user_id: str, capability_id: str, status: str,
@@ -154,6 +155,8 @@ class LLMGateway:
             if result is None:
                 break
             tool = result.get("tool")
+            if tool is None:
+                break
             if tool is not None and tool not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}:
                 break
             try:
