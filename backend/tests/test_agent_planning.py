@@ -55,7 +55,7 @@ def test_llm_planner_references_are_persisted_and_sent_back(tmp_path: Path) -> N
     response = agent.handle("user_001", "reference-round", "给房东转100元")
     assert response.kind in {"confirmation", "mfa"}
     agent.handle("user_001", "reference-round", "继续")
-    assert any("references" in payload for payload in payloads[1:])
+    assert any("references" in payload.get("context", {}) for payload in payloads[1:])
 
 
 def test_llm_birthday_template_returns_plan_confirmation_and_executes_plan(tmp_path: Path) -> None:

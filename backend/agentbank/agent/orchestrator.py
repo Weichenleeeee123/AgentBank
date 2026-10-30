@@ -178,7 +178,7 @@ class AgentOrchestrator:
             if record is None or record.user_id != user_id:
                 return {}
             data = json.loads(record.data_json)
-        allowed = {"recipient_name", "recipient_id", "phone", "alias", "amount_minor", "memo",
+        allowed = {"recipient_name", "recipient_id", "phone", "alias", "amount_minor",
                    "product_id", "order_id", "card_id", "limit_minor", "restriction", "subscription_id",
                    "days", "event_id", "reserve_minor"}
         payload = data.get("payload", {})
