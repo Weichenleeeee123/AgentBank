@@ -14,6 +14,8 @@ from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.agent.intent import IntentParser, ParsedIntent
 from agentbank.llm.gateway import LLMGateway
 from agentbank.tools import INPUT_FIELDS
+from agentbank.workflow.recovery import HandoffService
+from agentbank.security.fraud import FraudDetector, FraudLevel
 
 
 class AgentResponse:
@@ -109,6 +111,13 @@ class AgentOrchestrator:
             if planned.get("plan_template") == "birthday":
                 return self._prepare_birthday_plan(user_id, conversation_id, text, planned)
             if planned_parsed is not None:
+                transfer_family = {"T01", "T02", "T03"}
+                if parsed.capability_id in transfer_family and planned_parsed.capability_id in transfer_family:
+                    planned_slots = {key: value for key, value in planned_parsed.slots.items()
+                                     if key not in {"recipient_name", "phone", "alias"}}
+                    planned_parsed = ParsedIntent(planned_parsed.intent, parsed.capability_id,
+                                                   planned_slots, planned_parsed.missing,
+                                                   planned_parsed.ambiguities, planned_parsed.references)
                 if parsed.capability_id == planned_parsed.capability_id:
                     planned_parsed = self._merge_deterministic(planned_parsed, parsed)
                 parsed = planned_parsed
@@ -152,6 +161,21 @@ class AgentOrchestrator:
             parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "assurance": "mfa"}, parsed.missing, parsed.ambiguities)
         capability_id = parsed.capability_id
         assert capability_id is not None
+        if capability_id in {"T01", "T02", "T03"}:
+            rules = FraudDetector().evaluate("转账 " + " ".join(recent_messages), relation={}, behavior={})
+            fraud = (self.llm.classify_fraud(text, user_id=user_id, recent_user_messages=recent_messages)
+                     if self.llm.primary is not None else {"category": "unknown", "confidence": 0.0})
+            fraud_confidence = fraud.get("confidence")
+            if not isinstance(fraud_confidence, (int, float)) or isinstance(fraud_confidence, bool):
+                fraud_confidence = 0.0
+            if rules.level == FraudLevel.high or (self.llm.primary is not None and
+                                                   (fraud["category"] != "safe" or fraud_confidence < 0.5)):
+                reason = ("classifier_unknown" if fraud["category"] == "unknown" else
+                          f"fraud_{fraud['category']}")
+                case = HandoffService(self.database).open(user_id, "transfer", reason)
+                return AgentResponse(kind="error", intent=parsed.intent, capability_id=capability_id,
+                                     data={"reason_code": "FRAUD_REVIEW_REQUIRED", "handoff_case_id": case.id},
+                                     message="检测到需要人工核实的转账风险，本次没有准备或执行转账。请通过官方渠道核实后再发起操作。")
         try:
             result = self.capabilities.execute(user_id, capability_id, parsed.slots, key)
         except AmbiguousRecipient:
@@ -231,7 +255,7 @@ class AgentOrchestrator:
         missing = [item for item in planned.missing if item not in slots]
         missing.extend(item for item in deterministic.missing if item not in slots and item not in missing)
         return ParsedIntent(planned.intent, planned.capability_id, slots, missing,
-                            planned.ambiguities or deterministic.ambiguities,
+                            deterministic.ambiguities,
                             planned.references or deterministic.references)
 
     def _persist_references(self, user_id: str, conversation_id: str, parsed: ParsedIntent) -> None:

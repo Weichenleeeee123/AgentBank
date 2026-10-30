@@ -40,6 +40,8 @@ def test_llm_planner_fills_pending_slots_on_follow_up(tmp_path: Path) -> None:
 
 def test_llm_outage_uses_deterministic_fallback_and_does_not_execute_write(tmp_path: Path) -> None:
     def transport(config, role, payload):
+        if role == "fraud":
+            return {"category": "safe", "confidence": 0.99}
         raise TimeoutError("offline provider")
 
     agent = make_agent(tmp_path, transport)
@@ -53,6 +55,8 @@ def test_llm_outage_uses_deterministic_fallback_and_does_not_execute_write(tmp_p
 
 def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Path) -> None:
     def transport(config, role, payload):
+        if role == "fraud":
+            return {"category": "safe", "confidence": 0.99}
         return {"intent": "transfer", "capability_id": "T01", "slots": {
                     "recipient_name": "房东", "amount_minor": 100}, "missing": [],
                 "ambiguities": [], "suggested_next_action": "execute"}
@@ -63,10 +67,28 @@ def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Pat
     assert response.data["payload"]["amount_minor"] == 10000
 
 
+def test_transfer_family_uses_normalized_payee_resolution_mode(tmp_path: Path) -> None:
+    def transport(config, role, payload):
+        if role == "fraud":
+            return {"category": "safe", "confidence": 0.99}
+        return {"intent": "transfer", "capability_id": "T03",
+                "slots": {"alias": "房东", "amount_minor": 10000}, "missing": [],
+                "ambiguities": ["模型提出但确定性收款人解析已消歧"], "suggested_next_action": "execute"}
+
+    agent = make_agent(tmp_path, transport)
+    response = agent.handle("user_001", "planner-family", "给房东转100元")
+    assert response.kind == "confirmation"
+    assert response.capability_id == "T01"
+    assert response.data["payload"]["recipient_name"] == "房东"
+    assert response.data["payload"]["amount_minor"] == 10000
+
+
 def test_llm_planner_references_are_persisted_and_sent_back(tmp_path: Path) -> None:
     payloads: list[dict[str, object]] = []
 
     def transport(config, role, payload):
+        if role == "fraud":
+            return {"category": "safe", "confidence": 0.99}
         if role == "planner":
             payloads.append(payload)
             return {"intent": "transfer", "capability_id": "T01",

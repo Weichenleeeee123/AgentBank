@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,8 +30,11 @@ class LLMGateway:
     PLAN_PROMPT_VERSION = "agent-plan-v1"
     REPLY_PROMPT_VERSION = "agent-reply-v1"
     EXPLORER_PROMPT_VERSION = "agent-explore-v1"
+    FRAUD_PROMPT_VERSION = "agent-fraud-v1"
     READ_ONLY_CAPABILITIES = frozenset(READ_ONLY - {"S01"})
     PLANNER_ACTIONS = ("clarify", "explore", "execute", "confirm")
+    FRAUD_CATEGORIES = frozenset({"safe", "impersonation", "investment_scam", "credential_theft",
+                                  "urgent_relative", "refund_scam", "other_scam", "unknown"})
 
     def __init__(self, database: Database, primary: ProviderConfig | None,
                  backup: ProviderConfig | None, *, transport: Transport | None = None) -> None:
@@ -72,6 +75,52 @@ class LLMGateway:
                                  "attempt": attempt + 1, "error_type": type(error).__name__})
         return {"intent": "unknown", "confidence": 0.0, "source": "deterministic_fallback",
                 "failures": failures}
+
+    def classify_fraud(self, user_text: str, *, user_id: str,
+                       recent_user_messages: list[str] | None = None) -> dict[str, Any]:
+        redacted = redact_text(user_text)
+        text_hash = hashlib.sha256(redacted.encode("utf-8")).hexdigest()
+        fallback = {"category": "unknown", "confidence": 0.0, "source": "deterministic_fallback"}
+        if self.primary is None:
+            self._audit(user_id, "llm.call.skipped", {"role": "fraud", "reason": "no_provider",
+                                                        "prompt_version": self.FRAUD_PROMPT_VERSION,
+                                                        "text_hash": text_hash})
+            return fallback
+        for config in (self.primary, self.backup):
+            if config is None:
+                continue
+            attempts = 2 if config is self.primary else 1
+            for attempt in range(attempts):
+                try:
+                    response = self.transport(replace(config, timeout_seconds=min(config.timeout_seconds, 2.0)), "fraud", {
+                        "text": redacted,
+                        "recent_user_messages": [redact_text(item) for item in (recent_user_messages or [])[-6:]],
+                        "temperature": 0,
+                        "prompt_version": self.FRAUD_PROMPT_VERSION,
+                        "system_prompt": self._load_prompt("fraud"),
+                        "response_schema": {"category": sorted(self.FRAUD_CATEGORIES), "confidence": "number"},
+                    })
+                    category = response.get("category")
+                    confidence = response.get("confidence")
+                    if (category not in self.FRAUD_CATEGORIES or not isinstance(confidence, (int, float))
+                            or isinstance(confidence, bool) or not 0 <= float(confidence) <= 1):
+                        raise ValueError("fraud response schema invalid")
+                    result = {"category": str(category), "confidence": float(confidence), "source": config.name,
+                              "prompt_version": self.FRAUD_PROMPT_VERSION}
+                    self._audit(user_id, "llm.call.completed", {"role": "fraud", "provider": config.name,
+                                 "model": config.model, "prompt_version": self.FRAUD_PROMPT_VERSION,
+                                 "text_hash": text_hash, "attempt": attempt + 1,
+                                 "category": result["category"], "confidence": result["confidence"]})
+                    return result
+                except Exception as error:
+                    self._audit(user_id, "llm.call.failed", {"role": "fraud", "provider": config.name,
+                                 "model": config.model, "prompt_version": self.FRAUD_PROMPT_VERSION,
+                                 "text_hash": text_hash, "attempt": attempt + 1,
+                                 "error_type": type(error).__name__})
+        self._audit(user_id, "llm.call.unknown", {"role": "fraud", "reason": "providers_exhausted",
+                                                   "prompt_version": self.FRAUD_PROMPT_VERSION,
+                                                   "text_hash": text_hash})
+        return fallback
 
     def plan_intent(self, user_text: str, *, user_id: str,
                     recent_user_messages: list[str] | None = None,
