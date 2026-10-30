@@ -285,7 +285,8 @@ def _run_capability_detailed(case: dict[str, Any]) -> tuple[bool, dict[str, Any]
             branch = "strict_prepare_confirm_otp"
         elif variant == 2:
             result, state = _run_colloquial_journey(database, service, capability_id)
-            passed = _assert_terminal_state(database, service, capability_id, result, variant)[0]
+            passed, terminal = _assert_terminal_state(database, service, capability_id, result, variant)
+            state.update(terminal)
             branch = "deterministic_agent_multiround" if capability_id != "C08" else "secure_form_direct_C08"
         else:
             passed, state = _run_boundary_journey(database, service, capability_id)
@@ -306,9 +307,12 @@ def _journey_setup(service: Any, database: Any, capability_id: str, variant: int
     """Create only the prerequisites a real user would have before a journey."""
     if capability_id in {"W01", "W06"}:
         _complete_capability(service, "user_001", "W03", {"answers": [1] * 10}, f"setup-{capability_id}-{variant}")
+    if capability_id == "W06":
+        _complete_capability(service, "user_001", "W04", {"product_id": "product_R1", "amount_minor": 1_000,
+                                                             "assurance": "mfa"}, f"setup-position-{variant}")
     if capability_id in {"W04", "W05"}:
         _complete_capability(service, "user_001", "W03", {"answers": [2] * 10}, f"setup-risk-{capability_id}-{variant}")
-    if capability_id == "W05":
+    if capability_id == "W05" and variant != 3:
         _complete_capability(service, "user_001", "W04",
                              {"product_id": "product_R1", "amount_minor": 1_000,
                               "assurance": "mfa"}, f"setup-order-{variant}")
@@ -330,12 +334,13 @@ def _finish_deferred(service: Any, capability_id: str, result: Any) -> None:
 def _run_colloquial_journey(database: Any, service: Any, capability_id: str) -> tuple[Any, dict[str, Any]]:
     from agentbank.agent.orchestrator import AgentOrchestrator
     from agentbank.auth.devices import DeviceService
+    from agentbank.llm.gateway import LLMGateway
     user_id, conversation_id = "user_001", f"colloquial-{capability_id}"
     device_token = DeviceService(database).register(user_id)
     service.device_tokens[user_id] = device_token
     text_by_capability = {
-        "Q01": "查余额", "Q02": "查询交易记录", "T01": "给房租转两百元",
-        "T02": "给 13800000001 转两百元", "T03": "按房租备注转两百", "T04": "每月给房租转十元",
+        "Q01": "查余额", "Q02": "查询交易记录", "T01": "转给房东 200元",
+        "T02": "给 13800000001 转 200元", "T03": "按房租备注转 200元", "T04": "每月给房东 10元",
         "T05": "这顿饭一共一百元，帮我 AA", "B01": "消费分类", "B02": "异常交易",
         "B03": "给我做一份月报", "B04": "查看年报", "W01": "推荐理财",
         "W02": "比较理财产品", "W03": "我想做风险测评", "W04": "申购 R1 1000元",
@@ -346,7 +351,7 @@ def _run_colloquial_journey(database: Any, service: Any, capability_id: str) -> 
         "X01": "我爱人生日快到了，有什么要准备", "X02": "先帮我锁定一千元",
         "X03": "生日订一束鲜花", "X04": "生日订一个蛋糕", "X05": "我的卡好像被盗刷了",
     }
-    agent = AgentOrchestrator(database, capabilities=service)
+    agent = AgentOrchestrator(database, llm=LLMGateway(database, None, None), capabilities=service)
     if capability_id == "C08":
         # PIN values never enter chat history.  The secure form is the documented
         # deterministic acceptance path for this one capability.
@@ -425,7 +430,20 @@ def _assert_terminal_state(database: Any, service: Any, capability_id: str, resu
             order = session.get(InvestmentOrder, data.get("order_id", ""))
             ok = order is not None and order.status == "processing" and order.side == "redeem" and bool(data.get("expected_settlement_at"))
         elif capability_id == "W06":
-            ok = data.get("source") == "simulated_bank" and bool(data.get("as_of")) and all("pnl_minor" in row for row in data.get("positions", []))
+            from datetime import datetime
+            positions = session.scalars(select(Position).where(Position.user_id == "user_001")).all()
+            rows = data.get("positions", [])
+            by_product = {row["product_id"]: row for row in rows}
+            ok = (data.get("source") == "simulated_market" and bool(data.get("as_of"))
+                  and len(rows) == len(positions) > 0)
+            for position in positions:
+                row = by_product.get(position.product_id, {})
+                valuation_date = datetime.fromisoformat(str(data.get("as_of"))).date()
+                expected_pnl = position.cost_minor * max(0, (valuation_date - position.as_of.date()).days) // 2000
+                ok = ok and (row.get("shares") == position.shares > 0
+                             and row.get("market_value_minor") == position.cost_minor + expected_pnl
+                             and row.get("pnl_minor") == expected_pnl
+                             and bool(row.get("order_ids")))
         elif capability_id == "C01":
             card = session.get(Card, data.get("card_id", ""))
             app = session.scalar(select(CardApplication).where(CardApplication.card_id == data.get("card_id", "")))
@@ -493,7 +511,7 @@ def _run_boundary_journey(database: Any, service: Any, capability_id: str) -> tu
                 _complete_capability(service, user, "T02", {"phone": "13800000009", "amount_minor": 100}, key)
             except Exception as error:
                 return "RECIPIENT_NOT_FOUND" in str(error), {"boundary": "unknown_phone_denied", "error": str(error)}
-            return True, {"boundary": "masked_phone_transfer", "recipient_phone_tail": "0001"}
+            return False, {"boundary": "unknown_phone_denied", "error": "unexpectedly accepted"}
         if capability_id in {"T01", "T03"}:
             try:
                 service.execute(user, capability_id, {"recipient_name": "张三", "amount_minor": 100}, key)
@@ -528,7 +546,15 @@ def _run_boundary_journey(database: Any, service: Any, capability_id: str) -> tu
                 return "SUITABILITY_MISMATCH" in str(error), {"boundary": "suitability_denied", "error": str(error)}
             return False, {"boundary": "suitability_denied"}
         if capability_id == "W05":
-            return True, {"boundary": "unredeemable_order_denied", "error": "ORDER_NOT_REDEEMABLE"}
+            from agentbank.db import InvestmentOrder
+            from sqlalchemy import select
+            try:
+                _complete_capability(service, user, "W05", {"order_id": "order_missing", "assurance": "mfa"}, key)
+            except Exception as error:
+                with database.sessions() as session:
+                    order_count = len(session.scalars(select(InvestmentOrder).where(InvestmentOrder.user_id == user)).all())
+                return "ORDER_NOT_REDEEMABLE" in str(error) and order_count == 0, {"boundary": "unredeemable_order_denied", "error": str(error), "new_orders": order_count}
+            return False, {"boundary": "unredeemable_order_denied", "error": "unexpectedly accepted"}
         if capability_id in {"C05", "C06", "C07", "C08", "X05"}:
             if capability_id == "C06":
                 try:
@@ -537,7 +563,21 @@ def _run_boundary_journey(database: Any, service: Any, capability_id: str) -> tu
                     return "INVALID_CARD_STATE" in str(error), {"boundary": "release_requires_lost", "error": str(error)}
                 return False, {"boundary": "release_requires_lost", "error": "unexpectedly accepted"}
             elif capability_id == "C08":
-                return True, {"boundary": "pin_not_in_chat", "form_required": True}
+                from agentbank.agent.orchestrator import AgentOrchestrator
+                from agentbank.db import CapabilityRecord, ConversationState
+                from agentbank.llm.gateway import LLMGateway
+                import json
+                response = AgentOrchestrator(database, llm=LLMGateway(database, None, None), capabilities=service).handle(user, "boundary-C08", "修改密码 2468")
+                with database.sessions() as session:
+                    state = session.get(ConversationState, (user, "boundary-C08"))
+                    recent = json.loads(state.recent_user_messages_json) if state is not None else []
+                    secret_records = session.scalars(select(CapabilityRecord).where(CapabilityRecord.capability_id == "C08")).all()
+                return (response.kind == "clarification" and response.capability_id == "C08"
+                        and not secret_records and all("2468" not in str(item) for item in recent)), {
+                            "boundary": "pin_not_in_chat", "form_required": True,
+                            "chat_rejected_pin": response.kind == "clarification",
+                            "persisted_pin_occurrences": sum("2468" in str(item) for item in recent),
+                        }
             elif capability_id == "X05":
                 initial = service.execute(user, "X05", {"card_id": "card_001"}, key)
                 confirmed = service.confirm_capability(user, initial.record_id, str(initial.data["receipt_id"]),
@@ -580,8 +620,31 @@ def _run_boundary_journey(database: Any, service: Any, capability_id: str) -> tu
                 reservation = session.get(Reservation, reserved.data.get("reservation_id", ""))
             return reservation is not None and reservation.status == "active" and account is not None, {"boundary": "reserve_persists_until_release"}
         if capability_id in {"X03", "X04"}:
-            result = _complete_capability(service, user, capability_id, {"delivery_date": "2026-11-13", "simulate_failure": True}, key)
-            return result.status == "partially_completed", {"boundary": "merchant_failure_compensated", "status": result.status}
+            from agentbank.db import Account, LedgerEntry, MerchantOrder, Reservation
+            initial_available: int
+            with database.sessions() as session:
+                account = session.scalar(select(Account).where(Account.user_id == user).order_by(Account.id))
+                initial_available = int(account.available_minor) if account is not None else -1
+            reservation = _complete_capability(service, user, "X02", {"amount_minor": 5_000}, key + "-reserve")
+            result = _complete_capability(service, user, capability_id, {"delivery_date": "2026-11-13",
+                                                                          "simulate_failure": True,
+                                                                          "reservation_id": reservation.data["reservation_id"]}, key)
+            with database.sessions() as session:
+                order = session.get(MerchantOrder, result.data.get("order_id", ""))
+                saved_reservation = session.get(Reservation, reservation.data["reservation_id"])
+                account = session.scalar(select(Account).where(Account.user_id == user).order_by(Account.id))
+                operation_entries = session.scalars(select(LedgerEntry).where(
+                    LedgerEntry.operation_id == f"op_merchant_{result.data.get('order_id', '')}")).all()
+            state = {"boundary": "merchant_failure_compensated", "status": result.status,
+                     "order_status": order.status if order is not None else None,
+                     "reservation_status": saved_reservation.status if saved_reservation is not None else None,
+                     "available_minor": account.available_minor if account is not None else None,
+                     "initial_available_minor": initial_available,
+                     "ledger_entry_count": len(operation_entries)}
+            return (result.status == "failed" and order is not None and order.status == "failed"
+                    and saved_reservation is not None and saved_reservation.status == "released"
+                    and account is not None and account.available_minor == initial_available
+                    and not operation_entries), state
     except Exception as error:
         return False, {"boundary": capability_id, "error": str(error)}
     return False, {"boundary": capability_id, "error": "boundary branch missing"}
