@@ -57,6 +57,9 @@ class AgentOrchestrator:
         else:
             continued = parsed
             safe_context = {"parsed_intent": parsed.intent, "slots": parsed.slots}
+        references = self._load_references(user_id, conversation_id)
+        if references:
+            safe_context["references"] = references
         if latest_prepared is not None:
             prepared = self._prepared_context(user_id, latest_prepared)
             if prepared:
@@ -171,6 +174,23 @@ class AgentOrchestrator:
         payload = data.get("payload", {})
         safe_payload = {key: value for key, value in payload.items() if key in allowed}
         return {"capability_id": record.capability_id, "status": record.status, "slots": safe_payload}
+
+    def _load_references(self, user_id: str, conversation_id: str) -> list[dict[str, Any]]:
+        with self.database.sessions() as session:
+            references = session.query(ConversationReference).filter(
+                ConversationReference.user_id == user_id,
+                ConversationReference.conversation_id == conversation_id,
+            ).all()
+        safe: list[dict[str, Any]] = []
+        for reference in references[-10:]:
+            try:
+                value = json.loads(reference.slots_json)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                safe.append({"slot": reference.reference_key, "capability_id": reference.capability_id,
+                             "value": {key: value[key] for key in ("source", "text") if key in value}})
+        return safe
 
     def _set_latest_prepared(self, user_id: str, conversation_id: str, record_id: str | None) -> None:
         with self.database.sessions.begin() as session:
