@@ -43,6 +43,16 @@ class AgentOrchestrator:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
         latest_prepared = self._latest_prepared(user_id, conversation_id)
         if latest_prepared is not None and any(token in text for token in ("别转", "取消", "算了", "不要转")):
+            with self.database.sessions() as session:
+                from agentbank.db import PlanRecord
+                active_plan = session.get(PlanRecord, latest_prepared)
+            if active_plan is not None and active_plan.user_id == user_id:
+                from agentbank.workflow.planner import BusinessPlanService
+                result_data = BusinessPlanService(self.database).cancel(user_id, latest_prepared)
+                self._set_latest_prepared(user_id, conversation_id, None)
+                self._save_pending(user_id, conversation_id, None)
+                return AgentResponse(kind="result", intent="cancel", record_id=latest_prepared,
+                                     data=result_data, message="已取消计划，原确认凭证已作废。")
             result = self.capabilities.invalidate_prepared(user_id, latest_prepared, cancelled=True)
             self._save_pending(user_id, conversation_id, None)
             return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
@@ -345,7 +355,11 @@ class AgentOrchestrator:
         slots = planned.get("slots", {})
         event_id = slots.get("event_id") if isinstance(slots, dict) else None
         reserve_minor = slots.get("reserve_minor") if isinstance(slots, dict) else None
-        if not isinstance(event_id, str) or not isinstance(reserve_minor, int) or isinstance(reserve_minor, bool):
+        if (not isinstance(event_id, str) or not isinstance(reserve_minor, int) or isinstance(reserve_minor, bool)
+                or planned.get("missing")):
+            self._save_pending(user_id, conversation_id, ParsedIntent("birthday_plan", None,
+                               slots if isinstance(slots, dict) else {},
+                               list(planned.get("missing", ["event_id", "reserve_minor"])), [], []))
             return AgentResponse(kind="clarification", intent="birthday_plan",
                                  message="请提供生日事件和预留金额。")
         from agentbank.workflow.planner import BusinessPlanService
@@ -354,11 +368,15 @@ class AgentOrchestrator:
         except DomainError as error:
             return AgentResponse(kind="error", intent="birthday_plan", message=error.code)
         with self.database.sessions() as session:
-            from agentbank.db import ReceiptRecord
+            from agentbank.db import PlanRecord, ReceiptRecord
             receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
+            plan_record = session.get(PlanRecord, plan.plan_id)
+            assert plan_record is not None
+            display_hash = plan_record.display_hash
         self._save_pending(user_id, conversation_id, None)
+        self._set_latest_prepared(user_id, conversation_id, plan.plan_id)
         return AgentResponse(kind="plan_confirmation", intent="birthday_plan", record_id=plan.plan_id,
-                             display_hash=plan.display_hash,
+                             display_hash=display_hash,
                              data={"plan_id": plan.plan_id, "plan_type": "birthday",
                                    "receipt_id": receipt.id, "revision": plan.revision,
                                    "status": plan.status, "display": plan.display},
