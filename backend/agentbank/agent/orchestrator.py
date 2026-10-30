@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.contracts import CapabilityResult
-from agentbank.db import ConversationState, Database
+from agentbank.db import ConversationReference, ConversationState, Database
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.agent.intent import IntentParser, ParsedIntent
@@ -48,6 +48,19 @@ class AgentOrchestrator:
             return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
                                  record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
         parsed = self.parser.parse(text)
+        pending = self._load_pending(user_id, conversation_id)
+        if pending is not None:
+            continued = self._continue_pending(pending, text)
+            safe_context = {"parsed_intent": continued.intent, "slots": continued.slots,
+                            "pending_intent": {"capability_id": pending.capability_id,
+                                               "slots": pending.slots, "missing": pending.missing}}
+        else:
+            continued = parsed
+            safe_context = {"parsed_intent": parsed.intent, "slots": parsed.slots}
+        if latest_prepared is not None:
+            prepared = self._prepared_context(user_id, latest_prepared)
+            if prepared:
+                safe_context["prepared"] = prepared
         if latest_prepared is not None and any(token in text for token in ("不对", "改成", "改为", "重新")):
             with self.database.sessions() as session:
                 from agentbank.db import CapabilityRecord
@@ -67,9 +80,9 @@ class AgentOrchestrator:
         if parsed.capability_id == "C08" and parsed.slots.get("new_pin"):
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
                                  message="修改密码请在 App 的安全表单中输入，不要在聊天里发送密码。")
-        if parsed.capability_id is None:
+        if self.llm.primary is not None:
             planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
-                                           context={"parsed_intent": parsed.intent})
+                                           context=safe_context)
             if planned.get("explore") is True:
                 exploration = self.llm.explore_read_only(
                     user_id, str(planned.get("intent", parsed.intent)), {"slots": planned.get("slots", {})},
@@ -77,18 +90,26 @@ class AgentOrchestrator:
                         user_id, conversation_id, capability_id, payload, step),
                 )
                 planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
-                                               context={"parsed_intent": parsed.intent, "exploration": exploration})
+                                               context={**safe_context, "exploration": exploration})
             planned_parsed = self._from_planner(planned)
+            if planned.get("plan_template") == "birthday":
+                return self._prepare_birthday_plan(user_id, conversation_id, text, planned)
             if planned_parsed is not None:
+                if parsed.capability_id == planned_parsed.capability_id:
+                    planned_parsed = self._merge_deterministic(planned_parsed, parsed)
                 parsed = planned_parsed
-            else:
+                self._persist_references(user_id, conversation_id, parsed)
+            elif pending is not None and continued.capability_id is not None:
+                parsed = continued
+            elif parsed.capability_id is None:
                 suggestion = self.llm.classify_intent(text, user_id=user_id, recent_user_messages=recent_messages)
                 parsed = self._apply_intent_hint(ParsedIntent("unknown", None, {}, [], []),
                                                  str(suggestion.get("intent", "unknown")))
-        pending = self._load_pending(user_id, conversation_id)
-        if pending is not None and (parsed.capability_id is None
+        elif pending is not None and (parsed.capability_id is None or parsed.capability_id == pending.capability_id):
+            parsed = continued
+        if pending is not None and (parsed.capability_id is None or parsed.capability_id == pending.capability_id
                                     or (pending.capability_id == "S02" and parsed.capability_id == "S01")):
-            parsed = self._continue_pending(pending, text)
+            parsed = continued if parsed.capability_id != continued.capability_id else self._merge_deterministic(parsed, continued)
         if parsed.capability_id is None:
             return AgentResponse(kind="clarification", intent=parsed.intent, message="我还不能确定要办理哪项银行业务，请说明查询、转账、账单、理财、卡片或订阅。")
         if parsed.ambiguities:
@@ -137,6 +158,20 @@ class AgentOrchestrator:
             state = session.get(ConversationState, (user_id, conversation_id))
             return state.current_plan_id if state is not None else None
 
+    def _prepared_context(self, user_id: str, record_id: str) -> dict[str, Any]:
+        with self.database.sessions() as session:
+            from agentbank.db import CapabilityRecord
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                return {}
+            data = json.loads(record.data_json)
+        allowed = {"recipient_name", "recipient_id", "phone", "alias", "amount_minor", "memo",
+                   "product_id", "order_id", "card_id", "limit_minor", "restriction", "subscription_id",
+                   "days", "event_id", "reserve_minor"}
+        payload = data.get("payload", {})
+        safe_payload = {key: value for key, value in payload.items() if key in allowed}
+        return {"capability_id": record.capability_id, "status": record.status, "slots": safe_payload}
+
     def _set_latest_prepared(self, user_id: str, conversation_id: str, record_id: str | None) -> None:
         with self.database.sessions.begin() as session:
             state = session.get(ConversationState, (user_id, conversation_id))
@@ -156,6 +191,29 @@ class AgentOrchestrator:
         return ParsedIntent(str(planned.get("intent", "unknown")), str(capability_id),
                             slots, list(planned.get("missing", [])),
                             list(planned.get("ambiguities", [])), list(planned.get("references", [])))
+
+    @staticmethod
+    def _merge_deterministic(planned: ParsedIntent, deterministic: ParsedIntent) -> ParsedIntent:
+        if planned.capability_id != deterministic.capability_id:
+            return planned
+        slots = {**planned.slots, **deterministic.slots}
+        missing = [item for item in planned.missing if item not in slots]
+        missing.extend(item for item in deterministic.missing if item not in slots and item not in missing)
+        return ParsedIntent(planned.intent, planned.capability_id, slots, missing,
+                            planned.ambiguities or deterministic.ambiguities,
+                            planned.references or deterministic.references)
+
+    def _persist_references(self, user_id: str, conversation_id: str, parsed: ParsedIntent) -> None:
+        if not parsed.references or parsed.capability_id is None:
+            return
+        with self.database.sessions.begin() as session:
+            for index, reference in enumerate(parsed.references):
+                if not isinstance(reference, dict):
+                    continue
+                key = str(reference.get("slot", f"ref_{index}"))[:80]
+                session.merge(ConversationReference(user_id=user_id, conversation_id=conversation_id,
+                                                    reference_key=key, capability_id=parsed.capability_id,
+                                                    slots_json=json.dumps(reference, ensure_ascii=False)))
 
     def _execute_exploration(self, user_id: str, conversation_id: str, capability_id: str,
                              payload: dict[str, Any], step: int) -> dict[str, Any]:
@@ -252,15 +310,61 @@ class AgentOrchestrator:
             elif "AI" in text.upper():
                 slots["subscription_id"] = "sub_ai"
                 missing = [item for item in missing if item != "subscription_id"]
+            days = re.search(r"([0-9一二三四五六七八九十]+)\s*(?:天|日)", text)
+            if days:
+                token = days.group(1)
+                numbers = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+                           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                slots["days"] = int(token) if token.isdigit() else numbers.get(token, 0)
+                if slots["days"] > 0:
+                    missing = [item for item in missing if item != "days"]
         return ParsedIntent(pending.intent, pending.capability_id, slots, missing, pending.ambiguities, pending.references)
+
+    def _prepare_birthday_plan(self, user_id: str, conversation_id: str, text: str,
+                               planned: dict[str, Any]) -> AgentResponse:
+        slots = planned.get("slots", {})
+        event_id = slots.get("event_id") if isinstance(slots, dict) else None
+        reserve_minor = slots.get("reserve_minor") if isinstance(slots, dict) else None
+        if not isinstance(event_id, str) or not isinstance(reserve_minor, int) or isinstance(reserve_minor, bool):
+            return AgentResponse(kind="clarification", intent="birthday_plan",
+                                 message="请提供生日事件和预留金额。")
+        from agentbank.workflow.planner import BusinessPlanService
+        try:
+            plan = BusinessPlanService(self.database).create_birthday_plan(user_id, event_id, reserve_minor)
+        except DomainError as error:
+            return AgentResponse(kind="error", intent="birthday_plan", message=error.code)
+        with self.database.sessions() as session:
+            from agentbank.db import ReceiptRecord
+            receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
+        self._save_pending(user_id, conversation_id, None)
+        return AgentResponse(kind="plan_confirmation", intent="birthday_plan", record_id=plan.plan_id,
+                             display_hash=plan.display_hash,
+                             data={"plan_id": plan.plan_id, "plan_type": "birthday",
+                                   "receipt_id": receipt.id, "revision": plan.revision,
+                                   "status": plan.status, "display": plan.display},
+                             message="请核对生日计划后确认。")
 
     def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
         with self.database.sessions() as session:
             from agentbank.db import CapabilityRecord
+            from agentbank.db import PlanRecord
+            plan_record = session.get(PlanRecord, record_id)
+            if plan_record is not None:
+                if plan_record.user_id != user_id:
+                    raise DomainError("NOT_OWNER")
+                plan_confirmation = True
+            else:
+                plan_confirmation = False
             record = session.get(CapabilityRecord, record_id)
-            if record is None or record.user_id != user_id:
+            if not plan_confirmation and (record is None or record.user_id != user_id):
                 raise DomainError("NOT_OWNER")
-            data = json.loads(record.data_json)
+            data = json.loads(record.data_json) if record is not None else {}
+        if plan_confirmation:
+            from agentbank.workflow.planner import BusinessPlanService
+            result = BusinessPlanService(self.database).execute_plan(user_id, record_id, receipt_id, display_hash)
+            return AgentResponse(kind="result", intent="birthday_plan", record_id=record_id,
+                                 display_hash=display_hash, data=result,
+                                 message="生日计划已按确认的计划执行。")
         if data.get("plan_id"):
             result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)
         else:
