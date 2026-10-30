@@ -824,14 +824,15 @@ class CapabilityService:
                                               amount_minor=int(payload.get("amount_minor", 5_000)),
                                               delivery_date=str(payload.get("delivery_date", "2026-11-13")), status="failed",
                                               reservation_id=payload.get("reservation_id")))
-                    reservation_id = payload.get("reservation_id")
-                    reservation = session.get(Reservation, str(reservation_id)) if reservation_id else None
-                    if reservation_id and (reservation is None or reservation.user_id != user_id):
+                    reservation_id_value = payload.get("reservation_id")
+                    compensation_reservation_id = str(reservation_id_value) if reservation_id_value else None
+                    reservation = session.get(Reservation, compensation_reservation_id) if compensation_reservation_id else None
+                    if compensation_reservation_id is not None and (reservation is None or reservation.user_id != user_id):
                         raise DomainError("NOT_OWNER")
-                    account = session.get(Account, reservation.account_id) if reservation is not None else None
+                    compensation_account: Account | None = session.get(Account, reservation.account_id) if reservation is not None else None
                     if reservation is not None and reservation.status == "active":
-                        if account is not None:
-                            account.available_minor += reservation.amount_minor
+                        if compensation_account is not None:
+                            compensation_account.available_minor += reservation.amount_minor
                         reservation.status = "released"
                     operation_id = f"op_merchant_{order_id}"
                     session.add(Operation(id=operation_id, user_id=user_id,
@@ -970,10 +971,12 @@ class CapabilityService:
                 return "LIMIT_EXCEEDED"
             return "approved"
 
-    def progress_investments(self, user_id: str | None = None) -> list[CapabilityResult]:
+    def progress_investments(self, user_id: str | None = None, *, due_only: bool = False) -> list[CapabilityResult]:
         changed: list[CapabilityRecord] = []
         with self.database.sessions.begin() as session:
             query = select(InvestmentOrder).where(InvestmentOrder.status == "processing", InvestmentOrder.side == "redeem")
+            if due_only:
+                query = query.where(InvestmentOrder.expected_settlement_at <= self.clock.now().replace(tzinfo=None))
             if user_id:
                 query = query.where(InvestmentOrder.user_id == user_id)
             orders = list(session.scalars(query).all())

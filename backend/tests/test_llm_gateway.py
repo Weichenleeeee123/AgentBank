@@ -59,7 +59,8 @@ def test_gateway_planner_returns_structured_capability_frame(tmp_path: Path) -> 
                          transport=transport)
     result = gateway.plan_intent("提醒我续费", user_id="user_001", recent_user_messages=[])
     assert result["capability_id"] == "S02"
-    assert result["slots"]["subscription_id"] == "sub_video"
+    assert "subscription_id" not in result["slots"]
+    assert "subscription_id" in result["missing"]
     assert roles == ["planner"]
 
 

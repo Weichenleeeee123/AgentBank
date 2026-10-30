@@ -29,6 +29,66 @@ def test_planner_receives_registered_slots_and_cannot_inject_capability(tmp_path
     assert len(requests) == 2
 
 
+def test_capability_catalogue_has_model_safe_slot_contracts() -> None:
+    catalogue = LLMGateway.capability_catalogue()
+    assert catalogue["W02"]["required_slots"] == []
+    assert catalogue["B04"]["slots"]["year"]["type"] == "string"
+    assert "assurance" not in catalogue["W04"]["slots"]
+    assert "device_token" not in catalogue["W04"]["slots"]
+    assert "otp" not in catalogue["W04"]["slots"]
+    assert "new_pin" not in catalogue["C08"]["slots"]
+    assert "simulate_failure" not in catalogue["X03"]["slots"]
+    assert catalogue["W02"]["name"] == "比较指定理财产品"
+
+
+def test_natural_language_action_is_rejected_and_retried(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'runtime-action.db'}")
+    load_seed(database)
+    requests: list[dict[str, object]] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        requests.append(payload)
+        if len(requests) == 1:
+            return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                    "ambiguities": [], "suggested_next_action": "执行"}
+        return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                "ambiguities": [], "suggested_next_action": "execute"}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    result = gateway.plan_intent("查余额", user_id="user_001")
+    assert result["suggested_next_action"] == "execute"
+    assert len(requests) == 2
+    schema = requests[0]["response_schema"]
+    assert isinstance(schema, dict)
+    assert schema["suggested_next_action"] == ("clarify", "explore", "execute", "confirm")
+
+
+def test_read_only_catalogue_excludes_subscription_list() -> None:
+    assert "S01" not in LLMGateway.READ_ONLY_CAPABILITIES
+
+
+def test_critical_slots_require_grounding_from_text_or_structured_observation(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'runtime-provenance.db'}")
+    load_seed(database)
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"intent": "transfer", "capability_id": "T01", "slots": {
+            "recipient_name": "张三", "amount_minor": 5}, "missing": [], "ambiguities": [],
+            "suggested_next_action": "execute"}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    from_text = gateway.plan_intent("给张三转500元", user_id="user_001")
+    assert from_text["slots"]["recipient_name"] == "张三"
+    assert "amount_minor" not in from_text["slots"]
+    assert "amount_minor" in from_text["missing"]
+
+    from_observation = gateway.plan_intent("给他转账", user_id="user_001", context={
+        "exploration": [{"observation": {"recipient_name": "张三", "amount_minor": 5}}]})
+    assert from_observation["slots"] == {"recipient_name": "张三", "amount_minor": 5}
+
+
 def test_explorer_feedback_contains_only_executed_and_sanitized_observations(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'runtime-explore.db'}")
     load_seed(database)

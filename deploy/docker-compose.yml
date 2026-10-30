@@ -5,6 +5,8 @@ services:
       dockerfile: deploy/Dockerfile
     environment:
       AGENTBANK_ENV: public
+      AGENTBANK_SCHEDULER_ENABLED: "true"
+      AGENTBANK_SCHEDULER_INTERVAL_SECONDS: "30"
       AGENTBANK_DATABASE_URL: sqlite:////data/public.db
       AGENTBANK_SESSION_SECRET: ${PUBLIC_SESSION_SECRET:?set PUBLIC_SESSION_SECRET}
     volumes:
@@ -31,6 +33,8 @@ services:
       dockerfile: deploy/Dockerfile
     environment:
       AGENTBANK_ENV: eval
+      AGENTBANK_SCHEDULER_ENABLED: "true"
+      AGENTBANK_SCHEDULER_INTERVAL_SECONDS: "5"
       AGENTBANK_DATABASE_URL: sqlite:////data/eval.db
       AGENTBANK_SESSION_SECRET: ${EVAL_SESSION_SECRET:?set EVAL_SESSION_SECRET}
       AGENTBANK_ADMIN_TOKEN: ${EVAL_ADMIN_TOKEN:?set EVAL_ADMIN_TOKEN}

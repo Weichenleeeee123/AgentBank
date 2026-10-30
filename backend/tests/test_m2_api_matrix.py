@@ -131,7 +131,7 @@ def test_every_m2_capability_has_http_entrypoint(tmp_path: Path, capability_id: 
     elif capability_id == "W05":
         assert data["status"] == "processing" and data["expected_settlement_at"]
     elif capability_id == "W06":
-        assert data["source"] == "simulated_bank" and data["as_of"]
+        assert data["source"] == "simulated_market" and data["as_of"]
     elif capability_id.startswith("C"):
         assert data.get("card_id") and (data.get("status") or data.get("limit_minor") is not None)
     elif capability_id == "S01":

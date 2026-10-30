@@ -6,6 +6,8 @@ import os
 import secrets
 import json
 import asyncio
+import logging
+from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +38,9 @@ from agentbank.security.rate_limit import SlidingWindowLimiter
 from agentbank.security.cooling import CoolingPeriodService
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 from agentbank.workflow.planner import BusinessPlanService
+from agentbank.scheduler import BusinessScheduler
+
+logger = logging.getLogger(__name__)
 
 
 class SessionRequest(BaseModel):
@@ -92,12 +97,38 @@ def create_app(database_url: str | None = None) -> FastAPI:
     database = Database(resolved_database_url)
     load_seed(database)
     transfer = TransferService(database)
-    capabilities = CapabilityService(database, require_device_mfa=True, enforce_prepare=True)
+    business_clock = BusinessClock()
+    capabilities = CapabilityService(database, business_clock, require_device_mfa=True, enforce_prepare=True)
     plans = BusinessPlanService(database)
+    scheduler = BusinessScheduler(capabilities)
     agent = AgentOrchestrator(database, capabilities=capabilities)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
-    business_clock = BusinessClock()
-    app = FastAPI(title="AgentBank", version="0.1.0")
+    @asynccontextmanager
+    async def scheduler_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        stop = asyncio.Event()
+        enabled = os.getenv("AGENTBANK_SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"}
+        interval = max(1, int(os.getenv("AGENTBANK_SCHEDULER_INTERVAL_SECONDS", "30")))
+
+        async def run_scheduler() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.to_thread(scheduler.tick)
+                except Exception:
+                    logger.exception("business scheduler tick failed")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+
+        task = asyncio.create_task(run_scheduler()) if enabled else None
+        try:
+            yield
+        finally:
+            stop.set()
+            if task is not None:
+                await task
+
+    app = FastAPI(title="AgentBank", version="0.1.0", lifespan=scheduler_lifespan)
     app.state.database = database
     app.state.transfer = transfer
     app.state.capabilities = capabilities
@@ -105,6 +136,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.agent = agent
     app.state.session_secret = secret
     app.state.business_clock = business_clock
+    app.state.scheduler = scheduler
     app.state.webim_events = set()
     app.state.webim_nonces = {}
     app.state.message_limiter = SlidingWindowLimiter()
@@ -254,6 +286,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/v1/capability-records/{record_id}/release")
     def release_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.release_reservation(user_id, record_id).model_dump(mode="json")
+
+    @app.post("/v1/capability-records/{record_id}/reconfirm-price")
+    def reconfirm_merchant_price(record_id: str, payload: dict[str, int],
+                                  user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.reconfirm_merchant_price(user_id, record_id, payload["amount_minor"]).model_dump(mode="json")
 
     @app.post("/v1/mandates/{mandate_id}/revoke")
     def revoke_mandate(mandate_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
@@ -471,6 +508,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
                     "display_hash": plan.display_hash, "action_hash": plan.action_hash,
                     "nodes": [{"node_id": node.id, "tool": node.tool, "status": node.status,
                                "idempotency_key": node.idempotency_key} for node in nodes]}
+
+    @app.get("/v1/plans")
+    def list_plans(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            records = session.scalars(select(PlanRecord).where(PlanRecord.user_id == user_id)
+                                      .order_by(PlanRecord.created_at.desc())).all()
+            return {"plans": [{"plan_id": item.id, "status": item.status, "revision": item.revision,
+                                "created_at": item.created_at.isoformat()} for item in records]}
 
     @app.post("/v1/plans/{plan_id}/handoff")
     def handoff_plan(plan_id: str, payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:

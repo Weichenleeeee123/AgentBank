@@ -30,7 +30,8 @@ class LLMGateway:
     PLAN_PROMPT_VERSION = "agent-plan-v1"
     REPLY_PROMPT_VERSION = "agent-reply-v1"
     EXPLORER_PROMPT_VERSION = "agent-explore-v1"
-    READ_ONLY_CAPABILITIES = frozenset(READ_ONLY)
+    READ_ONLY_CAPABILITIES = frozenset(READ_ONLY - {"S01"})
+    PLANNER_ACTIONS = ("clarify", "explore", "execute", "confirm")
 
     def __init__(self, database: Database, primary: ProviderConfig | None,
                  backup: ProviderConfig | None, *, transport: Transport | None = None) -> None:
@@ -83,13 +84,25 @@ class LLMGateway:
                                   "capability_catalogue": self.capability_catalogue(),
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
-                                                       "suggested_next_action": "string"}},
+                                                       "suggested_next_action": self.PLANNER_ACTIONS}},
                                  validator=self._validate_plan)
         if result is None:
             return fallback
         capability_id = result.get("capability_id")
+        slots = dict(result["slots"])
+        missing = list(result.get("missing", []))
+        grounded = self._grounded_values(user_text, self._sanitize_context(context or {}))
+        provenance_required = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit",
+                               "recipient_name", "phone", "alias", "product_id", "order_id", "card_id",
+                               "subscription_id", "bill_id", "plan_id", "start_date", "end_date",
+                               "start_month", "end_month", "year", "next_due", "delivery_date", "dispatch_on"}
+        for key in list(slots):
+            if key in provenance_required and not self._value_is_grounded(slots[key], grounded):
+                slots.pop(key)
+                if key not in missing:
+                    missing.append(key)
         return {"intent": result["intent"], "capability_id": capability_id,
-                "slots": result["slots"], "missing": [str(item) for item in result.get("missing", [])],
+                "slots": slots, "missing": missing,
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
                 "references": [],
                 "explore": result.get("explore", False),
@@ -199,18 +212,32 @@ class LLMGateway:
         """Small, versioned capability contract exposed to the planner."""
         required = {"T01": {"recipient_name", "amount_minor"}, "T02": {"phone", "amount_minor"},
                     "T03": {"amount_minor"}, "S02": {"subscription_id", "days"},
-                    "W02": {"product_ids"}, "W03": {"answers"}, "W04": {"product_id", "amount_minor"},
+                    "W03": {"answers"}, "W04": {"product_id", "amount_minor"},
                     "W05": {"order_id"}, "C02": {"card_id", "limit_minor"}, "C03": {"card_id", "restriction"},
                     "C04": {"card_id", "restriction"}, "C05": {"card_id"}, "C06": {"card_id"},
-                    "C07": {"card_id", "action"}, "C08": {"card_id", "new_pin"}}
-        integer_slots = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit", "year"}
-        boolean_slots = {"virtual", "simulate_failure"}
+                    "C07": {"card_id", "action"}}
+        descriptions = {
+            "Q01": "查询本人账户余额", "Q02": "查询本人交易明细", "T01": "向姓名匹配的收款人转账",
+            "T02": "向手机号匹配的收款人转账", "T03": "向别名或姓名匹配的收款人转账",
+            "T04": "创建定期转账", "T05": "创建AA账单或分摊请求", "B01": "按明确条件分析本人交易",
+            "B02": "检查本人交易异常", "B03": "生成月度财务报告", "B04": "生成年度财务报告",
+            "W01": "查询理财产品推荐", "W02": "比较指定理财产品", "W03": "提交风险测评答案",
+            "W04": "申购指定理财产品", "W05": "赎回指定理财订单", "W06": "查询本人理财持仓",
+            "C01": "申请银行卡", "C02": "修改银行卡额度", "C03": "修改银行卡限制",
+            "C04": "修改银行卡限制并验证身份", "C05": "报告银行卡丢失", "C06": "解除挂失",
+            "C07": "冻结或解冻银行卡", "C08": "修改银行卡密码", "S01": "查询本人订阅",
+            "S02": "设置订阅续费提醒", "S03": "取消订阅", "X01": "查询本人事件",
+            "X02": "预留资金", "X03": "创建商户订单", "X04": "创建商户订单", "X05": "冻结银行卡并验证身份",
+        }
+        model_excluded = {"assurance", "device_token", "otp", "new_pin", "simulate_failure"}
+        integer_slots = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit"}
+        boolean_slots = {"virtual"}
         array_slots = {"answers", "product_ids", "participant_ids"}
-        return {key: {"name": CAPABILITIES[key], "kind": "query" if key in READ_ONLY else "command",
+        return {key: {"name": descriptions[key], "kind": "query" if key in READ_ONLY and key != "S01" else "command",
                       "slots": {slot: {"type": "boolean" if slot in boolean_slots else
                                        "array" if slot in array_slots else
                                        "integer" if slot in integer_slots else "string"}
-                                for slot in sorted(INPUT_FIELDS[key])},
+                                for slot in sorted(INPUT_FIELDS[key] - model_excluded)},
                       "required_slots": sorted(required.get(key, set()))}
                 for key in sorted(CAPABILITIES)}
 
@@ -222,6 +249,9 @@ class LLMGateway:
         if capability_id is not None:
             if capability_id not in CAPABILITIES:
                 raise ValueError("capability is not registered")
+            forbidden_model_slots = {"assurance", "device_token", "otp", "new_pin", "simulate_failure"}
+            if set(result["slots"]) & forbidden_model_slots:
+                raise ValueError("planner included server-owned field")
             try:
                 validate_capability_payload(capability_id, result["slots"])
             except Exception as exc:
@@ -237,7 +267,7 @@ class LLMGateway:
             raise ValueError("planner omitted required slots")
         if "explore" in result and not isinstance(result["explore"], bool):
             raise ValueError("planner explore flag invalid")
-        if result.get("suggested_next_action", "clarify") not in {"clarify", "explore", "execute", "confirm"}:
+        if result.get("suggested_next_action", "clarify") not in cls.PLANNER_ACTIONS:
             raise ValueError("planner action invalid")
 
     @classmethod
@@ -251,9 +281,12 @@ class LLMGateway:
 
     @staticmethod
     def _sanitize_context(value: Any) -> Any:
-        allowed = {"parsed_intent", "slots", "exploration", "step", "intent", "feedback", "status",
+        allowed = {"parsed_intent", "slots", "exploration", "step", "intent", "feedback", "observation", "status",
                    "capability_id", "available_minor", "ledger_balance_minor", "currency", "as_of",
-                   "txn_ids", "events", "event_date", "amount_minor", "transaction_id"}
+                   "txn_ids", "events", "event_date", "amount_minor", "transaction_id", "subscription_id",
+                   "days", "product_id", "order_id", "card_id", "phone", "recipient_name", "alias",
+                   "start_date", "end_date", "start_month", "end_month", "year", "next_due",
+                   "delivery_date", "dispatch_on", "limit_minor", "total_minor", "max_uses", "limit"}
         if isinstance(value, dict):
             return {str(key): LLMGateway._sanitize_context(item) for key, item in value.items() if str(key) in allowed}
         if isinstance(value, list):
@@ -261,6 +294,33 @@ class LLMGateway:
         if isinstance(value, (str, int, float, bool)) or value is None:
             return redact_text(str(value)) if isinstance(value, str) else value
         return None
+
+    @staticmethod
+    def _grounded_values(user_text: str, context: Any) -> list[str]:
+        values = [user_text]
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+            elif isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                values.append(str(value))
+
+        collect(context)
+        return values
+
+    @staticmethod
+    def _value_is_grounded(value: Any, sources: list[str]) -> bool:
+        if isinstance(value, list):
+            return bool(value) and all(LLMGateway._value_is_grounded(item, sources) for item in value)
+        candidate = str(value).strip()
+        if not candidate:
+            return False
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(candidate)}(?![A-Za-z0-9_])")
+        return any(pattern.search(source) is not None for source in sources)
 
     @staticmethod
     def _sanitize_fragments(fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
