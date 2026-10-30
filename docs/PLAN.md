@@ -1127,22 +1127,22 @@ M2 业务集群状态：Q/T、B、W、C、S、X 已分别建立逐项业务不�
 
 | brief 要求 | 设计 | 测试 | 提交物 |
 |---|---|---|---|
-| 用自然语言理解金融意图 | §6.1–§6.4、§10.1、§10.2 | CAP 的口语和指代用例、DET-PARSE | 技术文档：算法 |
-| 自主规划并执行银行业务 | §6.5–§6.7、§10.11 | CMB、DET-PLAN | 技术文档：架构 |
+| 用自然语言理解金融意图 | §6.1–§6.4、§10.1、§10.2 | CAP 的口语和指代用例、DET-PARSE；可执行追溯清单 [`docs/M2-CAP-TRACEABILITY.md`](M2-CAP-TRACEABILITY.md) | 技术文档：算法 |
+| 自主规划并执行银行业务 | §6.5–§6.7、§10.11 | CMB、DET-PLAN；可执行追溯清单 [`docs/M2-CAP-TRACEABILITY.md`](M2-CAP-TRACEABILITY.md) | 技术文档：架构 |
 | 支持 APP、IM 等渠道 | §12 | CMB 跨渠道用例、SEC 越权（IM） | 视频、README |
-| 6 个场景（每项典型能力） | §3 的 33 项 | CAP-Q01 至 CAP-X05 | 覆盖矩阵（PPT） |
+| 6 个场景（每项典型能力） | §3 的 33 项 | CAP-Q01 至 CAP-X05；99 条 case 的实现、runner、测试和终态证据见 [`docs/M2-CAP-TRACEABILITY.md`](M2-CAP-TRACEABILITY.md) | 覆盖矩阵（PPT） |
 | 绿色自动执行 | P03 | DET-POL | 安全自评 |
 | 黄色用户确认（日累计 ≤ 1000、订阅查询和取消、虚拟卡） | P04、P05、P07、P08a、§4.3 | DET-POL、CAP | 安全自评 |
 | 红色强验证（> 1000、改密码、挂失和解挂、申购） | P06、P10、P12、§9.2 | DET-POL、DET-DEV、SEC | 安全自评 |
 | 防幻觉 | §7.9、§9.1 | SEC-HAL | 安全设计 |
 | 防注入 | §6.3、§6.5、§10.11、§9.1 | SEC-INJ、SEC-POLLUTE | 安全设计 |
-| 审计 | §7.8 | DET-AUD | 安全自评（校验截图） |
+| 审计 | §7.8 | DET-AUD；评测 artifact 记录实际 audit/record/operation/ledger IDs（见 [`docs/M2-CAP-TRACEABILITY.md`](M2-CAP-TRACEABILITY.md)） | 安全自评（校验截图） |
 | 熔断 | U16–U18 | DET-BRK | 安全设计 |
 | 沙箱 | §10.9 | DET-SBX、SEC | 安全设计 |
 | 模糊表达、省略上下文、隐含意图 | §6.4、§10.1、X01 | CAP 口语用例、CAP-X01 | 技术文档：算法 |
 | 子任务 DAG | §6.6、§10.11 | DET-PLAN、CMB | 技术文档：架构 |
 | 中断、回退、人工接管 | §6.8 | CMB 恢复类用例 | 视频 |
-| 评分：任务完成率（规划合理性、工具调用正确性） | §3、§6 | CAP、CMB 及其指标 | 自评、PPT |
+| 评分：任务完成率（规划合理性、工具调用正确性） | §3、§6 | CAP、CMB 及其指标；manifest 校验 case ID、runner 和测试符号 | 自评、PPT |
 | 评分：诱导转账、信息套取、越权、Prompt 注入，敏感操作的确认和风险提示 | §8、§9、§10.6、§4.3 | SEC 8 类、FP | 自评 |
 | 评分：创新和交互的 7 个子项 | §4.1–§4.6 | §4.5 列出的用例 | PPT、视频 |
 | 提交物：作品简介 | §16 | — | 报名系统 |

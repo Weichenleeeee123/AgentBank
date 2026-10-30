@@ -51,6 +51,10 @@ def test_rate_limit_and_demo_run_endpoint(tmp_path: Path, monkeypatch) -> None:
     response = client.post("/admin/v1/self-test", headers={"X-Admin-Token": "admin-test"})
     assert response.status_code == 200
     assert response.json()["demo_run_id"]
+    traceability = response.json()["traceability"]
+    assert traceability["report"] == {"total": 223, "passed": 223, "failed": 0}
+    assert traceability["suite"]["content_sha256"]
+    assert len(traceability["manifest"]["cases"]) == 99
 
 
 def test_self_test_rejects_empty_evaluation_suite(tmp_path: Path, monkeypatch) -> None:

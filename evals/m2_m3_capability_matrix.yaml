@@ -2,6 +2,7 @@ case_id: CAP-M2-M3-MATRIX
 kind: capability_matrix
 version: m2-cap-acceptance-v2
 deterministic: true
+traceability_manifest: docs/M2-CAP-TRACEABILITY.md#executable-manifest
 variants:
   - variant: 1
     journey: normal

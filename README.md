@@ -18,7 +18,7 @@
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-当前实现包含 M0-M3：M1 的转账授权与账本链路、M2 的 33 项能力处理器与业务状态、M3 的反诈/冷静期/熔断/Saga/人工接管和全量评测入口。Agent 默认使用确定性路由、补槽、确认和 MFA 接续；planner、reply、read-only explorer 三类 LLM gateway 已接入，但 provider 未配置时安全降级，完整模型规划运行时仍未完成。逐项证据见 [docs/M2-M3-STATUS.md](docs/M2-M3-STATUS.md)。
+AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、M3安全红队与M4发布材料仍需独立实测。逐项证据见 docs/M2-M3-STATUS.md。
 
 ## 本地运行
 

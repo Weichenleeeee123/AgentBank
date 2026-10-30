@@ -27,9 +27,10 @@ from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord,
-                          PlanRecord, User, WebImEvent, WebImNonce)
+from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, Payee, PlanNodeRecord,
+                          PlanRecord, ReceiptRecord, User, WebImEvent, WebImNonce)
 from agentbank.evals.runner import run_cases
+from agentbank.evals.traceability import build_traceability_artifact
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.security.explain import explain_denial
@@ -101,6 +102,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     business_clock = BusinessClock()
     capabilities = CapabilityService(database, business_clock, require_device_mfa=True, enforce_prepare=True)
     plans = BusinessPlanService(database)
+    plans.recover_interrupted()
     scheduler = BusinessScheduler(capabilities)
     agent = AgentOrchestrator(database, capabilities=capabilities)
     secret = os.getenv("AGENTBANK_SESSION_SECRET", secrets.token_urlsafe(32))
@@ -189,9 +191,21 @@ def create_app(database_url: str | None = None) -> FastAPI:
                          "transfer-phone": "T02", "transfer-alias": "T03"}.get(kind)
         if capability_id is None:
             raise DomainError("FORM_KIND_NOT_SUPPORTED")
-        key = str(payload.get("idempotency_key") or f"form-{secrets.token_urlsafe(12)}")
-        result = capabilities.execute(user_id, capability_id, payload, key)
+        business_payload = dict(payload)
+        key = str(business_payload.pop("idempotency_key", None) or f"form-{secrets.token_urlsafe(12)}")
+        result = capabilities.execute(user_id, capability_id, business_payload, key)
         return result.model_dump(mode="json")
+
+    @app.get("/v1/payees")
+    def get_payees(name: str | None = None, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            query = select(Payee).where(Payee.owner_user_id == user_id)
+            if name:
+                query = query.where(Payee.display_name == name)
+            payees = session.scalars(query.order_by(Payee.id)).all()
+            return {"payees": [{"id": payee.id, "display_name": payee.display_name,
+                                "masked_name": payee.masked_name, "phone_tail": payee.phone[-4:] if payee.phone else None,
+                                "is_new": payee.is_new} for payee in payees]}
 
     @app.post("/admin/v1/capabilities/dispatch-due")
     def dispatch_due_capabilities(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
@@ -230,14 +244,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.post("/v1/eval/runs")
     def create_eval_run(user_id: str = Depends(current_user)) -> dict[str, Any]:
         run_id = f"run_{secrets.token_urlsafe(12)}"
-        report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        project_root = Path(__file__).resolve().parents[3]
+        eval_root = project_root / "evals"
+        report = run_cases(eval_root)
         if report.total == 0:
             raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
         with database.sessions.begin() as session:
             session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
                                 case_total=report.total, case_passed=report.passed))
         return {"run_id": run_id, "total": report.total, "passed": report.passed, "failed": report.failed,
-                "report": report.to_markdown(), "requested_by": user_id}
+                "report": report.to_markdown(), "traceability": build_traceability_artifact(report, project_root),
+                "requested_by": user_id}
 
     @app.get("/admin/v1/demo-runs")
     def list_demo_runs(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
@@ -258,6 +275,23 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.get("/v1/capability-records/{record_id}")
     def get_capability_record(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         return capabilities.get(user_id, record_id).model_dump(mode="json")
+
+    @app.post("/v1/capability-records/{record_id}/revise")
+    def revise_capability(record_id: str, payload: dict[str, Any],
+                          user_id: str = Depends(current_user)) -> dict[str, Any]:
+        current = capabilities.get(user_id, record_id)
+        revised_payload = payload.get("payload")
+        if not isinstance(revised_payload, dict):
+            raise DomainError("CAPABILITY_INPUT_TYPE")
+        key = str(payload.get("idempotency_key") or f"revision-{secrets.token_urlsafe(12)}")
+        with database.atomic():
+            capabilities.invalidate_prepared(user_id, record_id)
+            result = capabilities.execute(user_id, current.capability_id, revised_payload, key)
+        return result.model_dump(mode="json")
+
+    @app.post("/v1/capability-records/{record_id}/invalidate")
+    def invalidate_capability(record_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return capabilities.invalidate_prepared(user_id, record_id, cancelled=True).model_dump(mode="json")
 
     @app.post("/v1/capability-records/{record_id}/confirm")
     def confirm_capability_transfer(record_id: str, payload: ConfirmRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -543,6 +577,19 @@ def create_app(database_url: str | None = None) -> FastAPI:
             return {**plan.model_dump(mode="json"), "display_hash": record.display_hash if record else "",
                     "action_hash": record.action_hash if record else "", "receipt_id": receipt.id if receipt else ""}
 
+    @app.post("/v1/plans/composite")
+    def create_composite_plan(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+        template_id = str(payload.get("template_id", ""))
+        slots = payload.get("slots", {})
+        if not isinstance(slots, dict):
+            raise DomainError("PLAN_SLOTS_REQUIRED")
+        plan = plans.create_composite_plan(user_id, template_id, slots)
+        with database.sessions() as session:
+            record = session.get(PlanRecord, plan.plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan.plan_id))
+            return {**plan.model_dump(mode="json"), "display_hash": record.display_hash if record else "",
+                    "action_hash": record.action_hash if record else "", "receipt_id": receipt.id if receipt else ""}
+
     @app.post("/v1/plans/{plan_id}/revise")
     def revise_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.revise_birthday_plan(user_id, plan_id, payload).model_dump(mode="json")
@@ -682,7 +729,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
             raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED"})
         started = perf_counter()
         run_id = f"run_{secrets.token_urlsafe(12)}"
-        report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        project_root = Path(__file__).resolve().parents[3]
+        eval_root = project_root / "evals"
+        report = run_cases(eval_root)
         if report.total == 0:
             raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
         with database.sessions.begin() as session:
@@ -694,6 +743,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
                 "failed": sum(1 for check in checks if not check["passed"]), "checks": checks,
                 "case_total": report.total, "case_passed": report.passed,
+                "traceability": build_traceability_artifact(report, project_root),
                 "latency_ms": round((perf_counter() - started) * 1000, 3), "demo_run_id": run_id}
 
     @app.post("/admin/v1/audit/checkpoint")

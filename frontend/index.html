@@ -12,6 +12,39 @@
   <main class="shell">
     <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><div class="header-actions"><a class="ghost-link" href="/app/plan.html">计划</a><button id="balanceBtn" class="ghost">查余额</button><button id="pinButton" class="ghost">修改 PIN</button></div></header>
     <section class="account-bar" aria-label="演示账户"><label for="userSelect">演示账户</label><select id="userSelect"><option value="user_001">user_001 · 主账户</option><option value="user_002">user_002 · 备用账户</option></select><button id="switchUser" class="ghost">切换</button></section>
+    <section class="direct-forms" aria-label="银行服务表单">
+      <fieldset id="queryMode" class="segmented">
+        <legend>查询</legend>
+        <label><input type="radio" name="queryMode" value="balance" checked /><span>余额</span></label>
+        <label><input type="radio" name="queryMode" value="transactions" /><span>交易</span></label>
+      </fieldset>
+      <form id="queryForm" class="form-grid">
+        <div id="transactionFilters" class="filter-grid" hidden>
+          <label>开始日期<input id="startDate" name="start_date" type="date" /></label>
+          <label>结束日期<input id="endDate" name="end_date" type="date" /></label>
+          <label>类别<input id="categoryFilter" name="category" autocomplete="off" placeholder="全部类别" /></label>
+          <label>条数<select id="transactionLimit" name="limit"><option value="10">10 条</option><option value="25">25 条</option><option value="50" selected>50 条</option><option value="100">100 条</option></select></label>
+        </div>
+        <div class="form-submit"><span id="queryStatus" class="form-status" aria-live="polite"></span><button type="submit">查询</button></div>
+      </form>
+      <fieldset id="transferMode" class="segmented">
+        <legend>转账方式</legend>
+        <label><input type="radio" name="transferMode" value="name" checked /><span>姓名</span></label>
+        <label><input type="radio" name="transferMode" value="phone" /><span>手机号</span></label>
+        <label><input type="radio" name="transferMode" value="alias" /><span>别名</span></label>
+      </fieldset>
+      <form id="transferForm" class="form-grid">
+        <div class="transfer-grid">
+          <label id="recipientNameField">收款人姓名<input id="recipientName" name="recipient_name" autocomplete="name" required /></label>
+          <label id="recipientPhoneField" hidden>收款人手机号<input id="recipientPhone" name="phone" type="tel" inputmode="tel" autocomplete="tel" /></label>
+          <label id="recipientAliasField" hidden>收款人别名<input id="recipientAlias" name="alias" autocomplete="off" /></label>
+          <label>金额（元）<input id="transferAmount" name="amount" type="number" min="0.01" step="0.01" inputmode="decimal" required /></label>
+          <label class="memo-field">备注<input id="transferMemo" name="memo" maxlength="80" autocomplete="off" /></label>
+        </div>
+        <label id="recipientCandidateField" class="candidate-field" hidden>选择收款人<select id="recipientCandidate"><option value="">请选择收款人</option></select></label>
+        <div class="form-submit"><span id="transferStatus" class="form-status" aria-live="polite"></span><button type="submit">准备转账</button></div>
+      </form>
+    </section>
     <section id="status" class="status">连接模拟银行中…</section>
     <section class="inbox"><div class="section-heading"><h2>通知</h2><button id="refreshNotifications" class="ghost" aria-label="刷新通知">刷新</button></div><div id="notificationList" class="notification-list" aria-live="polite"></div></section>
     <section id="messages" class="messages" aria-live="polite"></section>

@@ -54,3 +54,32 @@ Boundary journeys assert the capability-specific business result, such as ledger
 balance, card payment authorization, subscription mandate state, merchant order
 settlement, or a persisted refusal. They do not count a generic record or audit
 boolean as success.
+
+## Executable manifest
+
+The machine-readable manifest is built by
+`agentbank.evals.traceability.build_traceability_manifest` and validated by
+`validate_traceability_manifest`. It expands the canonical runner inventory into
+all 99 case IDs and records, for each case, the PLAN sections, implementation
+symbol, runner function, pytest function, and the PLAN §11 boundary-fixture
+mapping. Missing capability-specific boundary tests are marked `missing`; the
+manifest never infers coverage from a generic test.
+
+`build_traceability_artifact(report, root)` binds an `EvaluationReport` to
+reviewable provenance: git revision and dirty state, matrix content hash and
+version, prompt file versions/hashes, and only the audit event, record,
+operation, and ledger IDs actually present in case evidence. Absent identifiers
+are emitted as `null` or an empty list. The parent evaluation command can emit
+this returned mapping as JSON alongside its normal report without exposing
+secrets or invoking a second case runner.
+
+The source of truth is [the executable manifest implementation](../backend/agentbank/evals/traceability.py),
+with validation coverage in
+[`backend/tests/test_traceability.py`](../backend/tests/test_traceability.py).
+
+<a id="executable-manifest"></a>
+
+The admin self-test endpoint and user-requested evaluation run now include this
+artifact in their response. The artifact is generated from the same in-memory
+EvaluationReport and does not launch a second evaluation pass. Its dirty flag
+is true while the source tree contains uncommitted changes.

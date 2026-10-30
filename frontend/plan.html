@@ -1,6 +1,68 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/app/styles.css"><title>AgentBank 计划</title></head><body><main class="shell"><header><div><span class="eyebrow">PLAN GRAPH</span><h1>计划进度</h1></div><a class="ghost-link" href="/app/">返回对话</a></header><form id="load" class="composer"><select id="plan" aria-label="选择计划" required><option value="">正在读取计划…</option></select><button>查看</button></form><p id="error" class="form-error" role="alert"></p><section id="graph" class="messages" aria-live="polite"></section></main><script type="module">
 const $ = id => document.getElementById(id);
 const text = (tag, value) => { const el = document.createElement(tag); el.textContent = value ?? ""; return el; };
+const headers = () => ({Authorization: `Bearer ${localStorage.agentbank_token || ""}`});
+let liveStream;
+function renderGraph(data) {
+  $("graph").replaceChildren();
+  const controls = document.createElement("article");
+  controls.className = "bubble";
+  controls.append(text("h2", `计划状态：${data.status}`));
+  for (const [label, suffix] of [["暂停", "/pause"], ["继续", "/resume"], ["取消计划", "/cancel"]]) {
+    const button = text("button", label);
+    button.type = "button";
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const response = await fetch(`/v1/plans/${encodeURIComponent(data.plan_id)}${suffix}`, {method: "POST", headers: headers()});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.code || result.detail?.code || "操作未完成");
+        $("load").requestSubmit();
+      } catch (error) { $("error").textContent = error.message; button.disabled = false; }
+    };
+    controls.append(button);
+  }
+  $("graph").append(controls);
+  for (const item of data.nodes || []) {
+    const card = document.createElement("article"); card.className = "bubble";
+    card.append(text("h3", `${item.logical_id} · ${item.status}`));
+    for (const [label, value] of [["工具", item.tool], ["授权", item.authorization]]) {
+      const row = document.createElement("div"); row.className = "fact";
+      row.append(text("span", label), text("strong", value)); card.append(row);
+    }
+    const details = document.createElement("details");
+    details.append(text("summary", "决策与执行凭证"));
+    details.append(text("pre", JSON.stringify({decision_chain: item.decision_chain || [], evidence: item.evidence || {}}, null, 2)));
+    card.append(details);
+    $("graph").append(card);
+  }
+  if (!data.nodes?.length) $("graph").append(text("p", "该计划暂无步骤。"));
+}
+
+async function watchPlan(id, signal) {
+  while (!signal.aborted) {
+    const response = await fetch(`/v1/plans/${encodeURIComponent(id)}/events`, {headers: headers(), signal});
+    if (!response.ok || !response.body) throw new Error("计划实时连接暂不可用");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      while (!signal.aborted) {
+        const {value, done} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true}).replaceAll("\r\n", "\n");
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const event = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+          const eventLines = event.split("\n");
+          if (eventLines.includes("event: done")) return;
+          const payload = eventLines.filter(line => line.startsWith("data: ")).map(line => line.slice(6)).join("\n");
+          if (payload) renderGraph(JSON.parse(payload));
+        }
+      }
+    } finally { reader.releaseLock(); }
+  }
+}
 async function loadPlans() {
   const select = $("plan");
   try {
@@ -29,20 +91,16 @@ $("load").onsubmit = async event => {
   if (!id) return;
   $("error").textContent = "";
   $("graph").replaceChildren();
+  liveStream?.abort();
+  liveStream = new AbortController();
   try {
     const response = await fetch(`/v1/plans/${encodeURIComponent(id)}/graph`, {headers: {Authorization: `Bearer ${localStorage.agentbank_token || ""}`}});
     const data = await response.json();
     if (!response.ok) throw new Error(data.code || data.detail?.code || "读取失败");
-    for (const item of data.nodes || []) {
-      const card = document.createElement("article"); card.className = "bubble";
-      card.append(text("h3", `${item.logical_id} · ${item.status}`));
-      for (const [label, value] of [["工具", item.tool], ["授权", item.authorization], ["规则", item.rule_id || "policy-bound"]]) {
-        const row = document.createElement("div"); row.className = "fact";
-        row.append(text("span", label), text("strong", value)); card.append(row);
-      }
-      $("graph").append(card);
-    }
-    if (!data.nodes?.length) $("graph").append(text("p", "该计划暂无步骤。"));
+    renderGraph(data);
+    watchPlan(id, liveStream.signal).catch(error => {
+      if (error.name !== "AbortError") $("error").textContent = error.message;
+    });
   } catch (error) { $("error").textContent = `无法读取计划：${error.message}`; }
 };
 loadPlans();

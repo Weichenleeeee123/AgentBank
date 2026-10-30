@@ -16,9 +16,9 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   bubble.append(node("h3", title), node("p", text || ""));
 
   const seen = new Set();
-  const appendFact = (label, value, currency = "") => {
+  const appendFact = (label, value, currency = "", minorUnits = label.endsWith("_minor")) => {
     if (value === undefined || value === null || secretKey.test(label)) return;
-    const rendered = label.endsWith("_minor") && Number.isFinite(Number(value))
+    const rendered = minorUnits && Number.isFinite(Number(value))
       ? `${currency === "CNY" || currency === "" ? "¥" : `${currency} `}${(Number(value) / 100).toFixed(2)}`
       : typeof value === "object" ? JSON.stringify(value) : String(value);
     if (!rendered || seen.has(`${label}:${rendered}`)) return;
@@ -30,23 +30,59 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   for (const fact of fragments || []) {
     appendFact(fact.label || "事实", fact.text ?? fact.value_minor ?? fact.status, fact.currency);
   }
-  const payload = data?.payload || {};
-  for (const [key, value] of Object.entries(payload)) appendFact(key, value);
-  for (const [key, value] of Object.entries(data || {})) {
-    if (["payload", "display", "receipt_id", "display_hash", "action_hash"].includes(key)) continue;
-    appendFact(key, value);
+  if (Array.isArray(data?.display)) {
+    for (const item of data.display) appendFact(item.label || "详情", item.value);
   }
+  for (const [key, value] of Object.entries(data || {})) {
+    if (["payload", "display", "transactions", "receipt_id", "display_hash", "action_hash", "direct_form"].includes(key)) continue;
+    appendFact(factLabels[key] || key, value, "", key.endsWith("_minor"));
+  }
+  if (Array.isArray(data?.transactions)) appendTransactions(bubble, data.transactions);
 
   if (recordId && ["confirmation", "mfa"].includes(kind)) {
     const actions = node("div", "", "card-actions");
     const button = node("button", kind === "mfa" ? "输入验证码" : "确认执行");
     button.type = "button";
-    button.onclick = () => kind === "mfa" ? verify(recordId) : confirm(recordId, displayHash, data?.receipt_id || "");
+    button.onclick = () => data?.direct_form
+      ? kind === "mfa" ? verifyDirect(recordId) : confirmDirect(recordId, displayHash, data?.receipt_id || "")
+      : kind === "mfa" ? verify(recordId) : confirm(recordId, displayHash, data?.receipt_id || "");
     actions.append(button);
+    if (data?.direct_form && kind === "confirmation" && data?.capability_id === "T01") {
+      const revise = node("button", "修改转账");
+      revise.type = "button";
+      revise.className = "ghost";
+      revise.onclick = () => reviseDirect(recordId, bubble);
+      actions.append(revise);
+    }
     bubble.append(actions);
   }
   $("messages").append(bubble);
   bubble.scrollIntoView?.({behavior: "smooth"});
+}
+
+const transactionLabels = {posted_at: "日期", merchant: "商户", category: "类别", direction: "类型", amount_minor: "金额"};
+const factLabels = {available_minor: "可用余额", ledger_balance_minor: "账面余额", currency: "币种",
+  capability_id: "服务", account_id: "账户", record_id: "记录", status: "状态", masked_name: "收款人",
+  phone_tail: "手机号尾号", is_new: "新收款人", tier_display: "风险级别", assurance: "验证方式",
+  operation_id: "操作编号"};
+
+function appendTransactions(parent, transactions) {
+  const list = node("div", "", "transaction-list");
+  for (const item of transactions) {
+    const row = node("article", "", "transaction-row");
+    row.append(node("strong", item.merchant || "交易"), node("span", item.posted_at || ""));
+    const details = node("div", "", "transaction-details");
+    for (const key of ["category", "direction", "amount_minor"]) {
+      const value = item[key];
+      if (value === undefined || value === null) continue;
+      const rendered = key === "amount_minor" ? `¥${(Number(value) / 100).toFixed(2)}` : String(value);
+      details.append(node("span", `${transactionLabels[key]}：${rendered}`));
+    }
+    row.append(details);
+    list.append(row);
+  }
+  if (!transactions.length) list.append(node("p", "没有符合条件的交易。", "empty-state"));
+  parent.append(list);
 }
 
 async function api(path, options = {}) {
@@ -136,14 +172,169 @@ async function verify(recordId) {
   }
 }
 
+function showDirectResult(response, label) {
+  const status = response.status;
+  const data = {...(response.data || {}), capability_id: response.capability_id || response.data?.capability_id,
+    direct_form: true};
+  const isTransfer = ["T01", "T02", "T03"].includes(data.capability_id);
+  const succeeded = status === "succeeded" && (!isTransfer || data.transfer_result);
+  const kind = ["awaiting_mfa", "mfa_required"].includes(status) ? "mfa" :
+    status === "awaiting_confirmation" ? "confirmation" : ["failed", "rejected"].includes(status) ? "error" :
+    succeeded ? "result" : "pending";
+  const message = status === "awaiting_confirmation" ? "请核对以下收款人和金额，再确认执行。" :
+    ["awaiting_mfa", "mfa_required"].includes(status) ? "操作需要设备验证，请在验证码对话框中输入。" :
+    ["cooling_required", "cooling"].includes(status) ? "转账仍在安全冷静期内，当前尚未完成。" :
+    succeeded ? label : "操作尚未完成，请查看状态或稍后重试。";
+  addBubble(kind, message, response.fragments || [], data, response.record_id,
+    response.data?.display_hash || "");
+}
+
+async function submitDirectForm(path, payload, statusId, label) {
+  const status = $(statusId);
+  const submit = status.parentElement.querySelector("button[type=submit]");
+  status.textContent = "正在提交…";
+  submit.disabled = true;
+  try {
+    const response = await api(`/v1/forms/${path}`, {method: "POST", body: JSON.stringify({
+      ...payload, idempotency_key: `pwa-${crypto.randomUUID()}`
+    })});
+    status.textContent = "";
+    showDirectResult(response, label);
+  } catch (error) {
+    status.textContent = `提交失败：${error.message}`;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function confirmDirect(recordId, displayHash, receiptId) {
+  try {
+    const response = await api(`/v1/capability-records/${recordId}/confirm`, {
+      method: "POST", body: JSON.stringify({receipt_id: receiptId, display_hash: displayHash})
+    });
+    showDirectResult(response, "转账已完成。");
+  } catch (error) {
+    addBubble("error", error.message);
+  }
+}
+
+async function verifyDirect(recordId) {
+  const otp = await requestOtp();
+  if (!otp) return;
+  try {
+    const response = await api(`/v1/capability-records/${recordId}/verify`, {
+      method: "POST", body: JSON.stringify({otp})
+    });
+    showDirectResult(response, "转账验证已完成。");
+  } catch (error) {
+    addBubble("error", error.message);
+  }
+}
+
+async function reviseDirect(recordId, oldBubble) {
+  const mode = document.querySelector('input[name="transferMode"]:checked').value;
+  const amount = Number($("transferAmount").value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    $("transferStatus").textContent = "请输入大于 0 的金额。";
+    return;
+  }
+  const payload = {amount_minor: Math.round(amount * 100)};
+  if (mode === "name" && $("recipientCandidate").value) payload.recipient_id = $("recipientCandidate").value;
+  else payload[mode === "name" ? "recipient_name" : mode === "phone" ? "phone" : "alias"] =
+    mode === "name" ? $("recipientName").value.trim() : mode === "phone" ? $("recipientPhone").value.trim() : $("recipientAlias").value.trim();
+  if ($("transferMemo").value.trim()) payload.memo = $("transferMemo").value.trim();
+  try {
+    const response = await api(`/v1/capability-records/${recordId}/revise`, {method: "POST", body: JSON.stringify({
+      payload, idempotency_key: `revise-${crypto.randomUUID()}`
+    })});
+    oldBubble.querySelector(".card-actions")?.remove();
+    showDirectResult(response, "转账已完成。");
+  } catch (error) {
+    addBubble("error", `无法修改转账：${error.message}`);
+  }
+}
+
+function updateFormModes() {
+  const queryMode = document.querySelector('input[name="queryMode"]:checked').value;
+  $("transactionFilters").hidden = queryMode !== "transactions";
+  $("queryForm").querySelector("button[type=submit]").textContent = queryMode === "balance" ? "查余额" : "查交易";
+  const transferMode = document.querySelector('input[name="transferMode"]:checked').value;
+  for (const [mode, id, input] of [["name", "recipientNameField", "recipientName"],
+    ["phone", "recipientPhoneField", "recipientPhone"], ["alias", "recipientAliasField", "recipientAlias"]]) {
+    const visible = mode === transferMode;
+    $(id).hidden = !visible;
+    $(input).required = visible;
+  }
+}
+
+async function submitQuery(event) {
+  event.preventDefault();
+  const mode = document.querySelector('input[name="queryMode"]:checked').value;
+  if (mode === "balance") return submitDirectForm("balance", {}, "queryStatus", "余额查询完成。");
+  const startDate = $("startDate").value, endDate = $("endDate").value;
+  if (startDate && endDate && startDate > endDate) {
+    $("queryStatus").textContent = "开始日期不能晚于结束日期。";
+    return;
+  }
+  const payload = {limit: Number($("transactionLimit").value)};
+  if (startDate) payload.start_date = startDate;
+  if (endDate) payload.end_date = endDate;
+  if ($("categoryFilter").value.trim()) payload.category = $("categoryFilter").value.trim();
+  return submitDirectForm("transactions", payload, "queryStatus", "交易查询完成。");
+}
+
+async function submitTransfer(event) {
+  event.preventDefault();
+  const mode = document.querySelector('input[name="transferMode"]:checked').value;
+  const recipient = mode === "name" ? $("recipientName").value.trim() :
+    mode === "phone" ? $("recipientPhone").value.trim() : $("recipientAlias").value.trim();
+  if (!recipient) return;
+  const amount = Number($("transferAmount").value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    $("transferStatus").textContent = "请输入大于 0 的金额。";
+    return;
+  }
+  const payload = {amount_minor: Math.round(amount * 100)};
+  const field = mode === "name" ? "recipient_name" : mode === "phone" ? "phone" : "alias";
+  const candidateId = mode === "name" ? $("recipientCandidate").value : "";
+  if (candidateId) payload.recipient_id = candidateId;
+  else payload[field] = recipient;
+  if ($("transferMemo").value.trim()) payload.memo = $("transferMemo").value.trim();
+  return submitDirectForm(`transfer-${mode}`, payload, "transferStatus", "转账已处理。");
+}
+
+let payeeLookup = 0;
+async function lookupPayees() {
+  const name = $("recipientName").value.trim(), select = $("recipientCandidate");
+  const field = $("recipientCandidateField");
+  const lookup = ++payeeLookup;
+  select.replaceChildren(node("option", name ? "正在查找…" : "请选择收款人"));
+  select.value = "";
+  field.hidden = !name;
+  if (!name) return;
+  try {
+    const response = await api(`/v1/payees?name=${encodeURIComponent(name)}`);
+    if (lookup !== payeeLookup) return;
+    select.replaceChildren(node("option", "使用新收款人"));
+    for (const payee of response.payees || []) {
+      const option = node("option", `${payee.masked_name || name} · 尾号 ${payee.phone_tail}${payee.is_new ? " · 新收款人" : ""}`);
+      option.value = payee.id;
+      select.append(option);
+    }
+  } catch (error) {
+    if (lookup === payeeLookup) select.replaceChildren(node("option", `无法查找：${error.message}`));
+  }
+}
+
 async function loadLinkedRecord() {
   const recordId = new URLSearchParams(location.search).get("record_id");
   if (!recordId) return;
   try {
     const record = await api(`/v1/capability-records/${recordId}`);
+    const data = {...record.data, direct_form: ["T01", "T02", "T03"].includes(record.data?.capability_id)};
     addBubble(record.status === "awaiting_mfa" ? "mfa" : "confirmation",
-      "已重新载入待处理操作，请核对以下详情。", [], record.data,
-      record.record_id, record.data?.display_hash || "");
+      "已重新载入待处理操作，请核对以下详情。", [], data,
+      record.record_id, data?.display_hash || "");
   } catch (error) {
     addBubble("error", `无法载入该操作：${error.message}`);
   }
@@ -207,5 +398,10 @@ $("refreshNotifications").onclick = loadNotifications;
 $("pinButton").onclick = () => { $("pinError").textContent = ""; $("pinDialog").showModal(); $("newPin").focus(); };
 $("pinCancel").onclick = () => $("pinDialog").close();
 $("pinForm").onsubmit = changePin;
+$("queryForm").onsubmit = submitQuery;
+$("transferForm").onsubmit = submitTransfer;
+$("recipientName").addEventListener("input", lookupPayees);
+document.querySelectorAll('input[name="queryMode"],input[name="transferMode"]').forEach(input => input.addEventListener("change", updateFormModes));
+updateFormModes();
 document.querySelectorAll(".quick button").forEach(button => button.onclick = () => send(button.dataset.text));
 start().catch(error => { $("status").textContent = `连接失败：${error.message}`; });
