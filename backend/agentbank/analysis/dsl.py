@@ -11,6 +11,7 @@ from typing import Any, Iterator, cast
 
 from sqlalchemy import select
 from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentbank.audit.store import PersistentAudit
@@ -31,10 +32,14 @@ class DslResult:
 
 
 class DslExecutor:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, timeout_seconds: float = 2.0) -> None:
         self.database = database
+        self.timeout_seconds = timeout_seconds
 
     def run(self, user_id: str, dsl: dict[str, Any]) -> DslResult:
+        started = perf_counter()
+        deadline = started + self.timeout_seconds
+        self._ensure_before_deadline(started)
         if not isinstance(dsl, dict) or set(dsl) - DSL_FIELDS:
             raise ValueError("DSL_FIELD_NOT_ALLOWED")
         canonical = json.dumps(dsl, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -101,34 +106,43 @@ class DslExecutor:
             if (not isinstance(ordering.get("field"), str) or ordering.get("field") not in output_fields
                     or ordering.get("dir", "asc") not in {"asc", "desc"}):
                 raise ValueError("DSL_ORDER_NOT_ALLOWED")
-        started = perf_counter()
-        with self._readonly_session() as session:
-            statement = select(Transaction).where(Transaction.user_id == user_id)
-            for item in filters:
-                column = getattr(Transaction, str(item["field"]))
-                expected = item.get("value")
-                op = item["op"]
-                if op == "eq":
-                    statement = statement.where(column == expected)
-                elif op == "gte":
-                    statement = statement.where(column >= expected)
-                elif op == "lte":
-                    statement = statement.where(column <= expected)
-                elif op == "between":
-                    statement = statement.where(column.between(expected[0], expected[1]))
-            records = list(session.scalars(statement.order_by(Transaction.posted_at).limit(50_001)).all())
-            if perf_counter() - started > 2.0:
-                raise ValueError("DSL_TIMEOUT")
+        try:
+            with self._readonly_session(deadline) as session:
+                statement = select(Transaction).where(Transaction.user_id == user_id)
+                for item in filters:
+                    column = getattr(Transaction, str(item["field"]))
+                    expected = item.get("value")
+                    op = item["op"]
+                    if op == "eq":
+                        statement = statement.where(column == expected)
+                    elif op == "gte":
+                        statement = statement.where(column >= expected)
+                    elif op == "lte":
+                        statement = statement.where(column <= expected)
+                    elif op == "between":
+                        statement = statement.where(column.between(expected[0], expected[1]))
+                records = list(session.scalars(statement.order_by(Transaction.posted_at).limit(50_001)).all())
+                self._ensure_before_deadline(started)
+        except OperationalError as error:
+            if "interrupted" in str(error).lower():
+                raise ValueError("DSL_TIMEOUT") from error
+            raise
         if len(records) > 50_000:
             raise ValueError("DSL_ROW_LIMIT_EXCEEDED")
         if groups or metrics:
             rows = self._group(records, groups, metrics)
         else:
-            rows = [self._record_row(record) for record in records]
+            rows = []
+            for record in records:
+                self._ensure_before_deadline(started)
+                rows.append(self._record_row(record))
+        self._ensure_before_deadline(started)
         for ordering in reversed(orderings):
             key = str(ordering["field"])
             rows.sort(key=lambda row: cast(Any, row[key]), reverse=ordering.get("dir", "asc") == "desc")
+            self._ensure_before_deadline(started)
         rows = rows[:limit]
+        self._ensure_before_deadline(started)
         with self.database.sessions.begin() as session:
             PersistentAudit(self.database).append(session, f"trace_dsl_{query_hash[7:19]}", user_id,
                                                    "analysis.dsl.executed",
@@ -136,7 +150,7 @@ class DslExecutor:
         return DslResult(rows=rows, query_hash=query_hash, row_count=len(rows))
 
     @contextmanager
-    def _readonly_session(self) -> Iterator[Session]:
+    def _readonly_session(self, deadline: float | None = None) -> Iterator[Session]:
         source_url = make_url(str(self.database.engine.url))
         database_path = source_url.database
         if source_url.get_backend_name() == "sqlite" and database_path not in {None, "", ":memory:"}:
@@ -145,14 +159,17 @@ class DslExecutor:
                                       query={"mode": "ro", "uri": "true"})
             from sqlalchemy import create_engine
 
-            engine = create_engine(readonly_url, connect_args={"uri": True})
+            engine = create_engine(readonly_url, connect_args={"uri": True,
+                                                                "timeout": self.timeout_seconds})
             factory = sessionmaker(bind=engine, expire_on_commit=False)
             try:
                 with factory() as session:
                     connection = session.connection()
                     raw_connection = cast(Any, connection.connection.driver_connection)
-                    started = perf_counter()
-                    raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
+                    effective_deadline = deadline if deadline is not None else perf_counter() + self.timeout_seconds
+                    raw_connection.set_progress_handler(
+                        lambda: 1 if perf_counter() >= effective_deadline else 0, 1_000
+                    )
                     yield session
                     raw_connection.set_progress_handler(None, 0)
             finally:
@@ -162,13 +179,19 @@ class DslExecutor:
             connection = session.connection()
             connection.exec_driver_sql("PRAGMA query_only=ON")
             raw_connection = cast(Any, connection.connection.driver_connection)
-            started = perf_counter()
-            raw_connection.set_progress_handler(lambda: 1 if perf_counter() - started > 2.0 else 0, 1_000)
+            effective_deadline = deadline if deadline is not None else perf_counter() + self.timeout_seconds
+            raw_connection.set_progress_handler(
+                lambda: 1 if perf_counter() >= effective_deadline else 0, 1_000
+            )
             try:
                 yield session
             finally:
                 raw_connection.set_progress_handler(None, 0)
                 raw_connection.execute("PRAGMA query_only=OFF")
+
+    def _ensure_before_deadline(self, started: float) -> None:
+        if perf_counter() - started >= self.timeout_seconds:
+            raise ValueError("DSL_TIMEOUT")
 
     def _matches(self, record: Transaction, filters: list[dict[str, Any]]) -> bool:
         for item in filters:

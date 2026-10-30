@@ -11,13 +11,14 @@ def test_birthday_plan_has_dag_dependencies_authorization_and_compensation(tmp_p
     service = BusinessPlanService(database)
     plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
     assert plan.status == "awaiting_confirmation"
-    assert [node.tool for node in plan.nodes] == ["events.lookup", "funds.reserve", "merchant.order.create", "merchant.order.create"]
-    assert plan.nodes[1].depends_on == ["event"]
-    assert plan.nodes[2].compensation == "funds.release"
-    assert plan.nodes[3].depends_on == ["reserve"]
+    assert [node.tool for node in plan.nodes] == ["events.lookup", "merchant.quote", "merchant.quote",
+                                                    "funds.reserve", "merchant.order.create", "merchant.order.create"]
+    assert plan.nodes[3].depends_on == ["quote_flower", "quote_cake"]
+    assert plan.nodes[4].compensation == "funds.release"
+    assert plan.nodes[5].depends_on == ["reserve", "quote_cake"]
     graph = service.graph(plan.plan_id, "user_001")
     assert graph["nodes"][1]["authorization"] == "confirm"
-    assert graph["nodes"][2]["compensation"] == "funds.release"
+    assert graph["nodes"][4]["compensation"] == "funds.release"
 
 
 def test_plan_pause_cancel_resume_state_machine(tmp_path: Path) -> None:

@@ -90,4 +90,6 @@ def generate_seed(seed: int = 20261028) -> dict[str, list[dict[str, object]]]:
     events: list[dict[str, object]] = [{"id": "event_birthday", "user_id": "user_001", "event_type": "birthday",
                "event_date": "2026-11-15", "title": "配偶生日"}]
     return {"users": users, "accounts": accounts, "payees": payees, "transactions": transactions,
-            "products": products, "cards": cards, "subscriptions": subscriptions, "events": events}
+            "products": products, "cards": cards, "subscriptions": subscriptions, "events": events,
+            "merchant_catalog": [{"item": "flower", "price_minor": 5_000, "stock": 100, "price_version": 1},
+                                 {"item": "cake", "price_minor": 5_000, "stock": 100, "price_version": 1}]}

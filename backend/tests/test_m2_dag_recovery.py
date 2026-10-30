@@ -18,7 +18,7 @@ def test_plan_execution_uses_dependency_order_not_database_id(tmp_path: Path) ->
         receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
         assert record is not None
         result = service.execute_plan("user_001", plan.plan_id, receipt.id, record.display_hash)
-    assert [node["node_id"] for node in result["nodes"]] == ["event", "reserve", "flowers", "cake"]
+    assert [node["node_id"] for node in result["nodes"]] == ["event", "quote_flower", "quote_cake", "reserve", "flowers", "cake"]
 
 
 def test_paused_plan_cannot_dispatch_until_resumed(tmp_path: Path) -> None:

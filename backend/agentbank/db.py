@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, event, inspect
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from agentbank.clock import utc_now_naive
@@ -340,6 +342,27 @@ class MerchantOrder(Base):
     reservation_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
+class MerchantCatalog(Base):
+    __tablename__ = "merchant_catalog"
+    item: Mapped[str] = mapped_column(String(32), primary_key=True)
+    price_minor: Mapped[int] = mapped_column(Integer)
+    stock: Mapped[int] = mapped_column(Integer, default=100)
+    price_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class MerchantQuote(Base):
+    __tablename__ = "merchant_quotes"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    item: Mapped[str] = mapped_column(String(32))
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    delivery_date: Mapped[str] = mapped_column(String(10))
+    price_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class PlanRecord(Base):
     __tablename__ = "plans"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -489,6 +512,32 @@ class DailyRiskBucket(Base):
     pending_minor: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class _AtomicSession(Session):
+    def close(self) -> None:
+        active = self.info.get("atomic_session_active")
+        if active is not None and active():
+            return
+        super().close()
+
+
+class _SessionFactory:
+    def __init__(self, factory: sessionmaker[_AtomicSession], active_session: ContextVar[Session | None]) -> None:
+        self._factory = factory
+        self._active_session = active_session
+
+    def __call__(self) -> Session:
+        return self._active_session.get() or self._factory()
+
+    @contextmanager
+    def begin(self) -> Iterator[Session]:
+        active = self._active_session.get()
+        if active is not None:
+            yield active
+            return
+        with self._factory.begin() as session:
+            yield session
+
+
 class Database:
     def __init__(self, url: str = "sqlite:///agentbank.db") -> None:
         connect_args: dict[str, Any] = {}
@@ -499,7 +548,34 @@ class Database:
         self.engine = create_engine(url, connect_args=connect_args, **kwargs)
         if self.engine.dialect.name == "sqlite":
             event.listen(self.engine, "connect", _configure_sqlite)
-        self.sessions = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self._atomic_session: ContextVar[Session | None] = ContextVar(
+            f"agentbank_atomic_session_{id(self)}", default=None
+        )
+        self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False,
+                                             class_=_AtomicSession)
+        self.sessions = _SessionFactory(self._session_factory, self._atomic_session)
+
+    @contextmanager
+    def atomic(self) -> Iterator[Session]:
+        active = self._atomic_session.get()
+        if active is not None:
+            yield active
+            return
+        with self._session_factory() as session:
+            session.info["atomic_session_active"] = lambda: self._atomic_session.get() is session
+            token: Token[Session | None] = self._atomic_session.set(session)
+            try:
+                if self.engine.dialect.name == "sqlite":
+                    session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+                else:
+                    session.begin()
+                yield session
+                session.commit()
+            except BaseException:
+                session.rollback()
+                raise
+            finally:
+                self._atomic_session.reset(token)
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)

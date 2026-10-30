@@ -120,8 +120,11 @@ def test_every_m2_capability_has_http_entrypoint(tmp_path: Path, capability_id: 
         assert data["rows"] and all(row["txn_ids"] for row in data["rows"])
     elif capability_id == "B02":
         assert all(item["txn_ids"] and item["reason_code"] for item in data["anomalies"])
-    elif capability_id in {"B03", "B04"}:
+    elif capability_id == "B03":
         assert data["months"] and all("missing" in month for month in data["months"])
+    elif capability_id == "B04":
+        assert data["years"] and all("yoy_change" in year for year in data["years"])
+        assert data["months"] and all("mom_change" in month for month in data["months"])
     elif capability_id in {"W01", "W02"}:
         assert data["products"]
     elif capability_id == "W03":

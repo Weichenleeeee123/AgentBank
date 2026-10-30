@@ -13,4 +13,4 @@ def test_birthday_plan_api_exposes_graph(tmp_path: Path) -> None:
     assert response.status_code == 200
     graph = client.get(f"/v1/plans/{response.json()['plan_id']}/graph", headers=headers)
     assert graph.status_code == 200
-    assert len(graph.json()["nodes"]) == 4
+    assert len(graph.json()["nodes"]) == 6

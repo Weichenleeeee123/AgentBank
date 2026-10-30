@@ -18,7 +18,9 @@ def test_birthday_plan_can_execute_nodes_and_update_graph(tmp_path: Path) -> Non
         assert plan_record is not None
         executed = service.execute_plan("user_001", plan.plan_id, receipt.id, plan_record.display_hash)
     assert executed["status"] in {"succeeded", "partially_completed"}
-    assert [node["node_id"] for node in executed["nodes"]] == ["event", "reserve", "flowers", "cake"]
+    assert [node["node_id"] for node in executed["nodes"]] == [
+        "event", "quote_flower", "quote_cake", "reserve", "flowers", "cake"
+    ]
     graph = service.graph(plan.plan_id, "user_001")
     assert any(node["status"] == "succeeded" for node in graph["nodes"])
 

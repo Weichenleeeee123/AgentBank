@@ -147,7 +147,7 @@ class TransferService:
             if plan is None or receipt is None or plan.user_id != user_id or receipt.subject_id != user_id:
                 session.rollback()
                 raise DomainError("NOT_OWNER")
-            if receipt.status == "consumed":
+            if receipt.status != "pending":
                 session.rollback()
                 raise DomainError("RECEIPT_REPLAYED")
             if receipt.display_hash != display_hash or plan.display_hash != display_hash:
@@ -216,7 +216,7 @@ class TransferService:
             if receipt is None or plan is None or node is None or receipt.plan_id != plan_id or plan.user_id != user_id:
                 session.rollback()
                 raise DomainError("NOT_OWNER")
-            if receipt.status == "consumed":
+            if receipt.status != "pending":
                 session.rollback()
                 raise DomainError("RECEIPT_REPLAYED")
             result = self._commit_transfer(session, user_id, plan, receipt, node, json.loads(node.args_json))
@@ -224,25 +224,28 @@ class TransferService:
             return result
 
     def commit_scheduled(self, user_id: str, recipient_id: str, amount_minor: int, plan_id: str,
-                         node_id: str, idempotency_key: str) -> TransferResult:
-        with self.database.sessions() as session:
-            session.execute(text("BEGIN IMMEDIATE"))
+                         node_id: str, idempotency_key: str, *,
+                         scheduled_business_date: str | None = None) -> TransferResult:
+        with self.database.atomic() as session:
             existing = session.scalar(select(Operation).where(Operation.idempotency_key == idempotency_key))
             if existing is not None:
-                session.commit()
                 return TransferResult(existing.id, existing.status, existing.amount_minor, [], existing.error_code)
             account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
             recipient = session.get(Payee, recipient_id)
             if account is None or recipient is None or recipient.owner_user_id != user_id:
-                session.rollback()
                 raise DomainError("NOT_OWNER")
-            bucket = self._bucket(session, user_id)
-            if account.available_minor < amount_minor:
-                session.rollback()
+            if recipient.is_new:
+                raise DomainError("RECIPIENT_RISK_UPGRADE")
+            current_date = scheduled_business_date or business_date()
+            bucket = session.get(DailyRiskBucket, (user_id, current_date))
+            if bucket is None:
+                bucket = DailyRiskBucket(user_id=user_id, business_date=current_date,
+                                         completed_minor=0, pending_minor=0)
+                session.add(bucket)
+            if account.status != "active" or account.available_minor < amount_minor:
                 raise DomainError("INSUFFICIENT_FUNDS")
             projected = bucket.completed_minor + bucket.pending_minor + amount_minor
             if projected > 100_000:
-                session.rollback()
                 raise DomainError("DAILY_TOTAL_OVER_1000")
             operation_id = f"op_{uuid.uuid4().hex}"
             account.available_minor -= amount_minor
@@ -257,7 +260,6 @@ class TransferService:
                                          amount_minor=amount_minor, direction="credit")])
             self.audit.append(session, f"trace_{plan_id}", user_id, "bank.scheduled.committed",
                               {"operation_id": operation_id, "ledger_entry_ids": [debit_id, credit_id]})
-            session.commit()
             return TransferResult(operation_id, "succeeded", amount_minor, [debit_id, credit_id])
 
     def _commit_transfer(self, session: Session, user_id: str, plan: PlanRecord, receipt: ReceiptRecord,

@@ -110,6 +110,8 @@ class AgentOrchestrator:
             planned_parsed = self._from_planner(planned)
             if planned.get("plan_template") == "birthday":
                 return self._prepare_birthday_plan(user_id, conversation_id, text, planned)
+            if planned.get("plan_template") in {"query_analysis_report", "investment_review"}:
+                return self._prepare_composite_plan(user_id, conversation_id, planned)
             if planned_parsed is not None:
                 transfer_family = {"T01", "T02", "T03"}
                 if parsed.capability_id in transfer_family and planned_parsed.capability_id in transfer_family:
@@ -406,6 +408,30 @@ class AgentOrchestrator:
                                    "receipt_id": receipt.id, "revision": plan.revision,
                                    "status": plan.status, "display": plan.display},
                              message="请核对生日计划后确认。")
+
+    def _prepare_composite_plan(self, user_id: str, conversation_id: str,
+                                planned: dict[str, Any]) -> AgentResponse:
+        from agentbank.workflow.planner import BusinessPlanService
+
+        template = str(planned["plan_template"])
+        try:
+            plan = BusinessPlanService(self.database).create_composite_plan(user_id, template,
+                                                                            dict(planned.get("slots", {})))
+        except DomainError as error:
+            return AgentResponse(kind="error", intent=str(planned.get("intent", template)), message=error.code)
+        with self.database.sessions() as session:
+            from agentbank.db import PlanRecord, ReceiptRecord
+            record = session.get(PlanRecord, plan.plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan.plan_id))
+            assert record is not None and receipt is not None
+        self._save_pending(user_id, conversation_id, None)
+        self._set_latest_prepared(user_id, conversation_id, plan.plan_id)
+        return AgentResponse(kind="plan_confirmation", intent=template, record_id=plan.plan_id,
+                             display_hash=record.display_hash,
+                             data={"plan_id": plan.plan_id, "plan_type": template,
+                                   "receipt_id": receipt.id, "revision": plan.revision,
+                                   "status": plan.status, "display": plan.display},
+                             message="请核对只读计划后确认。")
 
     def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
         with self.database.sessions() as session:

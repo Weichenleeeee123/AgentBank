@@ -9,10 +9,20 @@ from typing import Any
 from sqlalchemy import select
 
 from agentbank.contracts import Plan, PlanNode
-from agentbank.db import Account, CapabilityRecord, Database, Event, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord, Reservation
+from agentbank.db import (Account, AuditLog, CapabilityRecord, Database, DecisionRecord, Event, LedgerEntry,
+                          Operation, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord, Reservation)
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
+from agentbank.tools import validate_capability_payload
+
+
+COMPOSITE_PLAN_TEMPLATES: dict[str, dict[str, Any]] = {
+    "query_analysis_report": {"required_slots": {"start_month", "end_month", "group_by", "report"},
+                              "allowed_slots": {"start_month", "end_month", "group_by", "report", "category"}},
+    "investment_review": {"required_slots": set(), "allowed_slots": set()},
+}
+READ_ONLY_CAPABILITIES = {"Q02", "B01", "B03", "B04", "W01", "W02"}
 
 
 class BusinessPlanService:
@@ -22,6 +32,89 @@ class BusinessPlanService:
             "events.lookup": {"kind": "query"}, "funds.reserve": {"kind": "command"},
             "merchant.order.create": {"kind": "command"}, "funds.release": {"kind": "command"},
         }
+
+    def create_composite_plan(self, user_id: str, template_id: str, slots: dict[str, Any]) -> Plan:
+        template = COMPOSITE_PLAN_TEMPLATES.get(template_id)
+        if template is None:
+            raise DomainError("PLAN_TEMPLATE_NOT_FOUND")
+        if not isinstance(slots, dict) or template["required_slots"] - slots.keys():
+            raise DomainError("PLAN_SLOTS_REQUIRED")
+        if slots.keys() - template["allowed_slots"]:
+            raise DomainError("PLAN_SLOT_INVALID")
+        plan_id = f"plan_{uuid.uuid4().hex}"
+        if template_id == "query_analysis_report":
+            start_month, end_month = str(slots["start_month"]), str(slots["end_month"])
+            try:
+                start_value = date.fromisoformat(f"{start_month}-01")
+                end_value = date.fromisoformat(f"{end_month}-01")
+                end_date = date(end_value.year, end_value.month,
+                                (date(end_value.year + (end_value.month == 12),
+                                      1 if end_value.month == 12 else end_value.month + 1, 1)
+                                 - timedelta(days=1)).day).isoformat()
+            except ValueError as error:
+                raise DomainError("PLAN_SLOT_INVALID") from error
+            if start_value > end_value:
+                raise DomainError("PLAN_SLOT_INVALID")
+            report = slots["report"]
+            if report not in {"monthly", "yearly"}:
+                raise DomainError("PLAN_SLOT_INVALID")
+            group_by = slots["group_by"]
+            if not isinstance(group_by, list) or not group_by:
+                raise DomainError("PLAN_SLOT_INVALID")
+            query_payload: dict[str, Any] = {"start_date": start_value.isoformat(), "end_date": end_date}
+            if slots.get("category") is not None:
+                query_payload["category"] = str(slots["category"])
+            nodes = [
+                PlanNode(id="transactions", tool="Q02", args=query_payload,
+                         idempotency_key=f"{plan_id}-transactions"),
+                PlanNode(id="analysis", tool="B01", args={"dsl": {"source": "transactions",
+                         "group_by": group_by}}, depends_on=["transactions"],
+                         idempotency_key=f"{plan_id}-analysis"),
+            ]
+            if report == "monthly":
+                nodes.append(PlanNode(id="report", tool="B03", args={"start_month": start_month,
+                                 "end_month": end_month}, depends_on=["analysis"],
+                                 idempotency_key=f"{plan_id}-report"))
+            else:
+                nodes.append(PlanNode(id="report", tool="B04", args={"year": start_month[:4],
+                                 "start_month": start_month, "end_month": end_month},
+                                 depends_on=["analysis"], idempotency_key=f"{plan_id}-report"))
+        else:
+            nodes = [PlanNode(id="recommendations", tool="W01", args={},
+                              idempotency_key=f"{plan_id}-recommendations"),
+                     PlanNode(id="products", tool="W02", args={"recommendation_node": "recommendations"},
+                              depends_on=["recommendations"], idempotency_key=f"{plan_id}-products")]
+        registry = {capability_id: {"kind": "query"} for capability_id in READ_ONLY_CAPABILITIES}
+        PlanValidator(registry).validate([node.model_dump() for node in nodes])
+        for node in nodes:
+            if node.tool in READ_ONLY_CAPABILITIES:
+                payload = {key: value for key, value in node.args.items() if key != "recommendation_node"}
+                if node.tool == "W02":
+                    payload = {}
+                validate_capability_payload(node.tool, payload)
+        created = datetime.now(timezone.utc).replace(tzinfo=None)
+        display = [{"label": "只读计划模板", "value": template_id},
+                   {"label": "查询节点", "value": "、".join(node.id for node in nodes)}]
+        display_json = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        action_json = json.dumps([node.model_dump(mode="json") for node in sorted(nodes, key=lambda item: item.id)],
+                                 ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        display_hash = "sha256:" + hashlib.sha256(display_json.encode("utf-8")).hexdigest()
+        action_hash = "sha256:" + hashlib.sha256(action_json.encode("utf-8")).hexdigest()
+        with self.database.sessions.begin() as session:
+            session.add(PlanRecord(id=plan_id, user_id=user_id, revision=1, status="awaiting_confirmation",
+                                   display_hash=display_hash, action_hash=action_hash,
+                                   display_json=display_json, created_at=created))
+            session.add(ReceiptRecord(id=f"rcp_{uuid.uuid4().hex}", subject_id=user_id, plan_id=plan_id,
+                                      plan_revision=1, node_ids_json=json.dumps([node.id for node in nodes]),
+                                      action_hash=action_hash, display_hash=display_hash, assurance="none",
+                                      issued_at=created, expires_at=created + timedelta(minutes=5), status="pending"))
+            for node in nodes:
+                session.add(PlanNodeRecord(id=f"{plan_id}-{node.id}", plan_id=plan_id, tool=node.tool,
+                                           args_json=json.dumps(node.model_dump(), ensure_ascii=False,
+                                                                sort_keys=True), status="pending",
+                                           idempotency_key=node.idempotency_key))
+        return Plan(plan_id=plan_id, revision=1, status="awaiting_confirmation", user_id=user_id,
+                    nodes=nodes, display=display, created_at=created)
 
     def create_birthday_plan(self, user_id: str, event_id: str, reserve_minor: int,
                              planned_event_date: str | None = None) -> Plan:
@@ -38,22 +131,42 @@ class BusinessPlanService:
             raise DomainError("EVENT_DATE_INVALID") from error
         dispatch_on = (datetime.fromisoformat(event_date).date() - timedelta(days=2)).isoformat()
         plan_id = f"plan_{uuid.uuid4().hex}"
+        capabilities = CapabilityService(self.database)
+        flower_quote = capabilities.quote_merchant(user_id, "flower", event_date)
+        cake_quote = capabilities.quote_merchant(user_id, "cake", event_date)
         nodes = [
             PlanNode(id="event", tool="events.lookup", args={"event_id": event_id, "event_date": event_date},
                      idempotency_key=f"{plan_id}-event"),
+            PlanNode(id="quote_flower", tool="merchant.quote", args={"quote_id": flower_quote["quote_id"],
+                     "item": "flower", "amount_minor": flower_quote["amount_minor"],
+                     "delivery_date": event_date, "price_version": flower_quote["price_version"]},
+                     depends_on=["event"], idempotency_key=f"{plan_id}-quote-flower"),
+            PlanNode(id="quote_cake", tool="merchant.quote", args={"quote_id": cake_quote["quote_id"],
+                     "item": "cake", "amount_minor": cake_quote["amount_minor"],
+                     "delivery_date": event_date, "price_version": cake_quote["price_version"]},
+                     depends_on=["event"], idempotency_key=f"{plan_id}-quote-cake"),
             PlanNode(id="reserve", tool="funds.reserve", args={"amount_minor": reserve_minor, "event_id": event_id},
-                     depends_on=["event"], compensation="funds.release", idempotency_key=f"{plan_id}-reserve"),
+                     depends_on=["quote_flower", "quote_cake"], compensation="funds.release",
+                     idempotency_key=f"{plan_id}-reserve"),
             PlanNode(id="flowers", tool="merchant.order.create", args={"item": "flower", "event_id": event_id,
+                     "quote_id": flower_quote["quote_id"], "amount_minor": flower_quote["amount_minor"],
                      "delivery_date": event_date, "dispatch_on": dispatch_on},
-                     depends_on=["reserve"], compensation="funds.release", idempotency_key=f"{plan_id}-flowers"),
+                     depends_on=["reserve", "quote_flower"], compensation="funds.release",
+                     idempotency_key=f"{plan_id}-flowers"),
             PlanNode(id="cake", tool="merchant.order.create", args={"item": "cake", "event_id": event_id,
+                     "quote_id": cake_quote["quote_id"], "amount_minor": cake_quote["amount_minor"],
                      "delivery_date": event_date, "dispatch_on": dispatch_on},
-                     depends_on=["reserve"], compensation="funds.release", idempotency_key=f"{plan_id}-cake"),
+                     depends_on=["reserve", "quote_cake"], compensation="funds.release",
+                     idempotency_key=f"{plan_id}-cake"),
         ]
-        PlanValidator(self.registry).validate([node.model_dump() for node in nodes])
+        PlanValidator({**self.registry, "merchant.quote": {"kind": "query"}}).validate(
+            [node.model_dump() for node in nodes])
         created = datetime.now(timezone.utc).replace(tzinfo=None)
         display = [{"label": "活动", "value": event_id}, {"label": "活动日期", "value": event_date},
-                   {"label": "下单日期", "value": dispatch_on}, {"label": "资金预留（分）", "value": str(reserve_minor)},
+                   {"label": "下单日期", "value": dispatch_on},
+                   {"label": "鲜花报价", "value": f"¥{flower_quote['amount_minor'] / 100:.2f}"},
+                   {"label": "蛋糕报价", "value": f"¥{cake_quote['amount_minor'] / 100:.2f}"},
+                   {"label": "资金预留（分）", "value": str(reserve_minor)},
                    {"label": "计划订单", "value": "鲜花、蛋糕"}]
         display_json = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         action_json = json.dumps([node.model_dump(mode="json") for node in sorted(nodes, key=lambda item: item.id)], ensure_ascii=False,
@@ -81,18 +194,86 @@ class BusinessPlanService:
             if plan is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
             records = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
+            receipts = session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id,
+                                                                    ReceiptRecord.subject_id == user_id)).all()
+            decisions = session.scalars(select(DecisionRecord).where(DecisionRecord.plan_id == plan_id)).all()
+            consumptions = session.scalars(select(ReceiptConsumption).where(
+                ReceiptConsumption.receipt_id.in_([receipt.id for receipt in receipts])
+            )).all() if receipts else []
+            consumption_by_node = {item.node_id: item for item in consumptions}
+            receipt_by_node = {node_id: receipt for receipt in receipts
+                               for node_id in json.loads(receipt.node_ids_json)}
+            decision_by_operation = {item.operation_id: item for item in decisions}
             nodes: list[dict[str, Any]] = []
             for record in records:
                 data = json.loads(record.args_json)
-                nodes.append({"node_id": record.id, "logical_id": data["id"], "tool": record.tool,
-                              "status": record.status, "depends_on": data.get("depends_on", []),
-                              "authorization": "confirm" if record.tool in {"funds.reserve", "merchant.order.create"} else "none",
-                              "compensation": data.get("compensation"),
-                              "rule_id": "P13" if record.tool == "funds.reserve" else "P14" if record.tool == "merchant.order.create" else "P03",
-                              "decision_chain": [{"stage": "ownership", "status": "passed"},
-                                                 {"stage": "policy", "rule_id": "P13" if record.tool == "funds.reserve" else "P14" if record.tool == "merchant.order.create" else "P03", "status": "passed"},
-                                                 {"stage": "authorization", "status": "pending" if record.status == "pending" else "consumed"}]})
+                logical_id = data["id"]
+                receipt = receipt_by_node.get(logical_id)
+                consumption = consumption_by_node.get(logical_id)
+                capability_record = session.scalar(select(CapabilityRecord).where(
+                    CapabilityRecord.user_id == user_id,
+                    CapabilityRecord.idempotency_key == record.idempotency_key))
+                operation = session.scalar(select(Operation).where(
+                    Operation.user_id == user_id,
+                    Operation.idempotency_key == record.idempotency_key))
+                if operation is None and consumption is not None:
+                    operation = session.get(Operation, consumption.operation_id)
+                    if operation is not None and operation.user_id != user_id:
+                        operation = None
+                if operation is not None:
+                    ledger_ids = list(session.scalars(select(LedgerEntry.id).where(
+                        LedgerEntry.operation_id == operation.id)).all())
+                else:
+                    ledger_ids = []
+                trace_ids = {f"trace_{plan_id}", f"trace_{record.id}"}
+                if capability_record is not None:
+                    trace_ids.add(f"trace_{capability_record.id}")
+                if operation is not None:
+                    trace_ids.add(f"trace_{operation.id}")
+                audit_events = session.scalars(select(AuditLog).where(
+                    AuditLog.subject_id == user_id, AuditLog.trace_id.in_(trace_ids)
+                ).order_by(AuditLog.seq)).all() if trace_ids else []
+                decision = decision_by_operation.get(operation.id) if operation is not None else None
+                decision_chain: list[dict[str, Any]] = []
+                if decision is not None:
+                    decision_chain.append({"stage": "policy", "status": "recorded",
+                                          "decision_id": decision.id, "tier": decision.tier_display,
+                                          "assurance": decision.assurance,
+                                          "reason_codes": json.loads(decision.reason_codes_json)})
+                if receipt is not None:
+                    decision_chain.append({"stage": "authorization",
+                                          "status": "consumed" if consumption is not None else receipt.status,
+                                          "receipt_id": receipt.id})
+                node_evidence = {
+                    "receipt_id": receipt.id if receipt else None,
+                    "receipt_status": receipt.status if receipt else None,
+                    "operation_id": operation.id if operation else (consumption.operation_id if consumption else None),
+                    "operation_status": operation.status if operation else None,
+                    "ledger_entry_ids": ledger_ids,
+                    "audit_event_ids": [event.event_id for event in audit_events],
+                    "capability_record_id": capability_record.id if capability_record else None,
+                    "capability_status": capability_record.status if capability_record else None,
+                }
+                node_view = {"node_id": record.id, "logical_id": data["id"], "tool": record.tool,
+                             "status": record.status, "depends_on": data.get("depends_on", []),
+                             "authorization": receipt.assurance if receipt else "none",
+                             "compensation": data.get("compensation"),
+                             "decision_chain": decision_chain, "evidence": node_evidence}
+                if capability_record is not None and record.tool in READ_ONLY_CAPABILITIES:
+                    node_view["observation"] = {"status": capability_record.status,
+                                                 "data": json.loads(capability_record.data_json)}
+                nodes.append(node_view)
             return {"plan_id": plan_id, "status": plan.status, "revision": plan.revision, "nodes": nodes}
+
+    def recover_interrupted(self) -> list[str]:
+        """Persist running plans as paused after process startup for explicit user resumption."""
+        recovered: list[str] = []
+        with self.database.sessions.begin() as session:
+            records = session.scalars(select(PlanRecord).where(PlanRecord.status == "running")).all()
+            for plan in records:
+                plan.status = "paused"
+                recovered.append(plan.id)
+        return recovered
 
     def revise_birthday_plan(self, user_id: str, plan_id: str, changes: dict[str, Any]) -> Plan:
         with self.database.sessions() as session:
@@ -150,10 +331,14 @@ class BusinessPlanService:
                 raise DomainError("PLAN_REVISION_MISMATCH")
             if receipt.display_hash != display_hash or plan.display_hash != display_hash:
                 raise DomainError("HASH_MISMATCH")
-            if plan.status != "awaiting_confirmation":
+            records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all())
+            composite = bool(records) and all(record.tool in READ_ONLY_CAPABILITIES for record in records)
+            allowed_states = {"awaiting_confirmation", "running", "partially_completed"} if composite else {
+                "awaiting_confirmation", "running"
+            }
+            if plan.status not in allowed_states:
                 raise DomainError("PLAN_STATE_INVALID")
             receipt_nodes = set(json.loads(receipt.node_ids_json))
-            records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all())
             action_json = json.dumps(sorted((json.loads(item.args_json) for item in records), key=lambda item: item["id"]), ensure_ascii=False,
                                      sort_keys=True, separators=(",", ":"))
             expected_action_hash = "sha256:" + hashlib.sha256(action_json.encode("utf-8")).hexdigest()
@@ -187,9 +372,12 @@ class BusinessPlanService:
             if receipt_nodes != set(record_by_logical):
                 raise DomainError("RECEIPT_NODE_SET_MISMATCH")
             records = [record_by_logical[logical_id] for logical_id in topo_order]
+            if composite:
+                PlanValidator({tool: {"kind": "query"} for tool in READ_ONLY_CAPABILITIES}).validate(
+                    [json.loads(record.args_json) for record in records])
         with self.database.sessions.begin() as session:
             plan = session.get(PlanRecord, plan_id)
-            if plan is None or plan.status != "awaiting_confirmation":
+            if plan is None or plan.status not in allowed_states:
                 raise DomainError("PLAN_STATE_INVALID")
             plan.status = "running"
         capabilities = CapabilityService(self.database)
@@ -202,6 +390,7 @@ class BusinessPlanService:
             if reserve_record is not None:
                 reservation_id = str(json.loads(reserve_record.data_json).get("reservation_id", "")) or None
         results: list[dict[str, Any]] = []
+        completed_statuses = {"succeeded"} if composite else {"succeeded", "scheduled", "reserved"}
         for record in records:
             data = json.loads(record.args_json)
             logical_id = data["id"]
@@ -215,10 +404,58 @@ class BusinessPlanService:
                 if current is not None:
                     current.status = "ready"
                     current.status = "running"
+            with self.database.sessions() as session:
+                existing_capability = session.scalar(select(CapabilityRecord).where(
+                    CapabilityRecord.user_id == user_id,
+                    CapabilityRecord.idempotency_key == record.idempotency_key))
+            if composite and existing_capability is not None:
+                status = existing_capability.status
+                result_data = json.loads(existing_capability.data_json)
+                if status not in completed_statuses:
+                    results.append({"node_id": logical_id, "status": status, "data": result_data})
+                    break
+                with self.database.sessions.begin() as session:
+                    current = session.get(PlanNodeRecord, record.id)
+                    if current is not None:
+                        current.status = status
+                    session.add(ReceiptConsumption(receipt_id=receipt_id, node_id=logical_id,
+                                                   operation_id=existing_capability.id,
+                                                   consumed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
+                consumed.add(logical_id)
+                results.append({"node_id": logical_id, "status": status, "data": result_data})
+                continue
             try:
                 if data["id"] == "event":
                     status = "succeeded"
                     result_data = {"event_id": data["args"]["event_id"]}
+                elif data["id"] in {"quote_flower", "quote_cake"}:
+                    quote = capabilities.get_merchant_quote(user_id, str(data["args"]["quote_id"]))
+                    if (quote["status"] != "active" or quote["item"] != data["args"]["item"]
+                            or quote["delivery_date"] != data["args"]["delivery_date"]
+                            or quote["amount_minor"] != data["args"]["amount_minor"]
+                            or quote["price_version"] != data["args"]["price_version"]
+                            or quote["current_price_version"] != quote["price_version"]
+                            or quote["current_price_minor"] != quote["amount_minor"]
+                            or quote["catalog_stock"] <= 0
+                            or datetime.fromisoformat(quote["expires_at"]) <= datetime.now(timezone.utc).replace(tzinfo=None)):
+                        raise DomainError("QUOTE_INVALID")
+                    status, result_data = "succeeded", quote
+                elif record.tool in READ_ONLY_CAPABILITIES:
+                    payload = {key: value for key, value in data["args"].items()
+                               if key != "recommendation_node"}
+                    if record.tool == "W02":
+                        source_id = str(data["args"]["recommendation_node"])
+                        source_key = record_by_logical[source_id].idempotency_key
+                        with self.database.sessions() as session:
+                            source_record = session.scalar(select(CapabilityRecord).where(
+                                CapabilityRecord.user_id == user_id,
+                                CapabilityRecord.idempotency_key == source_key))
+                            if source_record is None or source_record.status != "succeeded":
+                                raise DomainError("PLAN_DEPENDENCY_NOT_READY")
+                            recommendations = json.loads(source_record.data_json).get("products", [])
+                        payload = {"product_ids": [str(item["id"]) for item in recommendations]}
+                    result = capabilities.execute(user_id, record.tool, payload, record.idempotency_key)
+                    status, result_data = result.status, result.data
                 elif data["id"] == "reserve":
                     result = capabilities.execute(user_id, "X02", {"amount_minor": data["args"]["amount_minor"], "plan_id": plan_id}, f"{plan_id}-reserve")
                     reservation_id = str(result.data["reservation_id"])
@@ -228,6 +465,8 @@ class BusinessPlanService:
                     result = capabilities.execute(user_id, capability_id,
                                                    {"delivery_date": data["args"]["delivery_date"],
                                                     "dispatch_on": data["args"]["dispatch_on"],
+                                                    "quote_id": data["args"]["quote_id"],
+                                                    "amount_minor": data["args"]["amount_minor"],
                                                     "reservation_id": reservation_id}, f"{plan_id}-{data['id']}")
                     status, result_data = result.status, result.data
             except DomainError as error:
@@ -236,11 +475,11 @@ class BusinessPlanService:
                 current = session.get(PlanNodeRecord, record.id)
                 if current is not None:
                     current.status = status
-                if status in {"succeeded", "scheduled", "reserved"}:
+                if status in completed_statuses:
                     session.add(ReceiptConsumption(receipt_id=receipt_id, node_id=logical_id,
                                                    operation_id=f"{plan_id}-{logical_id}", consumed_at=datetime.now(timezone.utc).replace(tzinfo=None)))
             results.append({"node_id": data["id"], "status": status, "data": result_data})
-            if status not in {"succeeded", "scheduled", "reserved"}:
+            if status not in completed_statuses:
                 break
             with self.database.sessions() as session:
                 current_plan = session.get(PlanRecord, plan_id)
@@ -253,7 +492,7 @@ class BusinessPlanService:
             current_plan = session.get(PlanRecord, plan_id)
             interrupted_status = current_plan.status if current_plan and current_plan.status in {"paused", "cancelled"} else None
         final_status = interrupted_status or (
-            "succeeded" if all(status in {"succeeded", "scheduled", "reserved"} for status in node_statuses)
+            "succeeded" if all(status in completed_statuses for status in node_statuses)
             else "partially_completed"
         )
         with self.database.sessions.begin() as session:

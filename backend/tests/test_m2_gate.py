@@ -73,7 +73,7 @@ def test_m2_plan_graph_is_visible_and_mandate_can_be_revoked(tmp_path: Path) -> 
     from agentbank.workflow.planner import BusinessPlanService
     graph = BusinessPlanService(database).create_birthday_plan("user_001", "event_birthday", 100_000)
     visible = BusinessPlanService(database).graph(graph.plan_id, "user_001")
-    assert len(visible["nodes"]) == 4 and all("authorization" in node for node in visible["nodes"])
+    assert len(visible["nodes"]) == 6 and all("authorization" in node for node in visible["nodes"])
 
 
 def test_capability_evaluation_matrix_asserts_business_results() -> None:

@@ -133,7 +133,13 @@ class LLMGateway:
                                   "capability_catalogue": self.capability_catalogue(),
                                   "plan_templates": {"birthday": {"description": "可信生日事件→资金预留→鲜花和蛋糕定时订单",
                                                                    "slots": {"event_id": "string", "reserve_minor": "positive integer"},
-                                                                   "required_slots": ["event_id", "reserve_minor"]}},
+                                                                   "required_slots": ["event_id", "reserve_minor"]},
+                                                    "query_analysis_report": {"description": "查询→DSL分析→月报或年报",
+                                                                   "slots": {"start_month": "YYYY-MM", "end_month": "YYYY-MM",
+                                                                             "group_by": "array", "report": "monthly|yearly"},
+                                                                   "required_slots": ["start_month", "end_month", "group_by", "report"]},
+                                                    "investment_review": {"description": "风险画像后的产品推荐与对比",
+                                                                   "slots": {}, "required_slots": []}},
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
                                                        "plan_template": "string|null",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
@@ -307,7 +313,7 @@ class LLMGateway:
             "S02": "设置订阅续费提醒", "S03": "取消订阅", "X01": "查询本人事件",
             "X02": "预留资金", "X03": "创建商户订单", "X04": "创建商户订单", "X05": "冻结银行卡并验证身份",
         }
-        model_excluded = {"assurance", "device_token", "otp", "new_pin", "simulate_failure"}
+        model_excluded = {"assurance", "device_token", "otp", "new_pin", "simulate_failure", "recipient_id"}
         integer_slots = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit"}
         boolean_slots = {"virtual"}
         array_slots = {"answers", "product_ids", "participant_ids"}
@@ -325,18 +331,29 @@ class LLMGateway:
             raise ValueError("planner schema invalid")
         capability_id = result.get("capability_id")
         plan_template = result.get("plan_template")
+        template_slots = {
+            "birthday": {"event_id", "reserve_minor"},
+            "query_analysis_report": {"start_month", "end_month", "group_by", "report", "category"},
+            "investment_review": set(),
+        }
         if plan_template is not None:
-            if capability_id is not None or plan_template != "birthday":
+            if capability_id is not None or plan_template not in template_slots:
                 raise ValueError("planner template is not registered")
-            allowed_template_slots = {"event_id", "reserve_minor"}
+            allowed_template_slots = template_slots[plan_template]
             if set(result["slots"]) - allowed_template_slots:
                 raise ValueError("planner template slot invalid")
-            if "event_id" in result["slots"] and not isinstance(result["slots"]["event_id"], str):
+            if plan_template == "birthday" and "event_id" in result["slots"] and not isinstance(result["slots"]["event_id"], str):
                 raise ValueError("planner template event id invalid")
-            if "reserve_minor" in result["slots"] and (not isinstance(result["slots"]["reserve_minor"], int)
+            if plan_template == "birthday" and "reserve_minor" in result["slots"] and (not isinstance(result["slots"]["reserve_minor"], int)
                                                            or isinstance(result["slots"]["reserve_minor"], bool)
                                                            or result["slots"]["reserve_minor"] <= 0):
                 raise ValueError("planner template budget invalid")
+            if plan_template == "query_analysis_report":
+                if (not isinstance(result["slots"].get("start_month"), str)
+                        or not isinstance(result["slots"].get("end_month"), str)
+                        or not isinstance(result["slots"].get("group_by"), list)
+                        or result["slots"].get("report") not in {"monthly", "yearly"}):
+                    raise ValueError("planner template report slots invalid")
         if capability_id is not None:
             if capability_id not in CAPABILITIES:
                 raise ValueError("capability is not registered")
@@ -352,7 +369,9 @@ class LLMGateway:
         for key in ("missing", "ambiguities"):
             if not isinstance(result.get(key, []), list) or any(not isinstance(item, str) for item in result.get(key, [])):
                 raise ValueError("planner list invalid")
-        required = (["event_id", "reserve_minor"] if plan_template == "birthday" else
+        required = ({"birthday": ["event_id", "reserve_minor"],
+                     "query_analysis_report": ["start_month", "end_month", "group_by", "report"],
+                     "investment_review": []}.get(plan_template, []) if plan_template else
                     cls.capability_catalogue()[capability_id]["required_slots"] if capability_id else [])
         missing = set(result.get("missing", []))
         if any(slot not in result["slots"] and slot not in missing for slot in required):

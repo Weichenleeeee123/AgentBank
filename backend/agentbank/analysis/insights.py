@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -15,26 +16,37 @@ def _transactions(database: Database, user_id: str) -> list[Transaction]:
         return list(session.scalars(select(Transaction).where(Transaction.user_id == user_id).order_by(Transaction.posted_at)).all())
 
 
+def _business_month(posted_at: str) -> str:
+    value = posted_at.replace("Z", "+00:00")
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError("INVALID_TRANSACTION_TIMESTAMP") from error
+    if timestamp.tzinfo is None:
+        return timestamp.strftime("%Y-%m")
+    return timestamp.astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m")
+
+
 def monthly_report(database: Database, user_id: str, start_month: str, end_month: str) -> list[dict[str, Any]]:
     start = date.fromisoformat(start_month + "-01")
     end = date.fromisoformat(end_month + "-01")
-    buckets: dict[str, dict[str, int]] = defaultdict(lambda: {"income_minor": 0, "expense_minor": 0, "transfer_minor": 0})
+    if start > end or (end.year - start.year) * 12 + end.month - start.month >= 120:
+        raise ValueError("REPORT_RANGE_INVALID")
+    buckets: dict[str, dict[str, Any]] = defaultdict(_empty_report_bucket)
     for transaction in _transactions(database, user_id):
-        month = transaction.posted_at[:7]
-        if start_month <= month <= end_month:
-            key = "income_minor" if transaction.direction == "credit" else "expense_minor"
-            if transaction.direction == "transfer":
-                key = "transfer_minor"
-            buckets[month][key] += transaction.amount_minor
+        month = _business_month(transaction.posted_at)
+        bucket = buckets[month]
+        _add_report_transaction(bucket, transaction)
     rows: list[dict[str, Any]] = []
     cursor = start
     while cursor <= end:
         month = cursor.strftime("%Y-%m")
-        values = buckets.get(month, {"income_minor": 0, "expense_minor": 0, "transfer_minor": 0})
+        values = buckets.get(month, _empty_report_bucket())
         rows.append({"month": month, **values, "missing": month not in buckets})
         cursor = date(cursor.year + (cursor.month == 12), 1 if cursor.month == 12 else cursor.month + 1, 1)
     for index, row in enumerate(rows):
-        previous = rows[index - 1] if index else None
+        previous_month = _previous_month(str(row["month"]))
+        previous = buckets.get(previous_month)
         previous_year = buckets.get(f"{int(row['month'][:4]) - 1}-{row['month'][5:]}")
         current_total = row["expense_minor"]
         previous_total = previous["expense_minor"] if previous else None
@@ -42,6 +54,49 @@ def monthly_report(database: Database, user_id: str, start_month: str, end_month
         row["mom_change"] = None if previous_total in (None, 0) else round((current_total - previous_total) / previous_total, 4)
         row["yoy_change"] = None if yoy_total in (None, 0) else round((current_total - yoy_total) / yoy_total, 4)
     return rows
+
+
+def yearly_report(database: Database, user_id: str, start_year: int, end_year: int) -> list[dict[str, Any]]:
+    if start_year > end_year or end_year - start_year >= 20:
+        raise ValueError("INVALID_YEAR_RANGE")
+    buckets: dict[int, dict[str, Any]] = defaultdict(_empty_report_bucket)
+    for transaction in _transactions(database, user_id):
+        year = int(_business_month(transaction.posted_at)[:4])
+        _add_report_transaction(buckets[year], transaction)
+    rows: list[dict[str, Any]] = []
+    for year in range(start_year, end_year + 1):
+        bucket = buckets.get(year, _empty_report_bucket())
+        rows.append({"year": year, **bucket, "missing": year not in buckets})
+    for row in rows:
+        previous = buckets.get(int(row["year"]) - 1)
+        previous_total = previous["expense_minor"] if previous else None
+        current_total = row["expense_minor"]
+        row["yoy_change"] = (None if previous_total in (None, 0) else
+                              round((current_total - previous_total) / previous_total, 4))
+    return rows
+
+
+def _empty_report_bucket() -> dict[str, Any]:
+    return {"income_minor": 0, "expense_minor": 0, "transfer_minor": 0,
+            "income_txn_ids": [], "expense_txn_ids": [], "transfer_txn_ids": [], "txn_ids": []}
+
+
+def _add_report_transaction(bucket: dict[str, Any], transaction: Transaction) -> None:
+    key = {"credit": "income", "debit": "expense", "transfer": "transfer"}.get(
+        transaction.direction
+    )
+    if key is None:
+        return
+    bucket[f"{key}_minor"] += transaction.amount_minor
+    bucket[f"{key}_txn_ids"].append(transaction.id)
+    bucket["txn_ids"].append(transaction.id)
+
+
+def _previous_month(month: str) -> str:
+    year, month_number = map(int, month.split("-"))
+    if month_number == 1:
+        return f"{year - 1}-12"
+    return f"{year}-{month_number - 1:02d}"
 
 
 def detect_subscriptions(database: Database, user_id: str) -> list[dict[str, Any]]:

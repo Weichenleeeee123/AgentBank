@@ -2,6 +2,7 @@ from pathlib import Path
 
 from agentbank.analysis.dsl import DslExecutor
 from agentbank.analysis.insights import detect_anomalies, monthly_report
+from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.db import Database
 from agentbank.seed.loader import load_seed
 
@@ -36,8 +37,11 @@ def test_b03_month_report_separates_flows(tmp_path: Path) -> None:
     assert all(set(("income_minor", "expense_minor", "transfer_minor", "missing")) <= set(row) for row in rows)
 
 
-def test_b04_year_report_has_twelve_explicit_months_and_missing_flags(tmp_path: Path) -> None:
-    rows = monthly_report(make_database(tmp_path), "user_001", "2026-01", "2026-12")
-    assert len(rows) == 12
-    assert any(row["missing"] for row in rows)
-    assert all(row["month"].startswith("2026-") for row in rows)
+def test_b04_year_report_returns_calendar_year_aggregate(tmp_path: Path) -> None:
+    result = CapabilityService(make_database(tmp_path)).execute(
+        "user_001", "B04", {"year": "2026"}, "b04-year-report"
+    )
+    assert len(result.data["months"]) == 12
+    assert len(result.data["years"]) == 1
+    assert result.data["years"][0]["year"] == 2026
+    assert "yoy_change" in result.data["years"][0]

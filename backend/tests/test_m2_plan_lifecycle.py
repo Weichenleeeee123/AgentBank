@@ -38,6 +38,29 @@ def test_birthday_orders_use_the_event_date_confirmed_in_plan(tmp_path: Path) ->
         assert {order.delivery_date for order in orders} == {"2027-02-20"}
 
 
+def test_birthday_quote_nodes_precede_reservation_and_stale_quote_never_holds_funds(tmp_path: Path) -> None:
+    database, service = setup_plan(tmp_path)
+    plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
+    with database.sessions() as session:
+        record = session.get(PlanRecord, plan.plan_id)
+        receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
+        assert record is not None
+        nodes = session.query(__import__("agentbank.db", fromlist=["PlanNodeRecord"]).PlanNodeRecord).filter(
+            __import__("agentbank.db", fromlist=["PlanNodeRecord"]).PlanNodeRecord.plan_id == plan.plan_id
+        ).all()
+        assert {node.tool for node in nodes} >= {"merchant.quote", "funds.reserve"}
+    CapabilityService(database).update_merchant_catalog("flower", price_minor=9000)
+
+    outcome = service.execute_plan("user_001", plan.plan_id, receipt.id, record.display_hash)
+
+    assert outcome["status"] == "partially_completed"
+    assert outcome["nodes"][1]["status"] == "failed"
+    with database.sessions() as session:
+        assert session.query(Reservation).filter(Reservation.plan_id == plan.plan_id).count() == 0
+        assert session.query(MerchantOrder).count() == 0
+        assert session.query(Account).filter(Account.user_id == "user_001").one().available_minor == 500_000
+
+
 def test_repeated_plan_revisions_keep_receipts_and_returned_revision_in_sync(tmp_path: Path) -> None:
     database, service = setup_plan(tmp_path)
     original = service.create_birthday_plan("user_001", "event_birthday", 100_000)
@@ -137,3 +160,43 @@ def test_birthday_dispatch_posts_each_order_and_releases_unused_budget(tmp_path:
         for operation in operations:
             entries = session.query(LedgerEntry).filter(LedgerEntry.operation_id == operation.id).all()
             assert len(entries) == 2 and sum(entry.amount_minor for entry in entries) == 0
+
+
+def test_restarted_service_pauses_running_plan_and_resume_recovers_committed_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database, service = setup_plan(tmp_path)
+    plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
+    original = CapabilityService.execute
+    interrupted = False
+
+    def crash_after_reservation(capabilities, user_id, capability_id, payload, key):
+        nonlocal interrupted
+        result = original(capabilities, user_id, capability_id, payload, key)
+        if capability_id == "X02" and not interrupted:
+            interrupted = True
+            raise RuntimeError("simulated process termination")
+        return result
+
+    monkeypatch.setattr(CapabilityService, "execute", crash_after_reservation)
+    with pytest.raises(RuntimeError, match="simulated process termination"):
+        execute(service, database, plan.plan_id)
+
+    restarted = BusinessPlanService(database)
+    assert restarted.recover_interrupted() == [plan.plan_id]
+    assert restarted.resume("user_001", plan.plan_id)["status"] == "awaiting_confirmation"
+    receipt_id, display_hash = _receipt_for(database, plan.plan_id)
+    resumed = restarted.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
+    assert resumed["status"] == "succeeded"
+    with database.sessions() as session:
+        assert session.query(Reservation).filter(Reservation.plan_id == plan.plan_id).count() == 1
+        assert session.query(MerchantOrder).filter(MerchantOrder.status == "scheduled").count() == 2
+        assert session.query(Account).filter(Account.user_id == "user_001").one().available_minor == 400_000
+
+
+def _receipt_for(database, plan_id: str) -> tuple[str, str]:
+    with database.sessions() as session:
+        plan = session.get(PlanRecord, plan_id)
+        receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan_id).one()
+        assert plan is not None
+        return receipt.id, plan.display_hash

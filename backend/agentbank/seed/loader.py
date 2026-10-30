@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from agentbank.db import Account, Card, Database, Event, Payee, Product, Subscription, Transaction, User
+from agentbank.db import Account, Card, Database, Event, MerchantCatalog, Payee, Product, Subscription, Transaction, User
 from agentbank.seed.generator import generate_seed
 
 
@@ -10,6 +10,11 @@ def load_seed(database: Database) -> None:
     database.create_schema()
     fixture = generate_seed()
     with database.sessions.begin() as session:
+        for item in fixture["merchant_catalog"]:
+            if session.get(MerchantCatalog, str(item["item"])) is None:
+                session.add(MerchantCatalog(item=str(item["item"]), price_minor=int(cast(int, item["price_minor"])),
+                                            stock=int(cast(int, item["stock"])),
+                                            price_version=int(cast(int, item["price_version"]))))
         if session.get(User, "user_001") is not None:
             return
         session.add_all(User(id=str(user["id"]), display_name=str(user["display_name"])) for user in fixture["users"])

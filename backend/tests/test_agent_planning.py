@@ -125,3 +125,28 @@ def test_llm_birthday_template_returns_plan_confirmation_and_executes_plan(tmp_p
     assert confirmed.kind == "result"
     assert confirmed.data["plan_id"] == response.data["plan_id"]
     assert "planner" in calls
+
+
+def test_llm_composite_plan_uses_registered_read_only_template_and_executes(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def transport(config, role, payload):
+        calls.append(role)
+        if role == "planner":
+            return {"intent": "monthly_report", "capability_id": None,
+                    "plan_template": "query_analysis_report",
+                    "slots": {"start_month": "2026-01", "end_month": "2026-03",
+                              "group_by": ["category"], "report": "monthly"},
+                    "missing": [], "ambiguities": [], "suggested_next_action": "confirm"}
+        return {"message": "只读分析计划已准备", "fragments": []}
+
+    agent = make_agent(tmp_path, transport)
+    response = agent.handle("user_001", "composite-report", "生成2026-01到2026-03的月度类别报告")
+    assert response.kind == "plan_confirmation"
+    assert response.data["plan_type"] == "query_analysis_report"
+    result = agent.confirm("user_001", response.record_id, response.display_hash,
+                           response.data["receipt_id"])
+    assert result.kind == "result"
+    assert result.data["status"] == "succeeded"
+    assert [node["status"] for node in result.data["nodes"]] == ["succeeded"] * 3
+    assert calls.count("planner") == 1

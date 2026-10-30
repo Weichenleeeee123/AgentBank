@@ -65,14 +65,20 @@ def test_merchant_order_failure_releases_reservation(tmp_path: Path, capability_
 def test_merchant_price_change_preserves_hold_until_explicit_reconfirmation(tmp_path: Path) -> None:
     database = Database(f"sqlite:///{tmp_path / 'orders-price.db'}")
     load_seed(database)
-    service = CapabilityService(database)
-    reserved = service.execute("user_001", "X02", {"amount_minor": 10_000}, "price-reserve")
+    service = CapabilityService(database, enforce_prepare=True)
+    reserve_prepared = service.execute("user_001", "X02", {"amount_minor": 10_000}, "price-reserve")
+    reserved = service.confirm_capability("user_001", reserve_prepared.record_id,
+                                          reserve_prepared.data["receipt_id"],
+                                          reserve_prepared.data["action_hash"],
+                                          reserve_prepared.data["display_hash"])
+    quote = service.quote_merchant("user_001", "cake", service.clock.business_date())
     order = service.execute("user_001", "X04", {"delivery_date": service.clock.business_date(),
-                                                 "amount_minor": 5_000,
+                                                 "amount_minor": quote["amount_minor"], "quote_id": quote["quote_id"],
                                                  "reservation_id": reserved.data["reservation_id"]}, "price-order")
-    old_mandate_id = order.data["mandate_id"]
-    with database.sessions.begin() as session:
-        session.get(MerchantOrder, order.data["order_id"]).amount_minor = 8_000
+    created = service.confirm_capability("user_001", order.record_id, order.data["receipt_id"],
+                                         order.data["action_hash"], order.data["display_hash"])
+    old_mandate_id = created.data["mandate_id"]
+    service.update_merchant_catalog("cake", price_minor=8_000)
     paused = service.dispatch_due("user_001")[0]
     assert paused.status == "paused" and paused.data["error_code"] == "PRICE_CHANGED"
     with database.sessions() as session:
@@ -81,12 +87,78 @@ def test_merchant_price_change_preserves_hold_until_explicit_reconfirmation(tmp_
         assert session.query(Operation).count() == 0
         assert session.query(LedgerEntry).count() == 0
     assert service.dispatch_due("user_001") == []
-    reconfirmed = service.reconfirm_merchant_price("user_001", order.record_id, 8_000)
-    assert reconfirmed.status == "scheduled"
+    reconfirmed = service.reconfirm_merchant_price("user_001", created.record_id, 8_000)
+    assert reconfirmed.status == "awaiting_confirmation"
+    confirmed = service.confirm_capability("user_001", created.record_id, reconfirmed.data["receipt_id"],
+                                           reconfirmed.data["action_hash"], reconfirmed.data["display_hash"])
+    assert confirmed.status == "scheduled"
     assert service.dispatch_due("user_001")[0].data["status"] == "delivered"
     with database.sessions() as session:
         assert session.get(Mandate, old_mandate_id).status == "revoked"
         assert session.get(Mandate, old_mandate_id).used_count == 0
-        assert session.get(Mandate, reconfirmed.data["mandate_id"]).used_count == 1
+        assert session.get(Mandate, confirmed.data["mandate_id"]).used_count == 1
         assert session.get(Reservation, reserved.data["reservation_id"]).status == "released"
     assert service._account("user_001").available_minor == 492_000
+
+
+def test_aborting_price_reconfirmation_invalidates_quotes_and_releases_hold(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'orders-price-abort.db'}")
+    load_seed(database)
+    service = CapabilityService(database, enforce_prepare=True)
+    reserve_prepared = service.execute("user_001", "X02", {"amount_minor": 10_000}, "abort-price-reserve")
+    reservation = service.confirm_capability("user_001", reserve_prepared.record_id,
+                                              reserve_prepared.data["receipt_id"],
+                                              reserve_prepared.data["action_hash"],
+                                              reserve_prepared.data["display_hash"])
+    quote = service.quote_merchant("user_001", "flower", service.clock.business_date())
+    prepared = service.execute("user_001", "X03", {
+        "delivery_date": service.clock.business_date(), "dispatch_on": service.clock.business_date(),
+        "amount_minor": quote["amount_minor"], "reservation_id": reservation.data["reservation_id"],
+        "quote_id": quote["quote_id"],
+    }, "abort-price-order")
+    created = service.confirm_capability("user_001", prepared.record_id, prepared.data["receipt_id"],
+                                         prepared.data["action_hash"], prepared.data["display_hash"])
+    service.update_merchant_catalog("flower", price_minor=8_000)
+    assert service.dispatch_due("user_001")[0].data["error_code"] == "PRICE_CHANGED"
+    revised = service.reconfirm_merchant_price("user_001", created.record_id, 8_000)
+    assert revised.status == "awaiting_confirmation"
+    service.invalidate_prepared("user_001", revised.record_id, cancelled=True)
+    with database.sessions() as session:
+        assert session.query(Reservation).filter(Reservation.plan_id == "abort-price-reserve",
+                                                 Reservation.status == "released").count() == 1
+        assert session.get(Account, "acc_001").available_minor == 500_000
+
+
+def test_confirming_price_reconfirmation_revokes_old_order_before_repricing(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'orders-price-confirm.db'}")
+    load_seed(database)
+    service = CapabilityService(database, enforce_prepare=True)
+    reserve_prepared = service.execute("user_001", "X02", {"amount_minor": 10_000}, "confirm-price-reserve")
+    reserved = service.confirm_capability("user_001", reserve_prepared.record_id,
+                                          reserve_prepared.data["receipt_id"], reserve_prepared.data["action_hash"],
+                                          reserve_prepared.data["display_hash"])
+    quote = service.quote_merchant("user_001", "flower", service.clock.business_date())
+    prepared = service.execute("user_001", "X03", {"delivery_date": service.clock.business_date(),
+                                                     "dispatch_on": service.clock.business_date(),
+                                                     "amount_minor": quote["amount_minor"],
+                                                     "reservation_id": reserved.data["reservation_id"],
+                                                     "quote_id": quote["quote_id"]}, "confirm-price-order")
+    created = service.confirm_capability("user_001", prepared.record_id, prepared.data["receipt_id"],
+                                         prepared.data["action_hash"], prepared.data["display_hash"])
+    old_order_id = created.data["order_id"]
+    old_mandate_id = created.data["mandate_id"]
+    service.update_merchant_catalog("flower", price_minor=8_000)
+    assert service.dispatch_due("user_001")[0].data["error_code"] == "PRICE_CHANGED"
+    revised = service.reconfirm_merchant_price("user_001", created.record_id, 8_000)
+    assert revised.status == "awaiting_confirmation"
+    accepted = service.confirm_capability("user_001", revised.record_id, revised.data["receipt_id"],
+                                          revised.data["action_hash"], revised.data["display_hash"])
+    assert accepted.status == "scheduled"
+    with database.sessions() as session:
+        assert session.get(MerchantOrder, old_order_id).status == "scheduled"
+        assert session.get(Mandate, old_mandate_id).status == "revoked"
+        assert session.get(Reservation, reserved.data["reservation_id"]).status == "active"
+        assert session.get(Account, "acc_001").available_minor == 490_000
+    settled = service.dispatch_due("user_001")[0]
+    assert settled.data["status"] == "delivered"
+    assert service._account("user_001").ledger_balance_minor == 492_000
