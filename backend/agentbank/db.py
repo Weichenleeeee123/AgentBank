@@ -286,6 +286,16 @@ class OutboxEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
 
 
+class DeliveryAttempt(Base):
+    __tablename__ = "delivery_attempts"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    outbox_id: Mapped[str] = mapped_column(String(80), index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32))
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class UserNotification(Base):
     __tablename__ = "user_notifications"
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
