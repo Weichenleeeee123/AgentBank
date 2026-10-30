@@ -9,7 +9,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, Any, cast
@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from agentbank.auth.devices import DeviceService
 from agentbank.agent.orchestrator import AgentOrchestrator
@@ -27,7 +27,8 @@ from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord, PlanRecord, User
+from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, PlanNodeRecord,
+                          PlanRecord, User, WebImEvent, WebImNonce)
 from agentbank.evals.runner import run_cases
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
@@ -230,6 +231,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def create_eval_run(user_id: str = Depends(current_user)) -> dict[str, Any]:
         run_id = f"run_{secrets.token_urlsafe(12)}"
         report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        if report.total == 0:
+            raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
         with database.sessions.begin() as session:
             session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
                                 case_total=report.total, case_passed=report.passed))
@@ -590,31 +593,53 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if not x_im_signature or not hmac.compare_digest(x_im_signature, expected):
             raise HTTPException(status_code=401, detail={"code": "IM_SIGNATURE_INVALID"})
         event_id = str(payload.get("event_id", ""))
+        event_type = str(payload.get("event_type", "message"))
+        user_id = str(payload.get("user_id", ""))
+        if not event_id:
+            raise DomainError("WEBIM_REPLAYED")
+        with database.sessions.begin() as session:
+            if session.get(WebImEvent, event_id) is not None:
+                raise DomainError("WEBIM_REPLAYED")
+            session.add(WebImEvent(event_id=event_id, user_id=user_id, event_type=event_type))
         if payload.get("event_type") == "card_callback":
             nonce = str(payload.get("nonce", ""))
             callback_user = str(payload.get("user_id", ""))
-            callback_meta = app.state.webim_nonces.get(nonce)
-            if callback_meta is None or callback_meta["user_id"] != callback_user:
+            nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            with database.sessions.begin() as session:
+                claimed = cast(Any, session.execute(
+                    update(WebImNonce)
+                    .where(WebImNonce.nonce == nonce_hash, WebImNonce.user_id == callback_user,
+                           WebImNonce.expires_at > now,
+                           WebImNonce.consumed.is_(False))
+                    .values(consumed=True)
+                ))
+                if claimed.rowcount != 1:
+                    raise DomainError("WEBIM_CALLBACK_INVALID")
+                nonce_record = session.get(WebImNonce, nonce_hash)
+                if nonce_record is None:
+                    raise DomainError("WEBIM_CALLBACK_INVALID")
+                callback_meta = {"user_id": nonce_record.user_id, "record_id": nonce_record.record_id,
+                                 "display_hash": nonce_record.display_hash, "receipt_id": nonce_record.receipt_id}
+            if callback_meta["user_id"] != callback_user:
                 raise DomainError("WEBIM_CALLBACK_INVALID")
-            del app.state.webim_nonces[nonce]
             if payload.get("action") == "confirm":
                 response = agent.confirm(callback_user, str(callback_meta["record_id"]),
                                          str(payload.get("display_hash", callback_meta.get("display_hash", ""))),
                                          str(payload.get("receipt_id", callback_meta.get("receipt_id", ""))))
                 return {"event_id": event_id, "type": response.kind, **response.model_dump()}
             return {"event_id": event_id, "type": "callback_ack", "status": "accepted", "record_id": callback_meta.get("record_id")}
-        if not event_id or event_id in app.state.webim_events:
-            raise DomainError("WEBIM_REPLAYED")
-        app.state.webim_events.add(event_id)
-        user_id = str(payload.get("user_id", ""))
         text = str(payload.get("text", ""))
         response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
         if response.kind in {"confirmation", "mfa"}:
             nonce = secrets.token_urlsafe(16)
-            app.state.webim_nonces[nonce] = {"user_id": user_id, "record_id": response.record_id,
-                                             "display_hash": response.display_hash,
-                                             "receipt_id": response.data.get("receipt_id", "")}
+            with database.sessions.begin() as session:
+                nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+                session.add(WebImNonce(nonce=nonce_hash, user_id=user_id, record_id=str(response.record_id),
+                                       display_hash=response.display_hash,
+                                       receipt_id=str(response.data.get("receipt_id", "")),
+                                       expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)))
             result["app_deep_link"] = f"/app/?record_id={response.record_id}&nonce={nonce}"
         if bool(payload.get("group", False)):
             result = {"event_id": event_id, "type": "generic_status", "message": "已处理，请前往私聊或 App 查看详情。"}
@@ -658,6 +683,8 @@ def create_app(database_url: str | None = None) -> FastAPI:
         started = perf_counter()
         run_id = f"run_{secrets.token_urlsafe(12)}"
         report = run_cases(Path(__file__).resolve().parents[3] / "evals")
+        if report.total == 0:
+            raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
         with database.sessions.begin() as session:
             session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
                                 case_total=report.total, case_passed=report.passed))

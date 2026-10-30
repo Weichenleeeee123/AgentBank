@@ -118,6 +118,26 @@ class Event(Base):
     title: Mapped[str] = mapped_column(String(160))
 
 
+class WebImEvent(Base):
+    __tablename__ = "webim_events"
+    event_id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    event_type: Mapped[str] = mapped_column(String(64), default="message")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class WebImNonce(Base):
+    __tablename__ = "webim_nonces"
+    nonce: Mapped[str] = mapped_column(String(160), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    record_id: Mapped[str] = mapped_column(String(80))
+    display_hash: Mapped[str] = mapped_column(String(128))
+    receipt_id: Mapped[str] = mapped_column(String(80), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    consumed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
 class Reservation(Base):
     __tablename__ = "fund_reservations"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

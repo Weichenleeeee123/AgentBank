@@ -51,3 +51,14 @@ def test_rate_limit_and_demo_run_endpoint(tmp_path: Path, monkeypatch) -> None:
     response = client.post("/admin/v1/self-test", headers={"X-Admin-Token": "admin-test"})
     assert response.status_code == 200
     assert response.json()["demo_run_id"]
+
+
+def test_self_test_rejects_empty_evaluation_suite(tmp_path: Path, monkeypatch) -> None:
+    import importlib
+    from agentbank.evals.runner import EvaluationReport
+    monkeypatch.setenv("AGENTBANK_ADMIN_TOKEN", "admin-test")
+    monkeypatch.setattr(importlib.import_module("agentbank.api.app"), "run_cases", lambda _path: EvaluationReport([]))
+    client = TestClient(create_app(f"sqlite:///{tmp_path / 'empty-evals.db'}"))
+    result = client.post("/admin/v1/self-test", headers={"X-Admin-Token": "admin-test"})
+    assert result.status_code == 503
+    assert result.json()["detail"]["code"] == "EVALUATION_SUITE_EMPTY"

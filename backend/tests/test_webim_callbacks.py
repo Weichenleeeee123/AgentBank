@@ -47,3 +47,30 @@ def test_webim_callback_can_execute_confirmed_record_and_returns_result(tmp_path
                                     "receipt_id": body["data"]["receipt_id"]})
     assert callback.json()["type"] == "result"
     assert callback.json()["data"]["transfer_result"]["status"] == "succeeded"
+
+
+def test_webim_event_and_nonce_replay_are_rejected_after_app_restart(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'webim-restart.db'}"
+    first_app = create_app(database_url)
+    first_client = TestClient(first_app)
+    event = {"event_id": "webim-persisted", "user_id": "user_001", "text": "给房东转20元"}
+    prepared = signed(first_client, first_app, event)
+    assert prepared.status_code == 200
+    nonce = prepared.json()["app_deep_link"].split("nonce=", 1)[1]
+
+    restarted_app = create_app(database_url)
+    restarted_client = TestClient(restarted_app)
+    replay = signed(restarted_client, restarted_app, event)
+    assert replay.status_code == 409
+
+    callback_payload = {"event_id": "callback-persisted", "event_type": "card_callback",
+                        "user_id": "user_001", "nonce": nonce, "action": "confirm",
+                        "display_hash": prepared.json()["display_hash"],
+                        "receipt_id": prepared.json()["data"]["receipt_id"]}
+    callback = signed(restarted_client, restarted_app, callback_payload)
+    assert callback.status_code == 200
+    assert callback.json()["type"] == "result"
+    assert callback.json()["data"]["transfer_result"]["status"] == "succeeded"
+
+    replayed_callback = signed(restarted_client, restarted_app, callback_payload)
+    assert replayed_callback.status_code == 409
