@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -9,6 +10,7 @@ from typing import Any, Callable
 from agentbank.audit.store import PersistentAudit
 from agentbank.db import Database
 from agentbank.security.dlp import redact_text
+from agentbank.tools import CAPABILITIES, INPUT_FIELDS, READ_ONLY, validate_capability_payload
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class LLMGateway:
     PROMPT_VERSION = "agent-intent-v1"
     PLAN_PROMPT_VERSION = "agent-plan-v1"
     REPLY_PROMPT_VERSION = "agent-reply-v1"
+    EXPLORER_PROMPT_VERSION = "agent-explore-v1"
+    READ_ONLY_CAPABILITIES = frozenset(READ_ONLY)
 
     def __init__(self, database: Database, primary: ProviderConfig | None,
                  backup: ProviderConfig | None, *, transport: Transport | None = None) -> None:
@@ -75,23 +79,20 @@ class LLMGateway:
                     "ambiguities": [], "suggested_next_action": "clarify", "source": "deterministic_fallback"}
         result = self._call_role("planner", self.PLAN_PROMPT_VERSION, user_text, user_id,
                                  {"recent_user_messages": [redact_text(item) for item in (recent_user_messages or [])[-6:]],
-                                  "context": context or {},
+                                  "context": self._sanitize_context(context or {}),
+                                  "capability_catalogue": self.capability_catalogue(),
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
-                                                       "suggested_next_action": "string"}})
+                                                       "suggested_next_action": "string"}},
+                                 validator=self._validate_plan)
         if result is None:
             return fallback
         capability_id = result.get("capability_id")
-        if capability_id is not None and (not isinstance(capability_id, str)
-                                          or not __import__("re").fullmatch(r"[QTBWCSX][0-9]{2}", capability_id)):
-            return fallback
-        if not isinstance(result.get("intent"), str) or not isinstance(result.get("slots"), dict):
-            return fallback
         return {"intent": result["intent"], "capability_id": capability_id,
                 "slots": result["slots"], "missing": [str(item) for item in result.get("missing", [])],
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
-                "references": [item for item in result.get("references", []) if isinstance(item, dict)],
-                "explore": bool(result.get("explore", False)),
+                "references": [],
+                "explore": result.get("explore", False),
                 "suggested_next_action": str(result.get("suggested_next_action", "clarify")),
                 "source": result.get("source", "model")}
 
@@ -101,59 +102,62 @@ class LLMGateway:
                     "source": "template_fallback"}
         result = self._call_role("reply", self.REPLY_PROMPT_VERSION, "", user_id,
                                  {"capability_id": capability_id, "status": status,
-                                  "facts": fragments, "structured_data": data,
+                                  "facts": self._sanitize_fragments(fragments),
+                                  "structured_data": {"capability_id": capability_id, "status": status},
                                   "response_schema": {"message": "string", "fragments": "array"}})
         if result is None or not isinstance(result.get("message"), str) or not isinstance(result.get("fragments"), list):
             return fallback
-        if not self._reply_facts_match(result["fragments"], fragments):
+        if not self._reply_facts_match(result["message"], result["fragments"], fragments):
             return fallback
         return {"message": result["message"], "fragments": result["fragments"],
                 "source": result.get("source", "model")}
 
     @staticmethod
-    def _reply_facts_match(candidate: list[Any], facts: list[dict[str, Any]]) -> bool:
-        allowed = {(item.get("label"), item.get("value_minor"), item.get("currency"))
-                   for item in facts if item.get("type") == "fact"}
+    def _reply_facts_match(message: str, candidate: list[Any], facts: list[dict[str, Any]]) -> bool:
+        allowed = {json.dumps(item, ensure_ascii=False, sort_keys=True) for item in facts}
         for item in candidate:
-            if not isinstance(item, dict) or item.get("type") != "fact":
-                continue
-            key = (item.get("label"), item.get("value_minor"), item.get("currency"))
-            if key not in allowed:
+            if not isinstance(item, dict) or json.dumps(item, ensure_ascii=False, sort_keys=True) not in allowed:
                 return False
-        return True
+        fact_values = {str(value) for item in facts for key, value in item.items()
+                       if key in {"value_minor", "text"} and value not in (None, "")}
+        return all(token in fact_values for token in re.findall(r"(?<![0-9])\d+(?:\.\d+)?(?![0-9])", message))
 
     def explore_read_only(self, user_id: str, intent: str, context: dict[str, Any], *, max_steps: int = 5,
                           executor: Callable[[str, dict[str, Any], int], dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-        if self.primary is None:
-            self._audit(user_id, "llm.exploration.skipped", {"intent": intent, "reason": "no_provider"})
+        if self.primary is None or executor is None:
+            self._audit(user_id, "llm.exploration.skipped", {"intent": intent,
+                                                              "reason": "no_provider" if self.primary is None else "no_executor"})
             return []
         observations: list[dict[str, Any]] = []
         for step in range(1, min(max_steps, 5) + 1):
-            result = self._call_role("explorer", "agent-explore-v1", "", user_id,
-                                     {"step": step, "intent": intent, "context": context,
+            result = self._call_role("explorer", self.EXPLORER_PROMPT_VERSION, "", user_id,
+                                     {"step": step, "intent": intent, "context": self._sanitize_context(context),
+                                      "feedback": self._sanitize_observations(observations),
+                                      "capability_catalogue": {key: self.capability_catalogue()[key] for key in self.READ_ONLY_CAPABILITIES},
                                       "allowed_tools": ["Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"],
-                                      "response_schema": {"done": "boolean", "tool": "string|null",
-                                                          "payload": "object", "observation": "object"}})
+                                      "response_schema": {"done": "boolean", "tool": "string",
+                                                          "payload": "object"}},
+                                     validator=self._validate_explorer)
             if result is None:
                 break
             tool = result.get("tool")
             if tool is not None and tool not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}:
                 break
-            observation = result.get("observation", {})
-            if executor is not None and tool is not None:
-                try:
-                    observation = executor(tool, dict(result.get("payload", {})), step)
-                except Exception as error:
-                    self._audit(user_id, "llm.exploration.failed", {"step": step, "tool": tool,
-                                                                       "error_type": type(error).__name__})
-                    break
+            try:
+                observation = executor(tool, dict(result.get("payload", {})), step)
+            except Exception as error:
+                self._audit(user_id, "llm.exploration.failed", {"step": step, "tool": tool,
+                                                                   "error_type": type(error).__name__})
+                break
+            if not isinstance(observation, dict):
+                break
             observations.append({"step": step, "tool": tool, "observation": observation})
             if result.get("done") is True:
                 break
         return observations
 
     def _call_role(self, role: str, prompt_version: str, user_text: str, user_id: str,
-                   payload: dict[str, Any]) -> dict[str, Any] | None:
+                   payload: dict[str, Any], *, validator: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any] | None:
         if self.primary is None:
             self._audit(user_id, "llm.call.skipped", {"role": role, "reason": "no_provider",
                                                        "prompt_version": prompt_version})
@@ -169,6 +173,8 @@ class LLMGateway:
                     response = self.transport(config, role, request)
                     if not isinstance(response, dict):
                         raise ValueError("response must be object")
+                    if validator is not None:
+                        validator(response)
                     self._audit(user_id, "llm.call.completed", {"role": role, "provider": config.name,
                                  "model": config.model, "prompt_version": prompt_version, "attempt": attempt + 1})
                     response = dict(response)
@@ -187,6 +193,89 @@ class LLMGateway:
             return prompt_path.read_text(encoding="utf-8")
         except OSError:
             return "Return only structured JSON. The server remains authoritative."
+
+    @staticmethod
+    def capability_catalogue() -> dict[str, dict[str, Any]]:
+        """Small, versioned capability contract exposed to the planner."""
+        required = {"T01": {"recipient_name", "amount_minor"}, "T02": {"phone", "amount_minor"},
+                    "T03": {"amount_minor"}, "S02": {"subscription_id", "days"},
+                    "W02": {"product_ids"}, "W03": {"answers"}, "W04": {"product_id", "amount_minor"},
+                    "W05": {"order_id"}, "C02": {"card_id", "limit_minor"}, "C03": {"card_id", "restriction"},
+                    "C04": {"card_id", "restriction"}, "C05": {"card_id"}, "C06": {"card_id"},
+                    "C07": {"card_id", "action"}, "C08": {"card_id", "new_pin"}}
+        integer_slots = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit", "year"}
+        boolean_slots = {"virtual", "simulate_failure"}
+        array_slots = {"answers", "product_ids", "participant_ids"}
+        return {key: {"name": CAPABILITIES[key], "kind": "query" if key in READ_ONLY else "command",
+                      "slots": {slot: {"type": "boolean" if slot in boolean_slots else
+                                       "array" if slot in array_slots else
+                                       "integer" if slot in integer_slots else "string"}
+                                for slot in sorted(INPUT_FIELDS[key])},
+                      "required_slots": sorted(required.get(key, set()))}
+                for key in sorted(CAPABILITIES)}
+
+    @classmethod
+    def _validate_plan(cls, result: dict[str, Any]) -> None:
+        if not isinstance(result.get("intent"), str) or not isinstance(result.get("slots"), dict):
+            raise ValueError("planner schema invalid")
+        capability_id = result.get("capability_id")
+        if capability_id is not None:
+            if capability_id not in CAPABILITIES:
+                raise ValueError("capability is not registered")
+            try:
+                validate_capability_payload(capability_id, result["slots"])
+            except Exception as exc:
+                raise ValueError("planner slots invalid") from exc
+        elif result["slots"]:
+            raise ValueError("planner slots require a registered capability")
+        for key in ("missing", "ambiguities"):
+            if not isinstance(result.get(key, []), list) or any(not isinstance(item, str) for item in result.get(key, [])):
+                raise ValueError("planner list invalid")
+        required = cls.capability_catalogue()[capability_id]["required_slots"] if capability_id else []
+        missing = set(result.get("missing", []))
+        if any(slot not in result["slots"] and slot not in missing for slot in required):
+            raise ValueError("planner omitted required slots")
+        if "explore" in result and not isinstance(result["explore"], bool):
+            raise ValueError("planner explore flag invalid")
+        if result.get("suggested_next_action", "clarify") not in {"clarify", "explore", "execute", "confirm"}:
+            raise ValueError("planner action invalid")
+
+    @classmethod
+    def _validate_explorer(cls, result: dict[str, Any]) -> None:
+        if not isinstance(result.get("done"), bool) or not isinstance(result.get("tool"), str):
+            raise ValueError("explorer schema invalid")
+        tool = result["tool"]
+        if tool not in cls.READ_ONLY_CAPABILITIES or not isinstance(result.get("payload"), dict):
+            raise ValueError("explorer tool invalid")
+        validate_capability_payload(tool, result["payload"])
+
+    @staticmethod
+    def _sanitize_context(value: Any) -> Any:
+        allowed = {"parsed_intent", "slots", "exploration", "step", "intent", "feedback", "status",
+                   "capability_id", "available_minor", "ledger_balance_minor", "currency", "as_of",
+                   "txn_ids", "events", "event_date", "amount_minor", "transaction_id"}
+        if isinstance(value, dict):
+            return {str(key): LLMGateway._sanitize_context(item) for key, item in value.items() if str(key) in allowed}
+        if isinstance(value, list):
+            return [LLMGateway._sanitize_context(item) for item in value[:5]]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return redact_text(str(value)) if isinstance(value, str) else value
+        return None
+
+    @staticmethod
+    def _sanitize_fragments(fragments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        keys = {"type", "label", "value_minor", "currency", "text"}
+        return [{key: item[key] for key in keys if key in item} for item in fragments if isinstance(item, dict)]
+
+    @classmethod
+    def _sanitize_result_data(cls, capability_id: str, status: str, data: dict[str, Any]) -> dict[str, Any]:
+        safe_keys = {"status", "available_minor", "ledger_balance_minor", "currency", "as_of", "txn_ids"}
+        return {key: data[key] for key in safe_keys if key in data and isinstance(data[key], (str, int, float, bool, list))}
+
+    @classmethod
+    def _sanitize_observations(cls, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"step": item.get("step"), "tool": item.get("tool"), "observation": cls._sanitize_context(item.get("observation", {}))}
+                for item in observations[-5:]]
 
     @classmethod
     def from_environment(cls, database: Database) -> LLMGateway:

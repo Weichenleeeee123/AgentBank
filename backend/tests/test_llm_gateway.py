@@ -85,6 +85,7 @@ def test_gateway_read_only_exploration_is_bounded_and_structured(tmp_path: Path)
     database = Database(f"sqlite:///{tmp_path / 'explore.db'}")
     load_seed(database)
     calls: list[int] = []
+    executed: list[int] = []
 
     def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
         assert role == "explorer"
@@ -92,10 +93,15 @@ def test_gateway_read_only_exploration_is_bounded_and_structured(tmp_path: Path)
         return {"done": False, "tool": "Q02", "payload": {"limit": 1},
                 "observation": {"txn_ids": [f"txn-{payload['step']}"]}}
 
+    def execute(tool: str, payload: dict[str, object], step: int) -> dict[str, object]:
+        executed.append(step)
+        return {"txn_ids": [f"txn-{step}"]}
+
     gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
                          transport=transport)
-    result = gateway.explore_read_only("user_001", "spending_analysis", {}, max_steps=5)
+    result = gateway.explore_read_only("user_001", "spending_analysis", {}, max_steps=5, executor=execute)
     assert len(calls) == 5
+    assert executed == [1, 2, 3, 4, 5]
     assert result[-1]["step"] == 5
 
 
@@ -138,14 +144,89 @@ def test_gateway_rejects_reply_fragments_that_invent_facts(tmp_path: Path) -> No
     load_seed(database)
 
     def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
-        return {"message": "余额是999999", "fragments": [{"type": "fact", "label": "余额",
-                                                           "value_minor": 999_999}]}
+        return {"message": "可用余额是999999", "fragments": [{"type": "fact", "label": "可用余额",
+                                                           "value_minor": 500_000, "currency": "CNY"}]}
 
     gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
                          transport=transport)
     result = gateway.render_reply("user_001", "Q01", "succeeded", {"available_minor": 500_000},
                                   [{"type": "fact", "label": "可用余额", "value_minor": 500_000, "currency": "CNY"}])
     assert result["source"] == "template_fallback"
+
+
+def test_planner_schema_failure_retries_before_backup(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'planner-retry.db'}")
+    load_seed(database)
+    calls: list[str] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(config.name)
+        if len(calls) == 1:
+            return {"intent": "transfer", "capability_id": "NOT-REGISTERED", "slots": {}, "missing": [],
+                    "ambiguities": []}
+        return {"intent": "balance", "capability_id": "Q01", "slots": {}, "missing": [],
+                "ambiguities": [], "suggested_next_action": "execute"}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    result = gateway.plan_intent("查余额", user_id="user_001")
+    assert result["capability_id"] == "Q01"
+    assert calls == ["primary", "primary"]
+
+
+def test_reply_model_never_receives_raw_business_result(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'reply-context.db'}")
+    load_seed(database)
+    captured: list[dict[str, object]] = []
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        captured.append(payload)
+        return {"message": "已查询", "fragments": []}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    gateway.render_reply("user_001", "Q02", "succeeded",
+                         {"merchant_name": "Secret Shop", "memo": "private memo", "transactions": [{"x": 1}]}, [])
+    serialized = str(captured[0])
+    assert "Secret Shop" not in serialized
+    assert "private memo" not in serialized
+
+
+def test_explorer_without_executor_does_not_accept_model_observations(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'explore-no-exec.db'}")
+    load_seed(database)
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=lambda *_: {"done": True, "tool": "Q01", "payload": {},
+                                               "observation": {"available_minor": 999999}})
+    assert gateway.explore_read_only("user_001", "balance", {}) == []
+
+
+def test_http_transport_uses_json_contract(monkeypatch, tmp_path: Path) -> None:
+    import httpx
+
+    database = Database(f"sqlite:///{tmp_path / 'http-contract.db'}")
+    load_seed(database)
+    captured: dict[str, object] = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [{"message": {"content": '{"intent":"balance"}'}}]}
+
+    def post(url: str, **kwargs: object) -> Response:
+        captured.update({"url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr(httpx, "post", post)
+    result = LLMGateway._http_transport(ProviderConfig("mock", "https://mock.invalid/v1", "secret", "m"),
+                                        "planner", {"system_prompt": "prompt", "text": "查余额"})
+    assert result == {"intent": "balance"}
+    assert captured["url"] == "https://mock.invalid/v1/chat/completions"
+    assert captured["headers"] == {"Authorization": "Bearer secret"}
+    body = captured["json"]
+    assert isinstance(body, dict) and body["response_format"] == {"type": "json_object"}
 
 
 def test_gateway_sends_versioned_role_prompt_to_transport(tmp_path: Path) -> None:
