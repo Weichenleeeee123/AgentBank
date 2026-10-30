@@ -77,6 +77,11 @@ class IntentParser:
                 subscription_id = "sub_video" if "视频" in normalized else "sub_ai" if "AI" in normalized else ""
                 return ParsedIntent("cancel_subscription", "S03", ({"subscription_id": subscription_id} if subscription_id else {}), ([] if subscription_id else ["subscription_id"]), [])
             return ParsedIntent("subscriptions", "S01", {}, [], [])
+        if any(word in normalized for word in ("续费提醒", "提醒续费", "提醒我续费", "到期提醒", "续订提醒")):
+            subscription_id = "sub_video" if any(word in normalized for word in ("视频", "会员")) else "sub_ai" if "AI" in normalized else ""
+            slots = {"subscription_id": subscription_id, "days": 3} if subscription_id else {"days": 3}
+            return ParsedIntent("subscription_reminder", "S02", slots,
+                                [] if subscription_id else ["subscription_id"], [])
         if any(word in normalized for word in ("解挂", "解除挂失")):
             return ParsedIntent("card_loss_release", "C06", {"card_id": "card_001", "assurance": "mfa"}, [], [])
         if "挂失" in normalized and not any(word in normalized for word in ("盗刷", "被盗刷", "卡丢了")):
@@ -155,7 +160,8 @@ class IntentParser:
             recipient_match = re.search(r"(?:给|转给|付给)([^，。\s\d元块]+)", text)
             recipient = recipient_match.group(1) if recipient_match else ""
             recipient = re.sub(r"(转账|转钱|转款|付款|汇款|转)$", "", recipient)
-            if recipient in {"房租", "房东"} or "房租" in text:
+            explicit_alias = recipient == "房租" or ("房租" in text and ("备注" in text or "转房租" in text))
+            if explicit_alias:
                 slots["alias"] = "房东"
                 capability_id = "T03"
             elif recipient:

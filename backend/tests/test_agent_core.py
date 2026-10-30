@@ -33,6 +33,54 @@ def test_agent_prepares_transfer_then_confirms_same_record(tmp_path: Path) -> No
     assert confirmed.data["transfer_result"]["status"] == "succeeded"
 
 
+def test_agent_treats_payee_name_as_name_unless_alias_is_explicit(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    named = agent.handle("user_001", "named-landlord", "给房东转100元")
+    assert named.capability_id == "T01"
+    assert named.kind == "confirmation"
+    alias = agent.handle("user_001", "alias-landlord", "按房租备注转100元")
+    assert alias.capability_id == "T03"
+    assert alias.kind == "confirmation"
+
+
+def test_agent_asks_which_subscription_for_generic_renewal_reminder(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    first = agent.handle("user_001", "generic-reminder", "提醒我续费")
+    assert first.kind == "clarification"
+    assert first.capability_id == "S02"
+    second = agent.handle("user_001", "generic-reminder", "视频会员")
+    assert second.kind == "confirmation"
+    assert second.data["payload"]["subscription_id"] == "sub_video"
+
+
+def test_agent_cancels_prepared_transfer_and_invalidates_receipt(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    prepared = agent.handle("user_001", "cancel-prepared", "给房东转100元")
+    assert prepared.kind == "confirmation"
+    cancelled = agent.handle("user_001", "cancel-prepared", "算了，别转了")
+    assert cancelled.kind == "result"
+    assert cancelled.data["status"] == "cancelled"
+    from agentbank.db import CapabilityRecord, ReceiptRecord
+    with agent.database.sessions() as session:
+        record = session.get(CapabilityRecord, prepared.record_id)
+        receipt = session.get(ReceiptRecord, prepared.data["receipt_id"])
+        assert record.status == "cancelled" and receipt.status == "invalidated"
+
+
+def test_agent_correction_reprepares_new_amount_and_invalidates_old_receipt(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    prepared = agent.handle("user_001", "correct-prepared", "给房东转100元")
+    corrected = agent.handle("user_001", "correct-prepared", "不对，是300元")
+    assert corrected.kind == "confirmation"
+    assert corrected.record_id != prepared.record_id
+    assert corrected.data["payload"]["amount_minor"] == 30_000
+    from agentbank.db import CapabilityRecord, ReceiptRecord
+    with agent.database.sessions() as session:
+        old_record = session.get(CapabilityRecord, prepared.record_id)
+        old_receipt = session.get(ReceiptRecord, prepared.data["receipt_id"])
+        assert old_record.status == "invalidated" and old_receipt.status == "invalidated"
+
+
 def test_agent_asks_for_disambiguation_and_missing_amount(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     ambiguous = agent.handle("user_001", "conv-1", "给张三转钱")
@@ -47,7 +95,7 @@ def test_agent_routes_red_transfer_to_mfa_without_executing(tmp_path: Path) -> N
     agent = _agent(tmp_path)
     response = agent.handle("user_001", "conv-1", "给房东转 1200 元")
     assert response.kind == "mfa"
-    assert response.capability_id == "T03"
+    assert response.capability_id == "T01"
     assert response.data["assurance"] == "mfa"
 
 
@@ -238,9 +286,10 @@ def test_agent_uses_llm_planner_for_intent_outside_deterministic_parser(tmp_path
 
     gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
                          transport=transport)
-    response = AgentOrchestrator(database, llm=gateway).handle("user_001", "llm-route", "提醒我续费")
+    response = AgentOrchestrator(database, llm=gateway).handle("user_001", "llm-route", "帮我把视频续费记一下")
     assert response.capability_id == "S02"
-    assert response.kind == "confirmation"
+    assert response.kind == "clarification"
+    assert "订阅" in response.message or "天数" in response.message or "days" in response.message
 
 
 def test_agent_uses_planner_without_extra_classifier_call(tmp_path: Path) -> None:
@@ -256,7 +305,7 @@ def test_agent_uses_planner_without_extra_classifier_call(tmp_path: Path) -> Non
 
     gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
                          transport=transport)
-    AgentOrchestrator(database, llm=gateway).handle("user_001", "single-plan-call", "提醒我续费")
+    AgentOrchestrator(database, llm=gateway).handle("user_001", "single-plan-call", "帮我把视频续费记一下")
     assert roles == ["planner"]
 
 

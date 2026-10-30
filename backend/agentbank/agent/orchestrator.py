@@ -41,7 +41,29 @@ class AgentOrchestrator:
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
+        latest_prepared = self._latest_prepared(user_id, conversation_id)
+        if latest_prepared is not None and any(token in text for token in ("别转", "取消", "算了", "不要转")):
+            result = self.capabilities.invalidate_prepared(user_id, latest_prepared, cancelled=True)
+            self._save_pending(user_id, conversation_id, None)
+            return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
+                                 record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
         parsed = self.parser.parse(text)
+        if latest_prepared is not None and any(token in text for token in ("不对", "改成", "改为", "重新")):
+            with self.database.sessions() as session:
+                from agentbank.db import CapabilityRecord
+                old_record = session.get(CapabilityRecord, latest_prepared)
+                old_data = json.loads(old_record.data_json) if old_record is not None else {}
+            old_payload = old_data.get("payload", {})
+            if parsed.capability_id is None and old_record is not None:
+                amount = self.parser._amount.search(text)
+                if old_record.capability_id in {"T01", "T02", "T03"} and amount:
+                    slots = dict(old_payload)
+                    slots["amount_minor"] = self.parser.parse(f"转账 {amount.group('amount')}").slots["amount_minor"]
+                    parsed = ParsedIntent("transfer", old_record.capability_id, slots, [], [])
+            if parsed.capability_id is not None:
+                self.capabilities.invalidate_prepared(user_id, latest_prepared)
+        if parsed.capability_id is not None:
+            self._set_latest_prepared(user_id, conversation_id, None)
         if parsed.capability_id == "C08" and parsed.slots.get("new_pin"):
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
                                  message="修改密码请在 App 的安全表单中输入，不要在聊天里发送密码。")
@@ -64,7 +86,8 @@ class AgentOrchestrator:
                 parsed = self._apply_intent_hint(ParsedIntent("unknown", None, {}, [], []),
                                                  str(suggestion.get("intent", "unknown")))
         pending = self._load_pending(user_id, conversation_id)
-        if parsed.capability_id is None and pending is not None:
+        if pending is not None and (parsed.capability_id is None
+                                    or (pending.capability_id == "S02" and parsed.capability_id == "S01")):
             parsed = self._continue_pending(pending, text)
         if parsed.capability_id is None:
             return AgentResponse(kind="clarification", intent=parsed.intent, message="我还不能确定要办理哪项银行业务，请说明查询、转账、账单、理财、卡片或订阅。")
@@ -105,7 +128,23 @@ class AgentOrchestrator:
                                      message="这项操作需要模拟手机验证码验证，请输入验证码。")
             return AgentResponse(kind="error", intent=parsed.intent, capability_id=parsed.capability_id, message=error.code)
         self._save_pending(user_id, conversation_id, None)
+        if result.status in {"awaiting_confirmation", "awaiting_mfa"}:
+            self._set_latest_prepared(user_id, conversation_id, result.record_id)
         return self._response(user_id, parsed, result)
+
+    def _latest_prepared(self, user_id: str, conversation_id: str) -> str | None:
+        with self.database.sessions() as session:
+            state = session.get(ConversationState, (user_id, conversation_id))
+            return state.current_plan_id if state is not None else None
+
+    def _set_latest_prepared(self, user_id: str, conversation_id: str, record_id: str | None) -> None:
+        with self.database.sessions.begin() as session:
+            state = session.get(ConversationState, (user_id, conversation_id))
+            if state is None:
+                state = ConversationState(user_id=user_id, conversation_id=conversation_id,
+                                          recent_user_messages_json="[]")
+                session.add(state)
+            state.current_plan_id = record_id
 
     @staticmethod
     def _from_planner(planned: dict[str, Any]) -> ParsedIntent | None:
@@ -206,6 +245,13 @@ class AgentOrchestrator:
             if amount_match:
                 slots["amount_minor"] = self.parser.parse(f"转账 {amount_match.group('amount')}").slots.get("amount_minor")
                 missing = [item for item in missing if item != "amount"]
+        elif pending.capability_id == "S02":
+            if "视频" in text or "会员" in text:
+                slots["subscription_id"] = "sub_video"
+                missing = [item for item in missing if item != "subscription_id"]
+            elif "AI" in text.upper():
+                slots["subscription_id"] = "sub_ai"
+                missing = [item for item in missing if item != "subscription_id"]
         return ParsedIntent(pending.intent, pending.capability_id, slots, missing, pending.ambiguities, pending.references)
 
     def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
