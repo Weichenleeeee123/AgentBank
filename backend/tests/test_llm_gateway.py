@@ -244,3 +244,41 @@ def test_gateway_sends_versioned_role_prompt_to_transport(tmp_path: Path) -> Non
                          transport=transport)
     gateway.plan_intent("查余额", user_id="user_001")
     assert prompts and "安全边界" in prompts[0]
+
+
+def test_planner_accepts_a_registered_capability_dag_and_grounds_write_arguments(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'planner-dag.db'}")
+    load_seed(database)
+    proposed = {
+        "id": "birthday_budget", "tool": "X02", "args": {"amount_minor": 100_000},
+        "depends_on": [], "compensation": "funds.release", "timeout_ms": 5000,
+        "idempotency_key": "model-must-not-control-this",
+    }
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"intent": "birthday preparation", "capability_id": None, "plan_template": None,
+                "slots": {}, "missing": [], "ambiguities": [], "references": [],
+                "suggested_next_action": "confirm", "proposed_dag": [proposed]}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    result = gateway.plan_intent("为生日准备计划并预留1000元", user_id="user_001")
+
+    assert result["proposed_dag"] == [proposed]
+
+
+def test_planner_rejects_unregistered_tools_in_a_proposed_dag(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'planner-dag-deny.db'}")
+    load_seed(database)
+
+    def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
+        return {"intent": "unknown", "capability_id": None, "plan_template": None, "slots": {},
+                "missing": [], "ambiguities": [], "references": [], "suggested_next_action": "confirm",
+                "proposed_dag": [{"id": "attack", "tool": "sql.execute", "args": {}, "depends_on": [],
+                                  "compensation": None, "timeout_ms": 5000, "idempotency_key": "attack"}]}
+
+    gateway = LLMGateway(database, ProviderConfig("primary", "https://primary.invalid", "secret", "model-a"), None,
+                         transport=transport)
+    result = gateway.plan_intent("准备生日活动", user_id="user_001")
+
+    assert result["source"] == "deterministic_fallback"

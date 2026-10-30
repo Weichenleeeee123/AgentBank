@@ -94,8 +94,8 @@ def test_pause_after_reservation_stops_orders_and_resume_reuses_reservation(tmp_
     plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
     original_execute = CapabilityService.execute
 
-    def pause_after_reserve(capabilities, user_id, capability_id, payload, key):
-        result = original_execute(capabilities, user_id, capability_id, payload, key)
+    def pause_after_reserve(capabilities, user_id, capability_id, payload, key, **kwargs):
+        result = original_execute(capabilities, user_id, capability_id, payload, key, **kwargs)
         if capability_id == "X02":
             service.pause(user_id, plan.plan_id)
         return result
@@ -118,8 +118,8 @@ def test_cancelling_paused_plan_releases_reservation_and_invalidates_receipt(tmp
     plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
     original_execute = CapabilityService.execute
 
-    def pause_after_reserve(capabilities, user_id, capability_id, payload, key):
-        result = original_execute(capabilities, user_id, capability_id, payload, key)
+    def pause_after_reserve(capabilities, user_id, capability_id, payload, key, **kwargs):
+        result = original_execute(capabilities, user_id, capability_id, payload, key, **kwargs)
         if capability_id == "X02":
             service.pause(user_id, plan.plan_id)
         return result
@@ -170,9 +170,9 @@ def test_restarted_service_pauses_running_plan_and_resume_recovers_committed_res
     original = CapabilityService.execute
     interrupted = False
 
-    def crash_after_reservation(capabilities, user_id, capability_id, payload, key):
+    def crash_after_reservation(capabilities, user_id, capability_id, payload, key, **kwargs):
         nonlocal interrupted
-        result = original(capabilities, user_id, capability_id, payload, key)
+        result = original(capabilities, user_id, capability_id, payload, key, **kwargs)
         if capability_id == "X02" and not interrupted:
             interrupted = True
             raise RuntimeError("simulated process termination")

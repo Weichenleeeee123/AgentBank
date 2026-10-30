@@ -14,7 +14,9 @@ from agentbank.db import (Account, AuditLog, CapabilityRecord, Database, Decisio
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.tools import validate_capability_payload
+from agentbank.auth.devices import DeviceService
+from agentbank.capability_contracts import CAPABILITY_CONTRACTS
+from agentbank.tools import CAPABILITIES, INPUT_FIELDS, READ_ONLY, TOOL_REGISTRY, validate_capability_payload
 
 
 COMPOSITE_PLAN_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -23,6 +25,7 @@ COMPOSITE_PLAN_TEMPLATES: dict[str, dict[str, Any]] = {
     "investment_review": {"required_slots": set(), "allowed_slots": set()},
 }
 READ_ONLY_CAPABILITIES = {"Q02", "B01", "B03", "B04", "W01", "W02"}
+PLAN_READ_ONLY = READ_ONLY - {"S01"}
 
 
 class BusinessPlanService:
@@ -32,6 +35,98 @@ class BusinessPlanService:
             "events.lookup": {"kind": "query"}, "funds.reserve": {"kind": "command"},
             "merchant.order.create": {"kind": "command"}, "funds.release": {"kind": "command"},
         }
+
+    def create_proposed_plan(self, user_id: str, intent: str, proposed_nodes: list[PlanNode]) -> Plan:
+        if not proposed_nodes:
+            raise DomainError("PLAN_TOO_LARGE")
+        raw_nodes = [node.model_dump(mode="json") for node in proposed_nodes]
+        PlanValidator.validate_proposal(raw_nodes)
+        plan_id = f"plan_{uuid.uuid4().hex}"
+        compiled: list[PlanNode] = []
+        for node in proposed_nodes:
+            capability_id = node.tool
+            args = dict(node.args)
+            if capability_id in {"X03", "X04"}:
+                item = "flower" if capability_id == "X03" else "cake"
+                delivery_date = str(args.get("delivery_date", self._business_date()))
+                quote = CapabilityService(self.database).quote_merchant(
+                    user_id, item, delivery_date,
+                    amount_minor=int(args["amount_minor"]) if "amount_minor" in args else None)
+                args.update({"quote_id": quote["quote_id"], "amount_minor": quote["amount_minor"],
+                             "delivery_date": quote["delivery_date"]})
+                if "dispatch_on" not in args:
+                    args["dispatch_on"] = (date.fromisoformat(delivery_date) - timedelta(days=2)).isoformat()
+            if capability_id == "X02":
+                args["plan_id"] = plan_id
+            compiled.append(PlanNode(id=node.id, tool=capability_id, args=args,
+                                     depends_on=list(node.depends_on),
+                                     compensation=CAPABILITY_CONTRACTS[capability_id].compensation,
+                                     timeout_ms=node.timeout_ms,
+                                     idempotency_key=f"{plan_id}-{node.id}"))
+        compiled_nodes = [node.model_dump(mode="json") for node in compiled]
+        PlanValidator.validate_proposal(compiled_nodes)
+        display = self._plan_display(compiled)
+        display_json = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        action_json = json.dumps(sorted(compiled_nodes, key=lambda item: item["id"]),
+                                  ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        display_hash = "sha256:" + hashlib.sha256(display_json.encode("utf-8")).hexdigest()
+        action_hash = "sha256:" + hashlib.sha256(action_json.encode("utf-8")).hexdigest()
+        required = max((self._assurance(node.tool, node.args) for node in compiled),
+                       key=lambda value: {"none": 0, "confirm": 1, "mfa": 2}[value])
+        created = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self.database.sessions.begin() as session:
+            session.add(PlanRecord(id=plan_id, user_id=user_id, revision=1, status="awaiting_confirmation",
+                                   display_hash=display_hash, action_hash=action_hash,
+                                   display_json=display_json, created_at=created))
+            session.add(ReceiptRecord(id=f"rcp_{uuid.uuid4().hex}", subject_id=user_id, plan_id=plan_id,
+                                      plan_revision=1, node_ids_json=json.dumps([node.id for node in compiled]),
+                                      action_hash=action_hash, display_hash=display_hash, assurance=required,
+                                      issued_at=created, expires_at=created + timedelta(minutes=5), status="pending"))
+            for node in compiled:
+                session.add(PlanNodeRecord(id=f"{plan_id}-{node.id}", plan_id=plan_id, tool=node.tool,
+                                           args_json=json.dumps(node.model_dump(mode="json"), ensure_ascii=False,
+                                                                sort_keys=True), status="pending",
+                                           idempotency_key=node.idempotency_key))
+        return Plan(plan_id=plan_id, revision=1, status="awaiting_confirmation", user_id=user_id,
+                    nodes=compiled, display=display, created_at=created)
+
+    @staticmethod
+    def _business_date() -> str:
+        return date.today().isoformat()
+
+    @staticmethod
+    def _assurance(capability_id: str, args: dict[str, Any]) -> str:
+        if capability_id == "C07" and args.get("action") == "unfreeze":
+            return "mfa"
+        if capability_id == "C02":
+            # The service contract is confirm by default; raising a user's
+            # current limit requires strong verification.
+            return "confirm"
+        return str(TOOL_REGISTRY[capability_id]["security"]["minimum_assurance"])
+
+    @classmethod
+    def _plan_display(cls, nodes: list[PlanNode]) -> list[dict[str, str]]:
+        display: list[dict[str, str]] = []
+        labels = {"Q01": "查询本人余额", "Q02": "查询本人交易", "B01": "分析本人交易",
+                  "B02": "检查异常交易", "B03": "生成月报", "B04": "生成年报",
+                  "W01": "查询理财推荐", "W02": "比较理财产品", "W06": "查询理财持仓",
+                  "X01": "查询本人事件", "X02": "预留资金", "X03": "创建鲜花订单",
+                  "X04": "创建蛋糕订单"}
+        for node in nodes:
+            display.append({"label": labels.get(node.tool, node.tool), "value": node.id})
+            for key, label in (("amount_minor", "金额"), ("total_minor", "总金额"),
+                               ("limit_minor", "额度"), ("recipient_name", "收款人"),
+                               ("event_id", "事件"), ("event_date", "日期"),
+                               ("delivery_date", "送达日期"), ("dispatch_on", "配送日期"),
+                               ("product_id", "理财产品"), ("subscription_id", "订阅"),
+                               ("card_id", "银行卡"), ("restriction", "限制项"),
+                               ("action", "操作")):
+                if key in node.args:
+                    value = node.args[key]
+                    if key.endswith("_minor"):
+                        value = f"¥{int(value) / 100:.2f}"
+                    display.append({"label": f"{node.id}·{label}", "value": str(value)})
+        return display
 
     def create_composite_plan(self, user_id: str, template_id: str, slots: dict[str, Any]) -> Plan:
         template = COMPOSITE_PLAN_TEMPLATES.get(template_id)
@@ -131,7 +226,7 @@ class BusinessPlanService:
             raise DomainError("EVENT_DATE_INVALID") from error
         dispatch_on = (datetime.fromisoformat(event_date).date() - timedelta(days=2)).isoformat()
         plan_id = f"plan_{uuid.uuid4().hex}"
-        capabilities = CapabilityService(self.database)
+        capabilities = CapabilityService(self.database, require_device_mfa=True, enforce_prepare=False)
         flower_quote = capabilities.quote_merchant(user_id, "flower", event_date)
         cake_quote = capabilities.quote_merchant(user_id, "cake", event_date)
         nodes = [
@@ -315,7 +410,53 @@ class BusinessPlanService:
         return Plan(plan_id=revised.plan_id, revision=new_revision, status=revised.status, user_id=user_id,
                     nodes=revised.nodes, display=revised.display, created_at=revised.created_at)
 
-    def execute_plan(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str) -> dict[str, Any]:
+    def confirm_plan(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str) -> dict[str, Any]:
+        with self.database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if plan is None or plan.user_id != user_id or receipt is None or receipt.subject_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if receipt.plan_id != plan_id or receipt.status != "pending":
+                raise DomainError("RECEIPT_INVALID")
+            if plan.status not in {"awaiting_confirmation", "partially_completed"}:
+                raise DomainError("PLAN_STATE_INVALID")
+            if receipt.display_hash != display_hash or plan.display_hash != display_hash:
+                raise DomainError("HASH_MISMATCH")
+            if receipt.expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
+                raise DomainError("RECEIPT_EXPIRED")
+            if receipt.assurance == "mfa":
+                plan.status = "awaiting_mfa"
+                assurance = "mfa"
+            else:
+                assurance = "none"
+        if assurance == "mfa":
+            DeviceService(self.database).issue_otp(user_id, receipt_id)
+            return {"plan_id": plan_id, "status": "awaiting_mfa", "receipt_id": receipt_id,
+                    "assurance": "mfa"}
+        return self.execute_plan(user_id, plan_id, receipt_id, display_hash)
+
+    def verify_plan(self, user_id: str, plan_id: str, otp: str) -> dict[str, Any]:
+        with self.database.sessions() as session:
+            plan = session.get(PlanRecord, plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id,
+                                                                  ReceiptRecord.subject_id == user_id))
+            if plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if receipt is None or receipt.assurance != "mfa":
+                raise DomainError("PLAN_MFA_NOT_REQUIRED")
+            if plan.status != "awaiting_mfa":
+                raise DomainError("PLAN_STATE_INVALID")
+            display_hash = receipt.display_hash
+        DeviceService(self.database).verify(user_id, otp, receipt.id)
+        with self.database.sessions.begin() as session:
+            plan = session.get(PlanRecord, plan_id)
+            if plan is None or plan.status != "awaiting_mfa":
+                raise DomainError("PLAN_STATE_INVALID")
+            plan.status = "authorized"
+        return self.execute_plan(user_id, plan_id, receipt.id, display_hash, mfa_verified=True)
+
+    def execute_plan(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str,
+                     *, mfa_verified: bool = False) -> dict[str, Any]:
         with self.database.sessions() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is None or plan.user_id != user_id:
@@ -325,6 +466,8 @@ class BusinessPlanService:
                 raise DomainError("NOT_OWNER")
             if receipt.status in {"consumed", "invalidated"}:
                 raise DomainError("RECEIPT_REPLAYED")
+            if receipt.assurance == "mfa" and not mfa_verified:
+                raise DomainError("MFA_REQUIRED")
             if receipt.expires_at <= datetime.now(timezone.utc).replace(tzinfo=None):
                 raise DomainError("RECEIPT_EXPIRED")
             if receipt.plan_revision != plan.revision:
@@ -333,9 +476,12 @@ class BusinessPlanService:
                 raise DomainError("HASH_MISMATCH")
             records = list(session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all())
             composite = bool(records) and all(record.tool in READ_ONLY_CAPABILITIES for record in records)
+            generic = bool(records) and all(record.tool in CAPABILITIES for record in records)
             allowed_states = {"awaiting_confirmation", "running", "partially_completed"} if composite else {
                 "awaiting_confirmation", "running"
             }
+            if mfa_verified:
+                allowed_states |= {"awaiting_mfa", "authorized", "partially_completed"}
             if plan.status not in allowed_states:
                 raise DomainError("PLAN_STATE_INVALID")
             receipt_nodes = set(json.loads(receipt.node_ids_json))
@@ -372,6 +518,8 @@ class BusinessPlanService:
             if receipt_nodes != set(record_by_logical):
                 raise DomainError("RECEIPT_NODE_SET_MISMATCH")
             records = [record_by_logical[logical_id] for logical_id in topo_order]
+            if generic and not composite:
+                PlanValidator.validate_proposal([json.loads(record.args_json) for record in records])
             if composite:
                 PlanValidator({tool: {"kind": "query"} for tool in READ_ONLY_CAPABILITIES}).validate(
                     [json.loads(record.args_json) for record in records])
@@ -380,7 +528,7 @@ class BusinessPlanService:
             if plan is None or plan.status not in allowed_states:
                 raise DomainError("PLAN_STATE_INVALID")
             plan.status = "running"
-        capabilities = CapabilityService(self.database)
+        capabilities = CapabilityService(self.database, require_device_mfa=True, enforce_prepare=False)
         reservation_id: str | None = None
         with self.database.sessions() as session:
             reserve_record = session.scalar(select(CapabilityRecord).where(
@@ -390,7 +538,7 @@ class BusinessPlanService:
             if reserve_record is not None:
                 reservation_id = str(json.loads(reserve_record.data_json).get("reservation_id", "")) or None
         results: list[dict[str, Any]] = []
-        completed_statuses = {"succeeded"} if composite else {"succeeded", "scheduled", "reserved"}
+        completed_statuses = {"succeeded"} if composite else {"succeeded", "scheduled", "reserved", "created"}
         for record in records:
             data = json.loads(record.args_json)
             logical_id = data["id"]
@@ -408,7 +556,7 @@ class BusinessPlanService:
                 existing_capability = session.scalar(select(CapabilityRecord).where(
                     CapabilityRecord.user_id == user_id,
                     CapabilityRecord.idempotency_key == record.idempotency_key))
-            if composite and existing_capability is not None:
+            if (composite or generic) and existing_capability is not None:
                 status = existing_capability.status
                 result_data = json.loads(existing_capability.data_json)
                 if status not in completed_statuses:
@@ -440,6 +588,21 @@ class BusinessPlanService:
                             or datetime.fromisoformat(quote["expires_at"]) <= datetime.now(timezone.utc).replace(tzinfo=None)):
                         raise DomainError("QUOTE_INVALID")
                     status, result_data = "succeeded", quote
+                elif generic and not composite and record.tool in CAPABILITIES and record.tool not in {"X03", "X04"}:
+                    payload = self._resolve_refs(data.get("args", {}), results)
+                    if "assurance" in INPUT_FIELDS[record.tool]:
+                        payload["assurance"] = "mfa" if mfa_verified else "confirm"
+                    if mfa_verified:
+                        payload["_mfa_verified"] = True
+                    result = capabilities.execute(user_id, record.tool, payload, record.idempotency_key, trusted_execution=True)
+                    status, result_data = result.status, result.data
+                elif generic and not composite and record.tool in {"X03", "X04"}:
+                    payload = self._resolve_refs(data.get("args", {}), results)
+                    payload.setdefault("plan_id", plan_id)
+                    if mfa_verified:
+                        payload["_mfa_verified"] = True
+                    result = capabilities.execute(user_id, record.tool, payload, record.idempotency_key, trusted_execution=True)
+                    status, result_data = result.status, result.data
                 elif record.tool in READ_ONLY_CAPABILITIES:
                     payload = {key: value for key, value in data["args"].items()
                                if key != "recommendation_node"}
@@ -454,10 +617,10 @@ class BusinessPlanService:
                                 raise DomainError("PLAN_DEPENDENCY_NOT_READY")
                             recommendations = json.loads(source_record.data_json).get("products", [])
                         payload = {"product_ids": [str(item["id"]) for item in recommendations]}
-                    result = capabilities.execute(user_id, record.tool, payload, record.idempotency_key)
+                    result = capabilities.execute(user_id, record.tool, payload, record.idempotency_key, trusted_execution=True)
                     status, result_data = result.status, result.data
                 elif data["id"] == "reserve":
-                    result = capabilities.execute(user_id, "X02", {"amount_minor": data["args"]["amount_minor"], "plan_id": plan_id}, f"{plan_id}-reserve")
+                    result = capabilities.execute(user_id, "X02", {"amount_minor": data["args"]["amount_minor"], "plan_id": plan_id}, f"{plan_id}-reserve", trusted_execution=True)
                     reservation_id = str(result.data["reservation_id"])
                     status, result_data = result.status, result.data
                 else:
@@ -467,7 +630,7 @@ class BusinessPlanService:
                                                     "dispatch_on": data["args"]["dispatch_on"],
                                                     "quote_id": data["args"]["quote_id"],
                                                     "amount_minor": data["args"]["amount_minor"],
-                                                    "reservation_id": reservation_id}, f"{plan_id}-{data['id']}")
+                                                    "reservation_id": reservation_id}, f"{plan_id}-{data['id']}", trusted_execution=True)
                     status, result_data = result.status, result.data
             except DomainError as error:
                 status, result_data = "failed", {"error_code": error.code}
@@ -503,6 +666,30 @@ class BusinessPlanService:
             if receipt is not None and final_status == "succeeded":
                 receipt.status = "consumed"
         return {"plan_id": plan_id, "status": final_status, "nodes": results}
+
+    @staticmethod
+    def _resolve_refs(value: Any, results: list[dict[str, Any]]) -> Any:
+        by_node = {str(item["node_id"]): item.get("data", {}) for item in results}
+
+        def resolve(item: Any) -> Any:
+            if isinstance(item, dict):
+                if set(item) == {"$ref"}:
+                    path = str(item["$ref"])
+                    node_id, *fields = path.split(".")
+                    current: Any = by_node.get(node_id)
+                    if current is None:
+                        raise DomainError("REF_TARGET_MISSING")
+                    for field in fields:
+                        if not isinstance(current, dict) or field not in current:
+                            raise DomainError("REF_FIELD_MISSING")
+                        current = current[field]
+                    return current
+                return {key: resolve(child) for key, child in item.items()}
+            if isinstance(item, list):
+                return [resolve(child) for child in item]
+            return item
+
+        return resolve(value)
 
     def pause(self, user_id: str, plan_id: str) -> dict[str, str]:
         return self._set_status(user_id, plan_id, "paused", {"awaiting_confirmation", "running"})

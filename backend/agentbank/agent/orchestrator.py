@@ -108,6 +108,8 @@ class AgentOrchestrator:
                 planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
                                                context={**safe_context, "exploration": exploration})
             planned_parsed = self._from_planner(planned)
+            if planned.get("proposed_dag"):
+                return self._prepare_proposed_dag(user_id, conversation_id, planned)
             if planned.get("plan_template") == "birthday":
                 return self._prepare_birthday_plan(user_id, conversation_id, text, planned)
             if planned.get("plan_template") in {"query_analysis_report", "investment_review"}:
@@ -433,6 +435,32 @@ class AgentOrchestrator:
                                    "status": plan.status, "display": plan.display},
                              message="请核对只读计划后确认。")
 
+    def _prepare_proposed_dag(self, user_id: str, conversation_id: str,
+                              planned: dict[str, Any]) -> AgentResponse:
+        from agentbank.contracts import PlanNode
+        from agentbank.workflow.planner import BusinessPlanService
+
+        try:
+            nodes = [PlanNode.model_validate(node) for node in planned["proposed_dag"]]
+            plan = BusinessPlanService(self.database).create_proposed_plan(
+                user_id, str(planned.get("intent", "business plan")), nodes)
+        except (DomainError, ValueError, TypeError) as error:
+            code = error.code if isinstance(error, DomainError) else "PLAN_INVALID"
+            return AgentResponse(kind="error", intent=str(planned.get("intent", "unknown")), message=code)
+        with self.database.sessions() as session:
+            from agentbank.db import PlanRecord, ReceiptRecord
+            record = session.get(PlanRecord, plan.plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan.plan_id))
+            assert record is not None and receipt is not None
+        self._save_pending(user_id, conversation_id, None)
+        self._set_latest_prepared(user_id, conversation_id, plan.plan_id)
+        return AgentResponse(kind="plan_confirmation", intent=str(planned.get("intent", "business_plan")),
+                             record_id=plan.plan_id, display_hash=record.display_hash,
+                             data={"plan_id": plan.plan_id, "plan_type": "model_dag", "receipt_id": receipt.id,
+                                   "revision": plan.revision, "status": plan.status, "assurance": receipt.assurance,
+                                   "display": plan.display, "nodes": [node.model_dump(mode="json") for node in plan.nodes]},
+                             message="请核对模型规划的业务步骤、金额和授权要求后确认。")
+
     def confirm(self, user_id: str, record_id: str, display_hash: str, receipt_id: str = "") -> AgentResponse:
         with self.database.sessions() as session:
             from agentbank.db import CapabilityRecord
@@ -450,10 +478,10 @@ class AgentOrchestrator:
             data = json.loads(record.data_json) if record is not None else {}
         if plan_confirmation:
             from agentbank.workflow.planner import BusinessPlanService
-            plan_result = BusinessPlanService(self.database).execute_plan(user_id, record_id, receipt_id, display_hash)
+            plan_result = BusinessPlanService(self.database).confirm_plan(user_id, record_id, receipt_id, display_hash)
             return AgentResponse(kind="result", intent="birthday_plan", record_id=record_id,
                                  display_hash=display_hash, data=plan_result,
-                                 message="生日计划已按确认的计划执行。")
+                                 message="计划确认已记录，系统将按授权要求继续执行。")
         if data.get("plan_id"):
             result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)
         else:
@@ -471,9 +499,16 @@ class AgentOrchestrator:
 
     def verify(self, user_id: str, record_id: str, otp: str) -> AgentResponse:
         with self.database.sessions() as session:
+            from agentbank.db import PlanRecord
             from agentbank.db import CapabilityRecord
+            plan = session.get(PlanRecord, record_id)
             record = session.get(CapabilityRecord, record_id)
             data = json.loads(record.data_json) if record is not None else {}
+        if plan is not None:
+            from agentbank.workflow.planner import BusinessPlanService
+            plan_result: dict[str, Any] = BusinessPlanService(self.database).verify_plan(user_id, record_id, otp)
+            return AgentResponse(kind="result", intent="business_plan", record_id=record_id,
+                                 data=plan_result, message="计划强验证完成，结果已从模拟银行确认。")
         if data.get("plan_id"):
             result = self.capabilities.verify_transfer(user_id, record_id, otp)
         else:

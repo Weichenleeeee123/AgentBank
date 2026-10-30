@@ -621,6 +621,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def execute_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.execute_plan(user_id, plan_id, str(payload.get("receipt_id", "")), str(payload.get("display_hash", "")))
 
+    @app.post("/v1/plans/{plan_id}/verify")
+    def verify_plan(plan_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return plans.verify_plan(user_id, plan_id, payload.otp)
+
     @app.post("/v1/plans/{plan_id}/pause")
     def pause_plan(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
         return plans.pause(user_id, plan_id)
@@ -679,7 +683,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         text = str(payload.get("text", ""))
         response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
-        if response.kind in {"confirmation", "mfa"}:
+        if response.kind in {"confirmation", "mfa", "plan_confirmation"}:
             nonce = secrets.token_urlsafe(16)
             with database.sessions.begin() as session:
                 nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()

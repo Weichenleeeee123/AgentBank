@@ -11,6 +11,8 @@ from agentbank.audit.store import PersistentAudit
 from agentbank.db import Database
 from agentbank.security.dlp import redact_text
 from agentbank.tools import CAPABILITIES, INPUT_FIELDS, READ_ONLY, validate_capability_payload
+from agentbank.planning.validator import PlanValidator
+from agentbank.errors import DomainError
 
 
 @dataclass(frozen=True)
@@ -125,8 +127,9 @@ class LLMGateway:
     def plan_intent(self, user_text: str, *, user_id: str,
                     recent_user_messages: list[str] | None = None,
                     context: dict[str, Any] | None = None) -> dict[str, Any]:
-        fallback: dict[str, Any] = {"intent": "unknown", "capability_id": None, "slots": {}, "missing": [],
-                    "ambiguities": [], "suggested_next_action": "clarify", "source": "deterministic_fallback"}
+        fallback: dict[str, Any] = {"intent": "unknown", "capability_id": None, "plan_template": None,
+                    "slots": {}, "missing": [], "ambiguities": [], "references": [], "proposed_dag": [],
+                    "suggested_next_action": "clarify", "source": "deterministic_fallback"}
         result = self._call_role("planner", self.PLAN_PROMPT_VERSION, user_text, user_id,
                                  {"recent_user_messages": [redact_text(item) for item in (recent_user_messages or [])[-6:]],
                                   "context": self._sanitize_context(context or {}),
@@ -143,7 +146,8 @@ class LLMGateway:
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
                                                        "plan_template": "string|null",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
-                                                       "references": "array", "suggested_next_action": self.PLANNER_ACTIONS}},
+                                                       "references": "array", "proposed_dag": "array",
+                                                       "suggested_next_action": self.PLANNER_ACTIONS}},
                                  validator=self._validate_plan)
         if result is None:
             return fallback
@@ -151,6 +155,12 @@ class LLMGateway:
         plan_template = result.get("plan_template")
         slots = dict(result["slots"])
         missing = list(result.get("missing", []))
+        proposed_dag = [dict(node) for node in result.get("proposed_dag", [])]
+        if proposed_dag:
+            try:
+                PlanValidator.validate_proposal(proposed_dag)
+            except DomainError:
+                return fallback
         grounded = self._grounded_values(user_text, self._sanitize_context(context or {}))
         monetary_sources = list(grounded)
         from agentbank.text.parse import parse_amount_minor
@@ -171,6 +181,10 @@ class LLMGateway:
                 slots.pop(key)
                 if key not in missing:
                     missing.append(key)
+        try:
+            self._validate_dag_grounding(proposed_dag, monetary_sources, grounded)
+        except DomainError:
+            return fallback
         references = []
         sources = self._grounded_values(user_text, self._sanitize_context(context or {}))
         for item in result.get("references", []):
@@ -188,6 +202,7 @@ class LLMGateway:
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
                 "references": references,
                 "explore": result.get("explore", False),
+                "proposed_dag": proposed_dag,
                 "suggested_next_action": "clarify" if missing else str(result.get("suggested_next_action", "clarify")),
                 "source": result.get("source", "model")}
 
@@ -336,6 +351,16 @@ class LLMGateway:
             "query_analysis_report": {"start_month", "end_month", "group_by", "report", "category"},
             "investment_review": set(),
         }
+        proposed_dag = result.get("proposed_dag", [])
+        if not isinstance(proposed_dag, list):
+            raise ValueError("planner proposed DAG invalid")
+        if proposed_dag:
+            if capability_id is not None or plan_template is not None:
+                raise ValueError("planner mixed DAG and fixed plan")
+            try:
+                PlanValidator.validate_proposal(proposed_dag)
+            except DomainError as exc:
+                raise ValueError("planner proposed DAG rejected") from exc
         if plan_template is not None:
             if capability_id is not None or plan_template not in template_slots:
                 raise ValueError("planner template is not registered")
@@ -386,6 +411,41 @@ class LLMGateway:
                                                     not all(isinstance(item.get(key), str) for key in ("slot", "source", "text"))
                                                     for item in references):
             raise ValueError("planner references invalid")
+
+    @staticmethod
+    def _validate_dag_grounding(nodes: list[dict[str, Any]], monetary_sources: list[str], sources: list[str]) -> None:
+        grounded_sources = monetary_sources + sources
+        provenance_fields = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days",
+                             "recipient_name", "recipient_id", "phone", "alias", "product_id", "order_id",
+                             "card_id", "product_ids", "participant_ids", "answers", "subscription_id",
+                             "event_id", "bill_id", "start_date", "end_date", "start_month", "end_month",
+                             "year", "next_due", "delivery_date", "dispatch_on", "restriction", "action"}
+        server_owned = {"assurance", "device_token", "otp", "new_pin", "simulate_failure", "plan_id",
+                        "quote_id", "reservation_id"}
+
+        def walk(value: Any, field: str) -> None:
+            if isinstance(value, dict):
+                if set(value) == {"$ref"}:
+                    if not isinstance(value["$ref"], str):
+                        raise DomainError("PLAN_REFERENCE_INVALID")
+                    return
+                for key, child in value.items():
+                    if key in server_owned:
+                        raise DomainError("PLAN_SERVER_FIELD")
+                    walk(child, key)
+                return
+            if isinstance(value, list):
+                for child in value:
+                    walk(child, field)
+                return
+            if field in provenance_fields:
+                candidate = str(value)
+                if not candidate or not any(candidate in str(source) for source in grounded_sources):
+                    raise DomainError("PLAN_ARGUMENT_UNGROUNDED")
+
+        for node in nodes:
+            for key, value in dict(node.get("args", {})).items():
+                walk(value, key)
 
     @classmethod
     def _validate_explorer(cls, result: dict[str, Any]) -> None:

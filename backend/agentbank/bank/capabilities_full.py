@@ -40,10 +40,19 @@ class CapabilityService:
         self.require_device_mfa = require_device_mfa
         self.enforce_prepare = enforce_prepare
 
-    def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> CapabilityResult:
+    def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str,
+                *, trusted_execution: bool = False) -> CapabilityResult:
         if capability_id not in CAPABILITIES:
             raise DomainError("CAPABILITY_NOT_REGISTERED")
-        validate_capability_payload(capability_id, payload)
+        # Execution-only authorization markers are added by the trusted plan
+        # executor after confirmation.  They control the security path but are
+        # not part of the public capability input contract.
+        internal_markers = {"_confirmed", "_mfa_verified"}
+        if not trusted_execution and internal_markers.intersection(payload):
+            raise DomainError("CAPABILITY_INPUT_UNKNOWN_FIELD")
+        public_payload = {key: value for key, value in payload.items()
+                          if key not in internal_markers}
+        validate_capability_payload(capability_id, public_payload)
         request_hash = "sha256:" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                                               separators=(",", ":")).encode("utf-8")).hexdigest()
         with self.database.sessions() as session:
@@ -73,7 +82,7 @@ class CapabilityService:
                                             amount_minor=int(payload["amount_minor"]) if "amount_minor" in payload else None)
                 payload["quote_id"] = quote["quote_id"]
                 payload["amount_minor"] = quote["amount_minor"]
-        validate_capability_payload(capability_id, payload)
+        validate_capability_payload(capability_id, public_payload)
         read_only_capabilities = {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}
         write_capability = capability_id not in read_only_capabilities
         if capability_id == "T05" and payload.get("action") in {"preview", "status"}:

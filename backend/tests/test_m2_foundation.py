@@ -15,6 +15,19 @@ def test_chinese_amount_parser_normalizes_colloquial_amounts() -> None:
     assert parse_amount_minor("1.25 元") == 125
 
 
+def test_intent_amount_matching_does_not_extract_a_numeral_from_an_ordinary_word() -> None:
+    from agentbank.agent.intent import IntentParser
+
+    parser = IntentParser()
+    parsed = parser.parse("为 event_birthday 做一个生日准备计划，锁定 1000 元预算")
+
+    assert parsed.capability_id == "X02"
+    assert parsed.slots["amount_minor"] == 100_000
+    assert parser.parse("给房东转一千元").slots["amount_minor"] == 100_000
+    assert parser.parse("给房东转两百五十元").slots["amount_minor"] == 25_000
+    assert parser.parse("给房东转两百五").slots["amount_minor"] == 25_000
+
+
 def test_chinese_amount_parser_marks_uncertain_phrasing() -> None:
     with pytest.raises(DomainError, match="AMBIGUOUS_AMOUNT"):
         parse_amount_minor("五百多")

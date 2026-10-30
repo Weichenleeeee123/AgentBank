@@ -9,6 +9,7 @@ from agentbank.db import CapabilityRecord, Database, PlanNodeRecord, PlanRecord,
 from agentbank.errors import DomainError
 from agentbank.seed.loader import load_seed
 from agentbank.workflow.planner import BusinessPlanService
+from agentbank.contracts import PlanNode
 
 
 def setup(tmp_path: Path) -> tuple[Database, BusinessPlanService]:
@@ -62,9 +63,9 @@ def test_investment_review_passes_recommendations_to_product_details(tmp_path: P
     calls: list[tuple[str, dict]] = []
     original = CapabilityService.execute
 
-    def observed(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str):
+    def observed(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str, **kwargs):
         calls.append((capability_id, payload))
-        return original(self, user_id, capability_id, payload, idempotency_key)
+        return original(self, user_id, capability_id, payload, idempotency_key, **kwargs)
 
     monkeypatch.setattr(CapabilityService, "execute", observed)
     result = service.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
@@ -92,9 +93,9 @@ def test_query_analysis_report_executes_registered_nodes_and_persists_observatio
     calls: list[str] = []
     original = CapabilityService.execute
 
-    def observed(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str):
+    def observed(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str, **kwargs):
         calls.append(capability_id)
-        return original(self, user_id, capability_id, payload, idempotency_key)
+        return original(self, user_id, capability_id, payload, idempotency_key, **kwargs)
 
     monkeypatch.setattr(CapabilityService, "execute", observed)
     result = service.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
@@ -116,7 +117,7 @@ def test_composite_resume_recovers_capability_committed_before_node_checkpoint(
     crashed = False
     calls: list[str] = []
 
-    def fail_after_record(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str):
+    def fail_after_record(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str, **kwargs):
         nonlocal crashed
         calls.append(idempotency_key)
         result = original(self, user_id, capability_id, payload, idempotency_key)
@@ -160,7 +161,7 @@ def test_composite_does_not_claim_scheduled_handler_is_succeeded(
     plan = service.create_composite_plan("user_001", "investment_review", {})
     receipt_id, display_hash = authorize(database, plan.plan_id)
 
-    def scheduled(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str):
+    def scheduled(self, user_id: str, capability_id: str, payload: dict, idempotency_key: str, **kwargs):
         return CapabilityResult(capability_id=capability_id, record_id="scheduled-test", status="scheduled",
                                 data={}, evidence={})
 
@@ -170,3 +171,63 @@ def test_composite_does_not_claim_scheduled_handler_is_succeeded(
     graph = service.graph(plan.plan_id, "user_001")
     assert graph["nodes"][0]["status"] == "scheduled"
     assert graph["nodes"][1]["status"] == "pending"
+
+
+def test_model_dag_is_compiled_to_an_immutable_user_authorized_plan(tmp_path: Path) -> None:
+    database, service = setup(tmp_path)
+    nodes = [PlanNode(id="balance", tool="Q01", args={}, idempotency_key="model-value-is-ignored"),
+             PlanNode(id="reserve", tool="X02", args={"amount_minor": 100_000}, depends_on=["balance"],
+                      compensation="funds.release", idempotency_key="also-ignored")]
+
+    plan = service.create_proposed_plan("user_001", "birthday preparation", nodes)
+
+    assert plan.status == "awaiting_confirmation"
+    assert plan.nodes[0].idempotency_key == f"{plan.plan_id}-balance"
+    assert plan.nodes[1].idempotency_key == f"{plan.plan_id}-reserve"
+    assert plan.nodes[1].args == {"amount_minor": 100_000, "plan_id": plan.plan_id}
+    assert any("reserve" in item["label"] for item in plan.display)
+    with database.sessions() as session:
+        record = session.get(PlanRecord, plan.plan_id)
+        receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
+        assert record is not None and receipt.assurance == "confirm"
+        assert receipt.node_ids_json == '["balance", "reserve"]'
+
+
+def test_model_dag_execution_uses_registered_capabilities_after_plan_confirmation(tmp_path: Path) -> None:
+    database, service = setup(tmp_path)
+    plan = service.create_proposed_plan("user_001", "birthday preparation", [
+        PlanNode(id="reserve", tool="X02", args={"amount_minor": 100_000},
+                 compensation="funds.release", idempotency_key="ignored")])
+    receipt_id, display_hash = authorize(database, plan.plan_id)
+
+    result = service.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
+
+    assert result["status"] == "succeeded"
+    assert result["nodes"][0]["status"] == "reserved"
+    with database.sessions() as session:
+        receipt = session.get(ReceiptRecord, receipt_id)
+        node = session.query(PlanNodeRecord).filter(PlanNodeRecord.plan_id == plan.plan_id).one()
+        assert receipt is not None and receipt.status == "consumed"
+        assert node.status == "reserved"
+
+
+def test_model_dag_mfa_requires_otp_before_any_write_executes(tmp_path: Path) -> None:
+    database, service = setup(tmp_path)
+    ensure_risk_profile(database)
+    plan = service.create_proposed_plan("user_001", "invest", [
+        PlanNode(id="subscribe", tool="W04", args={"product_id": "product_R1", "amount_minor": 10_000},
+                 compensation="investment.order.cancel", idempotency_key="ignored")])
+    receipt_id, display_hash = authorize(database, plan.plan_id)
+    with pytest.raises(DomainError, match="MFA_REQUIRED"):
+        service.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
+
+    prepared = service.confirm_plan("user_001", plan.plan_id, receipt_id, display_hash)
+    assert prepared["status"] == "awaiting_mfa"
+    with database.sessions() as session:
+        assert session.query(CapabilityRecord).filter(CapabilityRecord.idempotency_key.endswith("-subscribe")).count() == 0
+        from agentbank.db import Challenge
+        challenge = session.query(Challenge).filter(Challenge.receipt_id == receipt_id).one()
+        otp = challenge.delivery_code
+    assert otp is not None
+    result = service.verify_plan("user_001", plan.plan_id, otp)
+    assert result["status"] == "succeeded"

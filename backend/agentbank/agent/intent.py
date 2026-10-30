@@ -19,7 +19,15 @@ class ParsedIntent:
 
 
 class IntentParser:
-    _amount = re.compile(r"(?P<amount>[0-9]+(?:\.[0-9]{1,2})?|[零〇一二两三四五六七八九十百千万亿]+(?:元|块)?)\s*(?:元|块钱|块)?")
+    # A Chinese numeral may be a colloquial amount without a currency suffix
+    # (for example, ``两百五``), but it must end at a token boundary.  Without
+    # that boundary the old expression matched the ``一`` in ordinary words
+    # such as ``一个生日`` before it ever reached the actual ``1000 元``.
+    _amount = re.compile(
+        r"(?P<amount>[0-9]+(?:\.[0-9]{1,2})?|"
+        r"[零〇一二两三四五六七八九十百千万亿]+(?:(?=\s*(?:元|圆|块钱|块))|"
+        r"(?=[\s，。！？,.;!?]|$)))\s*(?:元|圆|块钱|块)?"
+    )
     _phone = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
 
     def parse(self, text: str) -> ParsedIntent:
