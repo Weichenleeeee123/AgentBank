@@ -20,7 +20,6 @@ from agentbank.contracts import CapabilityResult
 from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
-from agentbank.workflow.recovery import SagaRunner
 from agentbank.tools import CAPABILITIES, validate_capability_payload
 
 
@@ -309,6 +308,35 @@ class CapabilityService:
             record = session.get(CapabilityRecord, record_id)
             if record is None or record.user_id != user_id:
                 raise DomainError("NOT_OWNER")
+            return self._result(record)
+
+    def invalidate_prepared(self, user_id: str, record_id: str, *, cancelled: bool = False) -> CapabilityResult:
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if record.status not in {"awaiting_confirmation", "awaiting_mfa"}:
+                raise DomainError("CAPABILITY_STATE_NOT_EDITABLE")
+            data = json.loads(record.data_json)
+            receipt_ids = {str(data.get("receipt_id", ""))}
+            plan_id = str(data.get("plan_id", ""))
+            if plan_id:
+                receipts = session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id)).all()
+                receipt_ids.update(item.id for item in receipts)
+                plan = session.get(__import__("agentbank.db", fromlist=["PlanRecord"]).PlanRecord, plan_id)
+                if plan is not None:
+                    plan.status = "cancelled" if cancelled else "invalidated"
+            for receipt_id in receipt_ids - {""}:
+                receipt = session.get(ReceiptRecord, receipt_id)
+                if receipt is not None and receipt.status == "pending":
+                    receipt.status = "invalidated"
+            record.status = "cancelled" if cancelled else "invalidated"
+            data["status"] = record.status
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record.id}", user_id,
+                              "capability.cancelled" if cancelled else "capability.reprepared",
+                              {"record_id": record.id, "capability_id": record.capability_id,
+                               "invalidated_receipts": sorted(receipt_ids - {""})})
             return self._result(record)
 
     def release_reservation(self, user_id: str, record_id: str) -> CapabilityResult:
@@ -687,7 +715,7 @@ class CapabilityService:
                                             amount_minor=amount_minor, shares=shares_count, status="subscribed"))
                 session.add(Position(id=f"pos_{uuid.uuid4().hex}", user_id=user_id, product_id=product_id,
                                      shares=shares_count, cost_minor=amount_minor, market_value_minor=amount_minor,
-                                     as_of=datetime.now(timezone.utc).replace(tzinfo=None)))
+                                     as_of=self.clock.now().replace(tzinfo=None)))
                 operation_id = f"op_invest_sub_{order_id}"
                 session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=idempotency_key,
                                       plan_id=idempotency_key, node_id=order_id, status="succeeded",
@@ -720,17 +748,23 @@ class CapabilityService:
                 order.expected_settlement_at = expected.replace(tzinfo=None)
             return {"order_id": order_id, "status": "processing", "expected_settlement_at": expected.isoformat()}, "processing"
         if capability_id == "W06":
+            as_of = self.clock.now().replace(tzinfo=None)
             with self.database.sessions() as session:
                 positions = session.scalars(select(Position).where(Position.user_id == user_id)).all()
                 orders = session.scalars(select(InvestmentOrder).where(InvestmentOrder.user_id == user_id)).all()
                 order_ids_by_product: dict[str, list[str]] = {}
                 for order in orders:
                     order_ids_by_product.setdefault(order.product_id, []).append(order.id)
-            return {"positions": [{"product_id": position.product_id, "shares": position.shares,
-                                    "cost_minor": position.cost_minor, "market_value_minor": position.market_value_minor,
-                                    "pnl_minor": position.market_value_minor - position.cost_minor,
-                                    "order_ids": order_ids_by_product.get(position.product_id, [])} for position in positions],
-                    "source": "simulated_bank", "as_of": datetime.now(timezone.utc).isoformat()}, "succeeded"
+                valuation = [{"product_id": position.product_id, "shares": position.shares,
+                              "cost_minor": position.cost_minor,
+                              "market_value_minor": (max(0, position.cost_minor +
+                                  position.cost_minor * max(0, (as_of.date() - position.as_of.date()).days) // 2000)
+                                  if position.shares > 0 else 0),
+                              "pnl_minor": ((max(0, position.cost_minor +
+                                  position.cost_minor * max(0, (as_of.date() - position.as_of.date()).days) // 2000)
+                                  - position.cost_minor) if position.shares > 0 else -position.cost_minor),
+                              "order_ids": order_ids_by_product.get(position.product_id, [])} for position in positions]
+            return {"positions": valuation, "source": "simulated_market", "as_of": as_of.isoformat()}, "succeeded"
         if capability_id.startswith("C"):
             return self._card(user_id, capability_id, payload)
         if capability_id == "S01":
@@ -785,19 +819,37 @@ class CapabilityService:
             quote_id = f"quote_{uuid.uuid4().hex}"
             item = "flower" if capability_id == "X03" else "cake"
             if payload.get("simulate_failure"):
-                saga = SagaRunner().run([
-                    ("reserve", lambda: None, lambda: None),
-                    ("merchant_order", lambda: (_ for _ in ()).throw(RuntimeError("merchant_unavailable")), lambda: None),
-                ])
                 with self.database.sessions.begin() as session:
                     session.add(MerchantOrder(id=order_id, user_id=user_id, item=item, quote_id=quote_id,
                                               amount_minor=int(payload.get("amount_minor", 5_000)),
-                                              delivery_date=str(payload.get("delivery_date", "2026-11-13")), status=saga.status,
+                                              delivery_date=str(payload.get("delivery_date", "2026-11-13")), status="failed",
                                               reservation_id=payload.get("reservation_id")))
-                return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": saga.status,
+                    reservation_id = payload.get("reservation_id")
+                    reservation = session.get(Reservation, str(reservation_id)) if reservation_id else None
+                    if reservation_id and (reservation is None or reservation.user_id != user_id):
+                        raise DomainError("NOT_OWNER")
+                    account = session.get(Account, reservation.account_id) if reservation is not None else None
+                    if reservation is not None and reservation.status == "active":
+                        if account is not None:
+                            account.available_minor += reservation.amount_minor
+                        reservation.status = "released"
+                    operation_id = f"op_merchant_{order_id}"
+                    session.add(Operation(id=operation_id, user_id=user_id,
+                                          idempotency_key=f"merchant-{order_id}",
+                                          plan_id=reservation.plan_id if reservation else idempotency_key,
+                                          node_id=order_id, status="failed",
+                                          amount_minor=int(payload.get("amount_minor", 5_000)),
+                                          recipient_id=f"merchant:{item}", error_code="MERCHANT_UNAVAILABLE"))
+                    self.audit.append(session, f"trace_{operation_id}", user_id,
+                                      "merchant.order.compensated",
+                                      {"order_id": order_id, "status": "failed",
+                                       "reservation_id": reservation.id if reservation else None,
+                                       "compensation_status": "reservation_released" if reservation else "not_required"})
+                return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "failed",
                         "delivery_date": payload.get("delivery_date", self.clock.business_date()),
                         "reservation_id": payload.get("reservation_id"),
-                        "compensation_status": "reservation_released", "failure_code": "MERCHANT_UNAVAILABLE"}, saga.status
+                        "compensation_status": "reservation_released" if payload.get("reservation_id") else "not_required",
+                        "failure_code": "MERCHANT_UNAVAILABLE", "operation_id": operation_id}, "failed"
             delivery_date = str(payload.get("delivery_date", "2026-11-13"))
             dispatch_on = str(payload.get("dispatch_on", self.clock.business_date()))
             mandate_id = f"mdt_{uuid.uuid4().hex}"
@@ -811,7 +863,8 @@ class CapabilityService:
                                     max_amount_minor=int(payload.get("amount_minor", 5_000)), max_uses=1,
                                     starts_on=dispatch_on, expires_on=delivery_date, status="active"))
             return {"quote_id": quote_id, "order_id": order_id, "item": item, "status": "scheduled",
-                    "delivery_date": delivery_date, "dispatch_on": dispatch_on, "mandate_id": mandate_id}, "scheduled"
+                    "delivery_date": delivery_date, "dispatch_on": dispatch_on, "amount_minor": int(payload.get("amount_minor", 5_000)),
+                    "mandate_id": mandate_id}, "scheduled"
         if capability_id == "X05":
             card_id = str(payload.get("card_id", "card_001"))
             if payload.get("_mfa_verified"):
@@ -962,6 +1015,51 @@ class CapabilityService:
                     changed.append(record)
         return [self._result(record) for record in changed]
 
+    def reconfirm_merchant_price(self, user_id: str, record_id: str, amount_minor: int) -> CapabilityResult:
+        if amount_minor <= 0:
+            raise DomainError("INVALID_AMOUNT")
+        with self.database.sessions.begin() as session:
+            record = session.get(CapabilityRecord, record_id)
+            if record is None or record.user_id != user_id or record.capability_id not in {"X03", "X04"}:
+                raise DomainError("NOT_OWNER")
+            data = json.loads(record.data_json)
+            if record.status != "paused" or data.get("error_code") != "PRICE_CHANGED":
+                raise DomainError("CAPABILITY_STATE_NOT_RECONFIRMABLE")
+            order = session.get(MerchantOrder, str(data.get("order_id", "")))
+            if order is None or order.user_id != user_id or order.status != "scheduled":
+                raise DomainError("ORDER_NOT_RECONFIRMABLE")
+            reservation = session.get(Reservation, order.reservation_id) if order.reservation_id else None
+            if reservation is not None and (reservation.user_id != user_id or reservation.status != "active"
+                                            or reservation.amount_minor < amount_minor):
+                raise DomainError("RESERVATION_INSUFFICIENT")
+            if reservation is None:
+                account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                if account is None or account.available_minor < amount_minor:
+                    raise DomainError("INSUFFICIENT_FUNDS")
+            today = self.clock.business_date()
+            if order.delivery_date < today:
+                raise DomainError("DELIVERY_DATE_EXPIRED")
+            old_mandate = session.get(Mandate, str(data.get("mandate_id", "")))
+            if old_mandate is not None and old_mandate.user_id == user_id and old_mandate.used_count == 0:
+                old_mandate.status = "revoked"
+            mandate_id = f"mdt_{uuid.uuid4().hex}"
+            session.add(Mandate(id=mandate_id, user_id=user_id, plan_id=record.id,
+                                operation_type="merchant.order.create", subject_ref=order.item,
+                                max_amount_minor=amount_minor, max_uses=1,
+                                starts_on=today, expires_on=order.delivery_date, status="active"))
+            order.amount_minor = amount_minor
+            data["amount_minor"] = amount_minor
+            data["mandate_id"] = mandate_id
+            data["status"] = "scheduled"
+            data.pop("error_code", None)
+            data.pop("next_step", None)
+            record.status = "scheduled"
+            record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            self.audit.append(session, f"trace_{record.id}", user_id, "merchant.order.price_reconfirmed",
+                              {"record_id": record.id, "order_id": order.id,
+                               "amount_minor": amount_minor, "mandate_id": mandate_id})
+            return self._result(record)
+
     def dispatch_due(self, user_id: str | None = None) -> list[CapabilityResult]:
         today = self.clock.business_date()
         changed: list[CapabilityRecord] = []
@@ -1033,7 +1131,12 @@ class CapabilityService:
                             mandate_id = str(data.get("mandate_id", ""))
                             mandate = order_session.get(Mandate, mandate_id) if mandate_id else None
                             today_date = date.fromisoformat(today)
-                            if (mandate is None or mandate.user_id != record.user_id
+                            if int(data.get("amount_minor", merchant.amount_minor)) != merchant.amount_minor:
+                                status = "paused"
+                                data["status"] = "paused"
+                                data["error_code"] = "PRICE_CHANGED"
+                                data["next_step"] = "reconfirm_price"
+                            elif (mandate is None or mandate.user_id != record.user_id
                                     or mandate.status != "active"
                                     or mandate.operation_type != "merchant.order.create"
                                     or mandate.subject_ref != merchant.item
@@ -1044,10 +1147,6 @@ class CapabilityService:
                                 merchant.status = "failed"
                                 data["status"] = "failed"
                                 data["error_code"] = "MANDATE_INVALID"
-                            elif int(data.get("amount_minor", merchant.amount_minor)) != merchant.amount_minor:
-                                merchant.status = "failed"
-                                data["status"] = "failed"
-                                data["error_code"] = "PRICE_CHANGED"
                             elif reservation is not None and (reservation.status != "active"
                                                             or reservation.amount_minor < merchant.amount_minor):
                                 merchant.status = "failed"

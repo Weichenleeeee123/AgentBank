@@ -84,5 +84,12 @@ def test_x03_dispatch_rejects_changed_amount_after_prepare(tmp_path: Path) -> No
         data["amount_minor"] = 8_000
         record.data_json = __import__("json").dumps(data)
     progressed = service.dispatch_due("user_001")
-    assert progressed[0].data["status"] == "failed"
+    assert progressed[0].status == "paused"
+    assert progressed[0].data["status"] == "paused"
     assert progressed[0].data["error_code"] == "PRICE_CHANGED"
+    assert progressed[0].data["next_step"] == "reconfirm_price"
+    with service.database.sessions() as session:
+        stored = session.get(MerchantOrder, order.data["order_id"])
+        mandate = session.query(Mandate).filter(Mandate.plan_id == "x03-price").one()
+        assert stored.status == "scheduled"
+        assert mandate.used_count == 0

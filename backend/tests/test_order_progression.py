@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.db import Account, Database, LedgerEntry, MerchantOrder, Operation, Reservation, Transaction
+from agentbank.db import Account, AuditLog, CapabilityRecord, Database, LedgerEntry, Mandate, MerchantOrder, Operation, Reservation, Transaction
 from agentbank.seed.loader import load_seed
 
 
@@ -28,19 +30,63 @@ def test_merchant_order_progression_charges_reservation_and_delivers(tmp_path: P
         assert session.query(Transaction).filter(Transaction.merchant == "鲜花商户").count() == 1
 
 
-def test_merchant_order_failure_releases_reservation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("capability_id", ["X03", "X04"])
+def test_merchant_order_failure_releases_reservation(tmp_path: Path, capability_id: str) -> None:
     database = Database(f"sqlite:///{tmp_path / 'orders-fail.db'}")
     load_seed(database)
     service = CapabilityService(database)
     before = service._account("user_001").available_minor
     reserved = service.execute("user_001", "X02", {"amount_minor": 10_000}, "order-fail-reserve")
-    service.execute("user_001", "X03", {"delivery_date": service.clock.business_date(),
-                                         "amount_minor": 5_000, "reservation_id": reserved.data["reservation_id"],
-                                         "simulate_failure": True}, "order-fail-create")
-    service.dispatch_due("user_001")
+    payload = {"delivery_date": service.clock.business_date(), "amount_minor": 5_000,
+               "reservation_id": reserved.data["reservation_id"], "simulate_failure": True}
+    failed = service.execute("user_001", capability_id, payload, "order-fail-create")
+    assert failed.status == "failed"
     assert service._account("user_001").available_minor == before
     assert service._account("user_001").ledger_balance_minor == 500_000
     with database.sessions() as session:
-        assert session.query(Operation).count() == 0
+        stored = session.get(MerchantOrder, failed.data["order_id"])
+        operation = session.get(Operation, f"op_merchant_{stored.id}")
+        record = session.get(CapabilityRecord, failed.record_id)
+        assert stored.status == "failed"
+        assert operation.status == "failed" and operation.error_code == "MERCHANT_UNAVAILABLE"
+        assert record.status == "failed"
+        assert session.query(AuditLog).filter(AuditLog.event_type == "merchant.order.compensated").count() == 1
         reservation = session.get(Reservation, reserved.data["reservation_id"])
         assert reservation.status == "released"
+    assert service.dispatch_due("user_001") == []
+    assert service.execute("user_001", capability_id, payload, "order-fail-create").record_id == failed.record_id
+    assert service._account("user_001").available_minor == before
+    with database.sessions() as session:
+        assert session.query(Operation).filter(Operation.id == f"op_merchant_{failed.data['order_id']}").count() == 1
+        assert session.query(AuditLog).filter(AuditLog.event_type == "merchant.order.compensated").count() == 1
+        assert session.query(LedgerEntry).count() == 0
+
+
+def test_merchant_price_change_preserves_hold_until_explicit_reconfirmation(tmp_path: Path) -> None:
+    database = Database(f"sqlite:///{tmp_path / 'orders-price.db'}")
+    load_seed(database)
+    service = CapabilityService(database)
+    reserved = service.execute("user_001", "X02", {"amount_minor": 10_000}, "price-reserve")
+    order = service.execute("user_001", "X04", {"delivery_date": service.clock.business_date(),
+                                                 "amount_minor": 5_000,
+                                                 "reservation_id": reserved.data["reservation_id"]}, "price-order")
+    old_mandate_id = order.data["mandate_id"]
+    with database.sessions.begin() as session:
+        session.get(MerchantOrder, order.data["order_id"]).amount_minor = 8_000
+    paused = service.dispatch_due("user_001")[0]
+    assert paused.status == "paused" and paused.data["error_code"] == "PRICE_CHANGED"
+    with database.sessions() as session:
+        assert session.get(Reservation, reserved.data["reservation_id"]).status == "active"
+        assert session.get(Mandate, old_mandate_id).used_count == 0
+        assert session.query(Operation).count() == 0
+        assert session.query(LedgerEntry).count() == 0
+    assert service.dispatch_due("user_001") == []
+    reconfirmed = service.reconfirm_merchant_price("user_001", order.record_id, 8_000)
+    assert reconfirmed.status == "scheduled"
+    assert service.dispatch_due("user_001")[0].data["status"] == "delivered"
+    with database.sessions() as session:
+        assert session.get(Mandate, old_mandate_id).status == "revoked"
+        assert session.get(Mandate, old_mandate_id).used_count == 0
+        assert session.get(Mandate, reconfirmed.data["mandate_id"]).used_count == 1
+        assert session.get(Reservation, reserved.data["reservation_id"]).status == "released"
+    assert service._account("user_001").available_minor == 492_000
