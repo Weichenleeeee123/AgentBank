@@ -1,10 +1,10 @@
 # M2 综合缺口复核与关闭条件
 
-2026-10-30 交叉复核，覆盖 PLAN §3、§6、§7、§8、§10、§11、§12、§15.1、§15.3 和早期产品漏洞表。状态依据本轮代码、测试和评测，不以历史提交代替证据。本地模拟通过只代表本地模拟代码闭环；真实银行、商户、推送租户及公网部署要单列外部验收。
+2026-10-30 交叉复核，覆盖 PLAN §3、§6、§7、§8、§10、§11、§12、§15.1、§15.3 和早期产品漏洞表。状态依据本轮代码、测试和评测，不以历史提交代替证据。本地模拟通过只代表本地模拟代码闭环；真实银行、商户、推送租户及公网部署要单列外部验收。本轮 DeepSeek Flash planner/reply/fraud 在线 smoke 已成功。
 
 | ID | 要求 | 当前实现与测试证据 | 结果与边界 |
 |---|---|---|---|
-| A | 理解/规划/只读探索/回复/反诈分类 LLM 角色 | llm gateway + 版本化 fraud prompt；结构化 schema、主备、2秒 fraud timeout；转账 prepare 前规则+分类检查，不安全/未知走 handoff；test_fraud_llm_role、test_llm_gateway、test_agent_planning | 本地闭环；真实 provider/故障域/预算未联调 |
+| A | 理解/规划/只读探索/回复/反诈分类 LLM 角色 | llm gateway + 版本化 fraud prompt；结构化 schema、主备、2秒 fraud timeout；转账 prepare 前规则+分类检查，不安全/未知走 handoff；test_fraud_llm_role、test_llm_gateway、test_agent_planning | 本地闭环；DeepSeek Flash 在线 smoke 已测；backup provider故障域与费用预算未联调 |
 | B | 结构化对话持久化、最近 6 条用户消息、用户隔离 | ConversationState/Reference；test_agent_core/test_agent_planning | 本地闭环 |
 | C | 有界 ReAct 和有限复合计划 | 五步只读探索；固定 query_analysis_report、investment_review、birthday 模板；composite checkpoint 用幂等键恢复；test_llm_gateway/test_composite_plans/test_agent_planning | 本地闭环；写工具不进入自由探索循环 |
 | D | 33 项输入/输出契约、策略前置条件、补偿、展示元数据 | capability_contracts 为33项定义严格输入、授权、业务/状态结果、嵌套终态证据；tools 注册表由合同派生；CapabilityService 返回强制校验；test_capability_contracts_full | 本地闭环；补偿是本地模拟声明，不等于外部补偿已履约 |
@@ -30,4 +30,4 @@
 
 ## 本轮门禁
 
-改动后全量 pytest 499 passed；确定性评测 223/223；Ruff、Mypy、Node syntax、diff-check通过。真实 provider/外部推送/商户/飞书联调、fresh Docker build/start、自评/PPT/视频/提交回执/公网地址仍各自需要外部验收，不混称为本地M2完成。
+最终运行：全量 pytest 499 passed；确定性评测 223/223；Ruff、Mypy、Node syntax、diff-check通过；99 case manifest无错误。DeepSeek Flash planner/reply/fraud在线 smoke成功。Docker使用本地测试秘密完成config、fresh build、重启、health与eval self-test 223/223。真实银行/商户/推送/飞书租户、公网HTTPS和M4材料仍未验证。

@@ -4,7 +4,7 @@
 
 ## 当前开发阶段
 
-本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 499 passed、evaluation 223/223、Ruff/Mypy通过。真实provider与费用预算、外部商户/推送/银行租户、飞书生产租户、fresh Docker构建部署、公网HTTPS和M4材料仍需分别验收，本文件不把本地模拟说成生产集成。
+本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 499 passed、evaluation 223/223、Ruff/Mypy通过。本轮已用 DeepSeek Flash 在线 smoke 验证 planner、reply、fraud 三角色；一次分类请求经历主 provider 重试后成功。备用 provider/费用预算、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料仍需分别验收。本地双实例已fresh build/restart/health/self-test，不等于公网生产部署。
 
 六个业务集群的边界用例与主要不变量见 docs/M2-COVERAGE.md；PLAN §11 boundary fixtures 与99条CAP case的代码/测试/版本追溯由 docs/M2-CAP-TRACEABILITY.md 及 executable manifest提供。
 
