@@ -38,6 +38,31 @@ def test_llm_planner_fills_pending_slots_on_follow_up(tmp_path: Path) -> None:
     assert [role for role, _ in calls] == ["planner", "planner"]
 
 
+def test_llm_outage_uses_deterministic_fallback_and_does_not_execute_write(tmp_path: Path) -> None:
+    def transport(config, role, payload):
+        raise TimeoutError("offline provider")
+
+    agent = make_agent(tmp_path, transport)
+    response = agent.handle("user_001", "planner-outage", "给房东转100元")
+    assert response.kind == "confirmation"
+    assert response.data["payload"]["amount_minor"] == 10000
+    from agentbank.db import Operation
+    with agent.database.sessions() as session:
+        assert session.query(Operation).count() == 0
+
+
+def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Path) -> None:
+    def transport(config, role, payload):
+        return {"intent": "transfer", "capability_id": "T01", "slots": {
+                    "recipient_name": "房东", "amount_minor": 100}, "missing": [],
+                "ambiguities": [], "suggested_next_action": "execute"}
+
+    agent = make_agent(tmp_path, transport)
+    response = agent.handle("user_001", "planner-amount", "给房东转100元")
+    assert response.kind == "confirmation"
+    assert response.data["payload"]["amount_minor"] == 10000
+
+
 def test_llm_planner_references_are_persisted_and_sent_back(tmp_path: Path) -> None:
     payloads: list[dict[str, object]] = []
 
