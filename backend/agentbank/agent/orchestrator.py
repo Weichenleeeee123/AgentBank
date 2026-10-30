@@ -59,6 +59,7 @@ class AgentOrchestrator:
                                  record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
         parsed = self.parser.parse(text)
         pending = self._load_pending(user_id, conversation_id)
+        safe_context: dict[str, Any]
         if pending is not None:
             continued = self._continue_pending(pending, text)
             safe_context = {"parsed_intent": continued.intent, "slots": continued.slots,
@@ -399,9 +400,9 @@ class AgentOrchestrator:
             data = json.loads(record.data_json) if record is not None else {}
         if plan_confirmation:
             from agentbank.workflow.planner import BusinessPlanService
-            result = BusinessPlanService(self.database).execute_plan(user_id, record_id, receipt_id, display_hash)
+            plan_result = BusinessPlanService(self.database).execute_plan(user_id, record_id, receipt_id, display_hash)
             return AgentResponse(kind="result", intent="birthday_plan", record_id=record_id,
-                                 display_hash=display_hash, data=result,
+                                 display_hash=display_hash, data=plan_result,
                                  message="生日计划已按确认的计划执行。")
         if data.get("plan_id"):
             result = self.capabilities.confirm_transfer(user_id, record_id, display_hash)

@@ -82,30 +82,56 @@ class LLMGateway:
                                  {"recent_user_messages": [redact_text(item) for item in (recent_user_messages or [])[-6:]],
                                   "context": self._sanitize_context(context or {}),
                                   "capability_catalogue": self.capability_catalogue(),
+                                  "plan_templates": {"birthday": {"description": "可信生日事件→资金预留→鲜花和蛋糕定时订单",
+                                                                   "slots": {"event_id": "string", "reserve_minor": "positive integer"},
+                                                                   "required_slots": ["event_id", "reserve_minor"]}},
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
+                                                       "plan_template": "string|null",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
-                                                       "suggested_next_action": self.PLANNER_ACTIONS}},
+                                                       "references": "array", "suggested_next_action": self.PLANNER_ACTIONS}},
                                  validator=self._validate_plan)
         if result is None:
             return fallback
         capability_id = result.get("capability_id")
+        plan_template = result.get("plan_template")
         slots = dict(result["slots"])
         missing = list(result.get("missing", []))
         grounded = self._grounded_values(user_text, self._sanitize_context(context or {}))
-        provenance_required = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit",
+        monetary_sources = list(grounded)
+        from agentbank.text.parse import parse_amount_minor
+        for source_text in grounded:
+            for match in re.finditer(r"(?<![A-Za-z0-9_])([0-9]+(?:\.[0-9]{1,2})?|[零一二两三四五六七八九十百千万]+)\s*(?:元|块钱|块)", source_text):
+                try:
+                    monetary_sources.append(str(parse_amount_minor(match.group(1))))
+                except Exception:
+                    continue
+        provenance_required = {"amount_minor", "reserve_minor", "total_minor", "max_uses", "days", "limit",
                                "recipient_name", "recipient_id", "phone", "alias", "product_id", "order_id", "card_id",
                                "product_ids", "participant_ids", "answers",
-                               "subscription_id", "bill_id", "plan_id", "start_date", "end_date",
+                               "subscription_id", "event_id", "bill_id", "plan_id", "start_date", "end_date",
                                "start_month", "end_month", "year", "next_due", "delivery_date", "dispatch_on"}
         for key in list(slots):
-            if key in provenance_required and not self._value_is_grounded(slots[key], grounded):
+            slot_sources = monetary_sources if key.endswith("_minor") else grounded
+            if key in provenance_required and not self._value_is_grounded(slots[key], slot_sources):
                 slots.pop(key)
                 if key not in missing:
                     missing.append(key)
+        references = []
+        sources = self._grounded_values(user_text, self._sanitize_context(context or {}))
+        for item in result.get("references", []):
+            if not isinstance(item, dict):
+                continue
+            slot = item.get("slot")
+            source = item.get("source")
+            text = item.get("text")
+            if (isinstance(slot, str) and isinstance(source, str) and source in {"user", "current_user_message", "structured_field"}
+                    and isinstance(text, str) and any(text in value for value in sources)):
+                references.append({"slot": slot, "source": source, "text": text})
         return {"intent": result["intent"], "capability_id": capability_id,
+                "plan_template": plan_template,
                 "slots": slots, "missing": missing,
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
-                "references": [],
+                "references": references,
                 "explore": result.get("explore", False),
                 "suggested_next_action": "clarify" if missing else str(result.get("suggested_next_action", "clarify")),
                 "source": result.get("source", "model")}
@@ -249,6 +275,19 @@ class LLMGateway:
         if not isinstance(result.get("intent"), str) or not isinstance(result.get("slots"), dict):
             raise ValueError("planner schema invalid")
         capability_id = result.get("capability_id")
+        plan_template = result.get("plan_template")
+        if plan_template is not None:
+            if capability_id is not None or plan_template != "birthday":
+                raise ValueError("planner template is not registered")
+            allowed_template_slots = {"event_id", "reserve_minor"}
+            if set(result["slots"]) - allowed_template_slots:
+                raise ValueError("planner template slot invalid")
+            if "event_id" in result["slots"] and not isinstance(result["slots"]["event_id"], str):
+                raise ValueError("planner template event id invalid")
+            if "reserve_minor" in result["slots"] and (not isinstance(result["slots"]["reserve_minor"], int)
+                                                           or isinstance(result["slots"]["reserve_minor"], bool)
+                                                           or result["slots"]["reserve_minor"] <= 0):
+                raise ValueError("planner template budget invalid")
         if capability_id is not None:
             if capability_id not in CAPABILITIES:
                 raise ValueError("capability is not registered")
@@ -259,12 +298,13 @@ class LLMGateway:
                 validate_capability_payload(capability_id, result["slots"])
             except Exception as exc:
                 raise ValueError("planner slots invalid") from exc
-        elif result["slots"]:
+        elif result["slots"] and plan_template is None:
             raise ValueError("planner slots require a registered capability")
         for key in ("missing", "ambiguities"):
             if not isinstance(result.get(key, []), list) or any(not isinstance(item, str) for item in result.get(key, [])):
                 raise ValueError("planner list invalid")
-        required = cls.capability_catalogue()[capability_id]["required_slots"] if capability_id else []
+        required = (["event_id", "reserve_minor"] if plan_template == "birthday" else
+                    cls.capability_catalogue()[capability_id]["required_slots"] if capability_id else [])
         missing = set(result.get("missing", []))
         if any(slot not in result["slots"] and slot not in missing for slot in required):
             raise ValueError("planner omitted required slots")
@@ -272,6 +312,12 @@ class LLMGateway:
             raise ValueError("planner explore flag invalid")
         if result.get("suggested_next_action", "clarify") not in cls.PLANNER_ACTIONS:
             raise ValueError("planner action invalid")
+        references = result.get("references", [])
+        if not isinstance(references, list) or any(not isinstance(item, dict) or
+                                                    set(item) - {"slot", "source", "text"} or
+                                                    not all(isinstance(item.get(key), str) for key in ("slot", "source", "text"))
+                                                    for item in references):
+            raise ValueError("planner references invalid")
 
     @classmethod
     def _validate_explorer(cls, result: dict[str, Any]) -> None:
@@ -285,6 +331,8 @@ class LLMGateway:
     @staticmethod
     def _sanitize_context(value: Any) -> Any:
         allowed = {"parsed_intent", "slots", "exploration", "step", "intent", "feedback", "observation", "status",
+                   "pending_intent", "prepared", "references", "missing", "slot", "value", "source", "text",
+                   "event_id", "reserve_minor",
                    "capability_id", "available_minor", "ledger_balance_minor", "currency", "as_of",
                    "txn_ids", "events", "event_date", "amount_minor", "transaction_id", "subscription_id",
                    "days", "product_id", "order_id", "card_id", "phone", "recipient_name", "alias",
