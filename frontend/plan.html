@@ -1,1 +1,49 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/app/styles.css"><title>AgentBank 计划</title></head><body><main class="shell"><header><div><span class="eyebrow">PLAN GRAPH</span><h1>计划进度</h1></div></header><form id="load" class="composer"><input id="plan" placeholder="计划 ID"><button>查看</button></form><section id="graph" class="messages"></section></main><script type="module">document.getElementById('load').onsubmit=async e=>{e.preventDefault();const r=await fetch(`/v1/plans/${document.getElementById('plan').value}/graph`,{headers:{Authorization:`Bearer ${localStorage.agentbank_token||''}`}});const data=await r.json();document.getElementById('graph').innerHTML=(data.nodes||[]).map(node=>`<article class="bubble"><h3>${node.logical_id} · ${node.status}</h3><div class="fact"><span>工具</span><strong>${node.tool}</strong></div><div class="fact"><span>授权</span><strong>${node.authorization}</strong></div><div class="fact"><span>规则</span><strong>${node.rule_id||'policy-bound'}</strong></div></article>`).join('')}</script></body></html>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/app/styles.css"><title>AgentBank 计划</title></head><body><main class="shell"><header><div><span class="eyebrow">PLAN GRAPH</span><h1>计划进度</h1></div><a class="ghost-link" href="/app/">返回对话</a></header><form id="load" class="composer"><select id="plan" aria-label="选择计划" required><option value="">正在读取计划…</option></select><button>查看</button></form><p id="error" class="form-error" role="alert"></p><section id="graph" class="messages" aria-live="polite"></section></main><script type="module">
+const $ = id => document.getElementById(id);
+const text = (tag, value) => { const el = document.createElement(tag); el.textContent = value ?? ""; return el; };
+async function loadPlans() {
+  const select = $("plan");
+  try {
+    const response = await fetch("/v1/plans", {headers: {Authorization: `Bearer ${localStorage.agentbank_token || ""}`}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.code || data.detail?.code || "读取失败");
+    select.replaceChildren(new Option("选择计划", ""));
+    for (const plan of data.plans || []) {
+      const option = new Option(`${plan.plan_id} · ${plan.status} · 修订 ${plan.revision}`, plan.plan_id);
+      select.append(option);
+    }
+    if (!data.plans?.length) select.replaceChildren(new Option("暂无计划", ""));
+    const requested = new URLSearchParams(location.search).get("plan_id");
+    if (requested && [...select.options].some(option => option.value === requested)) {
+      select.value = requested;
+      $("load").requestSubmit();
+    }
+  } catch (error) {
+    select.replaceChildren(new Option("计划列表暂不可用", ""));
+    $("error").textContent = `无法读取计划列表：${error.message}`;
+  }
+}
+$("load").onsubmit = async event => {
+  event.preventDefault();
+  const id = $("plan").value;
+  if (!id) return;
+  $("error").textContent = "";
+  $("graph").replaceChildren();
+  try {
+    const response = await fetch(`/v1/plans/${encodeURIComponent(id)}/graph`, {headers: {Authorization: `Bearer ${localStorage.agentbank_token || ""}`}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.code || data.detail?.code || "读取失败");
+    for (const item of data.nodes || []) {
+      const card = document.createElement("article"); card.className = "bubble";
+      card.append(text("h3", `${item.logical_id} · ${item.status}`));
+      for (const [label, value] of [["工具", item.tool], ["授权", item.authorization], ["规则", item.rule_id || "policy-bound"]]) {
+        const row = document.createElement("div"); row.className = "fact";
+        row.append(text("span", label), text("strong", value)); card.append(row);
+      }
+      $("graph").append(card);
+    }
+    if (!data.nodes?.length) $("graph").append(text("p", "该计划暂无步骤。"));
+  } catch (error) { $("error").textContent = `无法读取计划：${error.message}`; }
+};
+loadPlans();
+</script></body></html>

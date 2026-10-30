@@ -10,12 +10,33 @@
 </head>
 <body>
   <main class="shell">
-    <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><button id="balanceBtn" class="ghost">查余额</button></header>
+    <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><div class="header-actions"><a class="ghost-link" href="/app/plan.html">计划</a><button id="balanceBtn" class="ghost">查余额</button><button id="pinButton" class="ghost">修改 PIN</button></div></header>
+    <section class="account-bar" aria-label="演示账户"><label for="userSelect">演示账户</label><select id="userSelect"><option value="user_001">user_001 · 主账户</option><option value="user_002">user_002 · 备用账户</option></select><button id="switchUser" class="ghost">切换</button></section>
     <section id="status" class="status">连接模拟银行中…</section>
+    <section class="inbox"><div class="section-heading"><h2>通知</h2><button id="refreshNotifications" class="ghost" aria-label="刷新通知">刷新</button></div><div id="notificationList" class="notification-list" aria-live="polite"></div></section>
     <section id="messages" class="messages" aria-live="polite"></section>
     <form id="composer" class="composer"><input id="message" autocomplete="off" placeholder="例如：给房东转 20 元，备注房租" /><button>发送</button></form>
     <section class="quick"><button data-text="帮我查一下余额">余额</button><button data-text="帮我查一下订阅">订阅</button><button data-text="推荐理财产品">理财</button><button data-text="先把我的卡冻结">保护卡片</button></section>
   </main>
+  <dialog id="otpDialog" class="otp-dialog" aria-labelledby="otpTitle">
+    <form id="otpForm" method="dialog">
+      <h2 id="otpTitle">模拟手机验证码</h2>
+      <label for="otpCode">验证码</label>
+      <input id="otpCode" name="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required />
+      <div class="card-actions"><button type="button" class="ghost" id="otpCancel">取消</button><button type="submit">验证</button></div>
+    </form>
+  </dialog>
+  <dialog id="pinDialog" class="otp-dialog" aria-labelledby="pinTitle">
+    <form id="pinForm">
+      <h2 id="pinTitle">修改卡片 PIN</h2>
+      <label for="newPin">新 PIN</label>
+      <input id="newPin" name="newPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required />
+      <label for="confirmPin">再次输入 PIN</label>
+      <input id="confirmPin" name="confirmPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required />
+      <p id="pinError" class="form-error" role="alert"></p>
+      <div class="card-actions"><button type="button" class="ghost" id="pinCancel">取消</button><button type="submit">提交安全请求</button></div>
+    </form>
+  </dialog>
   <script src="/app/app.js" type="module"></script>
 </body>
 </html>
