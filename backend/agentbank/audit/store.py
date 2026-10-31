@@ -70,3 +70,9 @@ class PersistentAudit:
                                          event_hash=record.event_hash)
             session.add(checkpoint)
             return checkpoint
+
+    def checkpoint_and_verify(self) -> AuditCheckpoint | None:
+        checkpoint = self.checkpoint()
+        if checkpoint is not None and not self.verify():
+            raise RuntimeError("AUDIT_UNAVAILABLE")
+        return checkpoint
