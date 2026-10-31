@@ -53,3 +53,8 @@ for (const operation of ['callback','bind']) for (const transition of ['identity
 test('old network error cannot overwrite new identity status',async()=>{
  const h=harness();h.run(`state.token='old-im'`);let reject;h.context.fetch=()=>new Promise((_,r)=>{reject=r});const pending=h.get('bind').onclick();h.get('identity').onchange();const expected=h.get('imStatus').text;reject(Error('旧请求失败'));await pending;assert.equal(h.get('imStatus').text,expected);
 });
+test('gateway errors prefer actionable explanation and BUSY creates no same-event retry',async()=>{
+ const h=harness();await h.get('connect').onclick();h.context.fetch=async()=>({ok:false,json:async()=>({code:'CONVERSATION_BUSY',explanation:{message:'上一条消息仍在处理',next_step:'稍后作为新消息发送'}})});
+ await assert.rejects(h.run(`api('messages',{text:'余额'})`),/上一条消息仍在处理.*稍后作为新消息发送/);
+ h.get('message').value='余额';h.get('composer').onsubmit({preventDefault(){}});await new Promise(resolve=>setImmediate(resolve));assert.match(h.get('messages').text,/尚未开始/);assert.doesNotMatch(h.get('messages').text,/重试这条消息/);
+});

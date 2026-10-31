@@ -19,7 +19,11 @@ async function api(path,body,bank=false) {
     const response=await fetch('/v1/im/webim/'+path,{method:body ? 'POST':'GET',cache:'no-store',headers:{'Content-Type':'application/json',...(bank ? {Authorization:`Bearer ${bankToken || ''}`} : token ? {'X-IM-Token':token}:{})},...(body ? {body:JSON.stringify(body)}:{})});
     const data=await response.json();
     if(stale()) throw staleError();
-    if(!response.ok) throw new Error(data.code || data.detail?.code || '操作未完成');
+    if(!response.ok) {
+      const code=data.code || data.detail?.code || '操作未完成';
+      const explanation=data.explanation || data.detail?.explanation || {};
+      throw Object.assign(new Error([explanation.message || code, explanation.next_step].filter(Boolean).join(' ')),{code});
+    }
     return data;
   } catch(error) { if(stale()) throw staleError(); throw error; }
 }
@@ -62,7 +66,7 @@ $('composer').onsubmit=event=>{
   event.preventDefault();const text=$('message').value.trim();if(!text || $('send').disabled)return;
   const group=$('group').checked, payload={event_id:crypto.randomUUID(),conversation_id:state.conversation,text,group}, generation=state.generation;
   $('message').value='';bubble('user',text);
-  const attempt=async()=>{if(generation!==state.generation)return;state.busy=true;controls();try{const response=await api('messages',payload);if(generation===state.generation)render(response,group);}catch(error){if(generation===state.generation){const card=bubble('error',error.message),retry=el('button','重试这条消息');retry.onclick=()=>{retry.disabled=true;attempt();};card.append(retry);}}finally{if(generation===state.generation){state.busy=false;controls();}}};
+  const attempt=async()=>{if(generation!==state.generation)return;state.busy=true;controls();try{const response=await api('messages',payload);if(generation===state.generation)render(response,group);}catch(error){if(generation===state.generation){const card=bubble('error',error.message);if(error.code==='CONVERSATION_BUSY'){card.append(el('p','本次消息尚未开始处理，请稍后重新发送新消息。'));return;}const retry=el('button','重试这条消息');retry.onclick=()=>{retry.disabled=true;attempt();};card.append(retry);}}finally{if(generation===state.generation){state.busy=false;controls();}}};
   attempt();
 };
 window.addEventListener('online',controls);window.addEventListener('offline',()=>{status('当前离线，所有 IM 操作需联网。');controls();});window.addEventListener('storage',controls);controls();
