@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from agentbank.audit.chain import _canonical
 from agentbank.clock import utc_now_naive
 from agentbank.db import AuditCheckpoint, AuditLog, Database
+from agentbank.errors import DomainError
 
 
 class PersistentAudit:
@@ -74,5 +75,5 @@ class PersistentAudit:
     def checkpoint_and_verify(self) -> AuditCheckpoint | None:
         checkpoint = self.checkpoint()
         if checkpoint is not None and not self.verify():
-            raise RuntimeError("AUDIT_UNAVAILABLE")
+            raise DomainError("AUDIT_UNAVAILABLE")
         return checkpoint

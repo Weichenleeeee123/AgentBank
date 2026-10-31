@@ -21,3 +21,10 @@ expected_level: high
     assert report.total == 1
     assert report.passed == 1
     assert report.failed == 0
+
+
+def test_full_m3_matrix_includes_recovery_and_boundary_cases() -> None:
+    report = run_cases(Path(__file__).resolve().parents[2] / "evals")
+    case_ids = {item.case_id for item in report.cases}
+    assert report.total >= 227
+    assert {"M3-COOLING-BINDING", "M3-DEVICE-BOUNDARY", "M3-AUDIT-CHECKPOINT", "M3-DLP"} <= case_ids

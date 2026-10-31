@@ -8,6 +8,7 @@ _PATTERNS = (
     (re.compile(r"(?<!\d)(\d{16,19})(?!\d)"), "[CARD_REDACTED]"),
     (re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)"), "[PHONE_REDACTED]"),
     (re.compile(r"(?i)(otp|验证码)\s*[:：]?\s*\d{6}"), "[OTP_REDACTED]"),
+    (re.compile(r"(?<!\d)\d{6}(?!\d)"), "[OTP_REDACTED]"),
 )
 
 

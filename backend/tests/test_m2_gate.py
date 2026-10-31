@@ -80,6 +80,6 @@ def test_capability_evaluation_matrix_asserts_business_results() -> None:
     eval_dir = Path(__file__).resolve().parents[2] / "evals"
     report = run_cases(eval_dir)
 
-    assert report.total == 223
+    assert report.total >= 223
     assert report.passed == report.total
     assert report.failed == 0

@@ -52,7 +52,8 @@ def test_rate_limit_and_demo_run_endpoint(tmp_path: Path, monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["demo_run_id"]
     traceability = response.json()["traceability"]
-    assert traceability["report"] == {"total": 223, "passed": 223, "failed": 0}
+    assert traceability["report"]["total"] >= 223
+    assert traceability["report"]["passed"] == traceability["report"]["total"]
     assert traceability["suite"]["content_sha256"]
     assert len(traceability["manifest"]["cases"]) == 99
     assert response.json()["audit_verified"] is True

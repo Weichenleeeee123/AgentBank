@@ -66,6 +66,8 @@ def test_cooling_release_api_requires_reconfirmation(tmp_path: Path) -> None:
         cooling.expires_at = utc_now_naive() - timedelta(seconds=1)
     released = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": True})
     assert released.status_code == 200
+    assert released.json()["status"] == "succeeded"
+    assert released.json()["operation_id"]
 
 
 def test_admin_progresses_due_jobs_and_investments(tmp_path: Path, monkeypatch) -> None:

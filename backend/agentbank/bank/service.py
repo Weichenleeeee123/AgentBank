@@ -5,7 +5,7 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -29,6 +29,7 @@ from agentbank.db import (
     ReceiptConsumption,
     ReceiptRecord,
     Database,
+    CoolingPeriod,
 )
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
@@ -37,6 +38,10 @@ from agentbank.policy.engine import PolicyContext, action_hash, decide
 def _display_hash(display: list[dict[str, str]]) -> str:
     canonical = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _utc_aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -226,6 +231,41 @@ class TransferService:
                 raise DomainError("RECEIPT_REPLAYED")
             result = self._commit_transfer(session, user_id, plan, receipt, node, json.loads(node.args_json))
             session.commit()
+            return result
+
+    def release_cooling(self, user_id: str, cooling_id: str, *, action_hash_value: str = "",
+                        plan_revision: int | None = None,
+                        now: datetime | None = None, reconfirmed: bool = False) -> TransferResult:
+        """Reconfirm and commit a transfer that was held by the cooling period."""
+        current = now or datetime.now(timezone.utc)
+        with self.database.atomic() as session:
+            cooling = session.get(CoolingPeriod, cooling_id)
+            if cooling is None or cooling.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if cooling.status != "active":
+                raise DomainError("COOLING_NOT_ACTIVE")
+            if action_hash_value and cooling.action_hash and action_hash_value != cooling.action_hash:
+                raise DomainError("ACTION_CHANGED")
+            if plan_revision is not None and plan_revision != cooling.plan_revision:
+                raise DomainError("ACTION_CHANGED")
+            if _utc_aware(cooling.expires_at) > current:
+                raise DomainError("COOLING_PERIOD_ACTIVE")
+            deadline = cooling.reconfirm_deadline or cooling.expires_at + timedelta(minutes=10)
+            if current > _utc_aware(deadline) or not reconfirmed:
+                raise DomainError("COOLING_RECONFIRMATION_REQUIRED")
+            plan = session.get(PlanRecord, cooling.plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(
+                ReceiptRecord.plan_id == cooling.plan_id,
+                ReceiptRecord.status == "pending",
+            ).order_by(ReceiptRecord.issued_at.desc()))
+            node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == cooling.plan_id))
+            if plan is None or receipt is None or node is None or plan.user_id != user_id:
+                raise DomainError("RECEIPT_INVALID")
+            if cooling.action_hash and receipt.action_hash != cooling.action_hash:
+                raise DomainError("ACTION_CHANGED")
+            result = self._commit_transfer(session, user_id, plan, receipt, node, json.loads(node.args_json))
+            cooling.status = "completed"
+            cooling.reconfirmed_at = current.replace(tzinfo=None)
             return result
 
     def commit_scheduled(self, user_id: str, recipient_id: str, amount_minor: int, plan_id: str,

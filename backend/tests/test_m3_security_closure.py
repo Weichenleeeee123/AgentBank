@@ -85,9 +85,10 @@ def test_dlp_redacts_standalone_otp_in_nested_payload() -> None:
 
 
 def test_dlp_redacts_otp_key_and_standalone_six_digits() -> None:
-    redacted = redact_payload({"otp": 123456, "message": "备用验证码 777777"})
+    redacted = redact_payload({"otp": 123456, "message": "备用验证码 777777", "plain": "888888"})
     assert redacted["otp"] == "[OTP_REDACTED]"
     assert "777777" not in str(redacted)
+    assert "888888" not in str(redacted)
 
 
 def test_reply_checker_rejects_numeric_and_status_claims_in_text() -> None:

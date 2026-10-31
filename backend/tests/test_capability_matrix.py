@@ -66,8 +66,8 @@ def test_capability_has_three_business_state_cases(tmp_path: Path, capability_id
 def test_capability_matrix_report_keeps_case_level_outcomes() -> None:
     report = run_cases(Path(__file__).resolve().parents[2] / "evals")
     cases = [item for item in report.cases if item.kind == "capability"]
-    assert report.total == 223
-    assert report.passed == 223
+    assert report.total >= 223
+    assert report.passed == report.total
     assert len(cases) == len(CAPABILITY_IDS) * 3
     assert all(item.case_id.startswith("CAP-") for item in cases)
     assert all(item.evidence.get("capability_id") in CAPABILITY_IDS for item in cases)

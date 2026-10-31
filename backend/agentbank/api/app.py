@@ -38,7 +38,6 @@ from agentbank.security.explain import explain_denial
 from agentbank.security.fraud import FraudDetector
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.security.rate_limit import SlidingWindowLimiter
-from agentbank.security.cooling import CoolingPeriodService
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 from agentbank.workflow.planner import BusinessPlanService
 from agentbank.scheduler import BusinessScheduler
@@ -511,13 +510,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
             if cooling is None or cooling.user_id != user_id:
                 raise DomainError("NOT_OWNER")
         requested_revision = payload.get("plan_revision")
-        released = CoolingPeriodService(database).release(
-            cooling_id,
-            action_hash=str(payload.get("action_hash", "")),
-            plan_revision=int(requested_revision) if requested_revision is not None else None,
+        result = transfer.release_cooling(
+            user_id, cooling_id,
+            action_hash_value=str(payload.get("action_hash", "")) or cooling.action_hash,
+            plan_revision=int(requested_revision) if requested_revision is not None else cooling.plan_revision,
             reconfirmed=bool(payload.get("reconfirmed", False)),
         )
-        return {"cooling_id": cooling_id, "status": "completed" if released else "active",
+        return {"cooling_id": cooling_id, "status": result.status,
+                "operation_id": result.operation_id, "amount_minor": result.amount_minor,
+                "ledger_entry_ids": result.ledger_entry_ids,
                 "reconfirmed": bool(payload.get("reconfirmed", False))}
 
     @app.get("/device/v1/inbox")

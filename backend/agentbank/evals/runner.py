@@ -60,7 +60,9 @@ def run_cases(case_dir: Path) -> EvaluationReport:
                            "journey": CAP_JOURNEYS[capability_id][variant - 1]}
                           for capability_id in CAPABILITY_IDS for variant in range(1, 4))
         elif isinstance(document, dict) and document.get("kind") == "m3_matrix":
-            loaded.extend({"kind": "m3", "case_id": case_id} for case_id in M3_CASE_IDS)
+            matrix_cases = document.get("cases")
+            case_ids = matrix_cases if isinstance(matrix_cases, list) and matrix_cases else M3_CASE_IDS
+            loaded.extend({"kind": "m3", "case_id": str(case_id)} for case_id in case_ids)
         elif isinstance(document, dict) and document.get("kind") == "security_matrix":
             loaded.extend(_security_matrix_cases())
         elif isinstance(document, list):
@@ -206,6 +208,7 @@ def _run_case(case: dict[str, Any]) -> bool:
         from agentbank.seed.loader import load_seed
         from agentbank.security.breaker import CircuitBreaker
         from agentbank.security.cooling import CoolingPeriodService
+        from agentbank.security.dlp import redact_payload
         from agentbank.security.fragments import ReplyFragmentChecker
         from agentbank.security.fraud import FraudLevel
         from agentbank.workflow.recovery import SagaRunner, UnknownRecoveryService
@@ -243,6 +246,35 @@ def _run_case(case: dict[str, Any]) -> bool:
             with database.sessions.begin() as session:
                 session.add(Operation(id="op_m3", user_id="user_001", idempotency_key="idem_m3", plan_id="p", node_id="n", status="unknown", amount_minor=1, recipient_id="r"))
             return UnknownRecoveryService(database).recover("op_m3").status == "processing"
+        if case_id == "M3-COOLING-BINDING":
+            cooling = CoolingPeriodService(database).start("user_001", "p", 100,
+                                                           action_hash="sha256:a", plan_revision=2)
+            try:
+                CoolingPeriodService(database).release(
+                    cooling.id, action_hash="sha256:b", plan_revision=2,
+                    now=cooling.expires_at, reconfirmed=True,
+                )
+            except Exception as error:
+                return "ACTION_CHANGED" in str(error)
+            return False
+        if case_id == "M3-DEVICE-BOUNDARY":
+            from agentbank.auth.devices import DeviceService
+            device = DeviceService(database)
+            token = device.register("user_001")
+            try:
+                device.inbox("invalid-device-token")
+            except Exception:
+                return device.user_for_token(token) == "user_001"
+            return False
+        if case_id == "M3-AUDIT-CHECKPOINT":
+            from agentbank.audit.store import PersistentAudit
+            audit = PersistentAudit(database)
+            with database.sessions.begin() as session:
+                audit.append(session, "trace_m3_audit", "user_001", "security.test", {"ok": True})
+            return audit.checkpoint_and_verify() is not None and audit.verify()
+        if case_id == "M3-DLP":
+            redacted = redact_payload({"otp": 123456, "message": "验证码 654321"})
+            return "123456" not in str(redacted) and "654321" not in str(redacted)
         return False
     return str(case.get("expected", "pass")) == "pass"
 
@@ -680,7 +712,8 @@ CAPABILITY_IDS = [
 ]
 CAP_JOURNEYS = {capability_id: (f"CAP-{capability_id}-normal", f"CAP-{capability_id}-colloquial",
                                 f"CAP-{capability_id}-boundary") for capability_id in CAPABILITY_IDS}
-M3_CASE_IDS = ["M3-FRAUD-HIGH", "M3-FRAUD-LOW", "M3-FRAGMENT", "M3-COOLING", "M3-BREAKER", "M3-SAGA", "M3-UNKNOWN"]
+M3_CASE_IDS = ["M3-FRAUD-HIGH", "M3-FRAUD-LOW", "M3-FRAGMENT", "M3-COOLING", "M3-BREAKER", "M3-SAGA", "M3-UNKNOWN",
+               "M3-COOLING-BINDING", "M3-DEVICE-BOUNDARY", "M3-AUDIT-CHECKPOINT", "M3-DLP"]
 
 
 def _security_matrix_cases() -> list[dict[str, Any]]:
