@@ -102,12 +102,25 @@ def register_webim_routes(app: FastAPI, database: Database, current_user: Callab
                     raise DomainError('IDEMPOTENCY_CONFLICT')
                 if not prior.response_json:
                     raise DomainError('MESSAGE_OUTCOME_UNKNOWN')
-                return dict(json.loads(prior.response_json))
+                cached = dict(json.loads(prior.response_json))
+                if '_delivery_error' in cached:
+                    raise DomainError(str(cached['_delivery_error']))
+                return cached
             session.add(ImDelivery(token_hash=record.token_hash, event_id=payload.event_id,
                                    request_hash=request_hash, response_json=''))
-        result = sign_and_dispatch({'event_id': f'browser-{event_key}', 'user_id': record.user_id,
-                                    'conversation_id': chat, 'text': payload.text, 'group': payload.group,
-                                    'channel_session': record.token_hash})
+        try:
+            result = sign_and_dispatch({'event_id': f'browser-{event_key}', 'user_id': record.user_id,
+                                        'conversation_id': chat, 'text': payload.text, 'group': payload.group,
+                                        'channel_session': record.token_hash})
+        except DomainError as error:
+            # Admission failures are known outcomes, unlike a process crash.
+            # Keep the original event and error durable so transport retries
+            # never redispatch it or misreport a known rejection as unknown.
+            with database.atomic() as session:
+                delivery = session.get(ImDelivery, (record.token_hash, payload.event_id))
+                assert delivery is not None
+                delivery.response_json = json.dumps({'_delivery_error': error.code})
+            raise
         with database.atomic() as session:
             delivery = session.get(ImDelivery, (record.token_hash, payload.event_id))
             assert delivery is not None
