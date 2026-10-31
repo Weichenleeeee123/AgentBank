@@ -10,7 +10,7 @@
 </head>
 <body>
   <main class="shell">
-    <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><div class="header-actions"><a class="ghost-link" href="/app/plan.html">计划</a><button id="balanceBtn" class="ghost">查余额</button><button id="pinButton" class="ghost">修改 PIN</button></div></header>
+    <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><div class="header-actions"><a class="ghost-link" href="/app/webim.html">模拟 IM</a><a class="ghost-link" href="/app/plan.html">计划</a><button id="balanceBtn" class="ghost">查余额</button><button id="pinButton" class="ghost">修改 PIN</button></div></header>
     <section class="account-bar" aria-label="演示账户"><label for="userSelect">演示账户</label><select id="userSelect"><option value="user_001">user_001 · 主账户</option><option value="user_002">user_002 · 备用账户</option></select><button id="switchUser" class="ghost">切换</button></section>
     <section class="direct-forms" aria-label="银行服务表单">
       <fieldset id="queryMode" class="segmented">
@@ -45,6 +45,7 @@
         <div class="form-submit"><span id="transferStatus" class="form-status" aria-live="polite"></span><button type="submit">准备转账</button></div>
       </form>
     </section>
+    <p id="offlineNotice" class="form-error" role="status" hidden>当前离线。仅显示静态页面，银行数据不缓存，所有操作需联网。</p>
     <section id="status" class="status">连接模拟银行中…</section>
     <section class="inbox"><div class="section-heading"><h2>通知</h2><button id="refreshNotifications" class="ghost" aria-label="刷新通知">刷新</button></div><div id="notificationList" class="notification-list" aria-live="polite"></div></section>
     <section id="messages" class="messages" aria-live="polite"></section>
@@ -62,6 +63,7 @@
   <dialog id="pinDialog" class="otp-dialog" aria-labelledby="pinTitle">
     <form id="pinForm">
       <h2 id="pinTitle">修改卡片 PIN</h2>
+      <label for="pinCard">当前账户卡片</label><select id="pinCard" required></select>
       <label for="newPin">新 PIN</label>
       <input id="newPin" name="newPin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="new-password" required />
       <label for="confirmPin">再次输入 PIN</label>

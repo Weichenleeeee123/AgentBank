@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/app/styles.css"><title>AgentBank 模拟 IM</title></head>
+<body><main class="shell"><header><div><span class="eyebrow">SIMULATED IM</span><h1>独立 IM 身份体验</h1></div><a class="ghost-link" href="/app/">返回银行 App</a></header>
+<p>这是模拟 IM 网关。IM 身份独立于银行账户；先在银行 App 选择账户，再在此明确绑定。银行高风险操作与验证码仅在 App 完成。</p>
+<section class="account-bar"><label for="identity">模拟 IM 身份</label><select id="identity"><option value="demo_im_001">demo_im_001</option><option value="demo_im_002">demo_im_002</option></select><button id="connect" type="button">连接身份</button></section>
+<section class="account-bar"><span id="binding">尚未连接</span><button id="bind" type="button" disabled>绑定 App 当前账户</button></section>
+<section class="account-bar"><label for="group"><input id="group" type="checkbox">模拟群聊（隐藏敏感信息）</label><button id="newChat" type="button">新建对话</button></section>
+<p id="imStatus" class="status" role="status"></p><section id="messages" class="messages" aria-live="polite"></section>
+<form id="composer" class="composer"><input id="message" placeholder="例如：查余额，或给房东转 20 元" autocomplete="off" required><button id="send" disabled>发送</button></form>
+</main><script type="module" src="/app/webim.js"></script></body></html>

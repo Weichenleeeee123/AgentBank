@@ -1,5 +1,5 @@
-import json
 import base64
+import json
 import subprocess
 from pathlib import Path
 
@@ -11,13 +11,16 @@ def run_direct_result(response: dict) -> dict:
     source = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
     script = f"""
 const vm = require('node:vm');
+(async () => {{
+const {{resultKind}} = await import({json.dumps((ROOT / 'frontend' / 'presentation.js').as_uri())});
 const source = {json.dumps(source)};
 const start = source.indexOf('function showDirectResult(');
 const end = source.indexOf('async function submitDirectForm(', start);
 const calls = [];
-const context = {{ calls, addBubble(...args) {{ calls.push(args); }} }};
+const context = {{ calls, resultKind, addBubble(...args) {{ calls.push(args); }} }};
 vm.runInNewContext(source.slice(start, end) + `\nshowDirectResult(${{JSON.stringify({json.dumps(response)})}}, 'done');`, context);
 process.stdout.write(Buffer.from(JSON.stringify(context.calls[0])).toString('base64'));
+}})().catch(error => {{ console.error(error); process.exitCode = 1; }});
 """
     result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
                             encoding="utf-8")

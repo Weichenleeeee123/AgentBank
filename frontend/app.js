@@ -1,4 +1,5 @@
-const state = {token: null, userId: null, conversationId: crypto.randomUUID()};
+import {uppercaseMoney, displayValue, money, resultKind} from './presentation.js';
+const state = {token: null, userId: null, conversationId: crypto.randomUUID(), cards: [], generation: 0};
 const $ = id => document.getElementById(id);
 const secretKey = /pin|otp|password|secret|token|验证码|密码/i;
 
@@ -18,9 +19,16 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   const seen = new Set();
   const appendFact = (label, value, currency = "", minorUnits = label.endsWith("_minor")) => {
     if (value === undefined || value === null || secretKey.test(label)) return;
+    if (typeof value === "object") {
+      for (const [key, child] of Object.entries(value)) {
+        if (["receipt_id", "display_hash", "action_hash", "payload"].includes(key) || secretKey.test(key)) continue;
+        appendFact(`${label} · ${factLabels[key] || key}`, child, currency, key.endsWith("_minor"));
+      }
+      return;
+    }
     const rendered = minorUnits && Number.isFinite(Number(value))
-      ? `${currency === "CNY" || currency === "" ? "¥" : `${currency} `}${(Number(value) / 100).toFixed(2)}`
-      : typeof value === "object" ? JSON.stringify(value) : String(value);
+      ? `${money(value, currency)}${!currency || currency === "CNY" ? `（${uppercaseMoney(Number(value))}）` : ""}`
+      : displayValue(value);
     if (!rendered || seen.has(`${label}:${rendered}`)) return;
     seen.add(`${label}:${rendered}`);
     const row = node("div", "", "fact");
@@ -28,10 +36,14 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     bubble.append(row);
   };
   for (const fact of fragments || []) {
-    appendFact(fact.label || "事实", fact.text ?? fact.value_minor ?? fact.status, fact.currency);
+    appendFact(fact.label || "事实", fact.status ?? fact.text ?? fact.value_minor, fact.currency, fact.status == null && fact.text == null && fact.value_minor != null);
   }
   if (Array.isArray(data?.display)) {
-    for (const item of data.display) appendFact(item.label || "详情", item.value);
+    for (const item of data.display) {
+      appendFact(item.label || "详情", item.value);
+      const yuan = typeof item.value === "string" ? item.value.match(/^[¥￥]([0-9]+(?:\.[0-9]{1,2})?)$/) : null;
+      if (yuan) appendFact(`${item.label || "金额"}（大写）`, uppercaseMoney(Math.round(Number(yuan[1]) * 100)));
+    }
   }
   for (const [key, value] of Object.entries(data || {})) {
     if (["payload", "display", "transactions", "receipt_id", "display_hash", "action_hash", "direct_form"].includes(key)) continue;
@@ -47,6 +59,15 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
       ? kind === "mfa" ? verifyDirect(recordId) : confirmDirect(recordId, displayHash, data?.receipt_id || "")
       : kind === "mfa" ? verify(recordId) : confirm(recordId, displayHash, data?.receipt_id || "");
     actions.append(button);
+    if (data?.direct_form) {
+      const cancel = node("button", "取消操作", "ghost");
+      cancel.onclick = async () => {
+        try { const response = await api(`/v1/capability-records/${recordId}/invalidate`, {method: "POST"});
+          actions.replaceChildren(node("span", "已取消。")); showDirectResult(response, "操作已取消。");
+        } catch (error) { addBubble("error", error.message); }
+      };
+      actions.append(cancel);
+    }
     if (data?.direct_form && kind === "confirmation" && data?.capability_id === "T01") {
       const revise = node("button", "修改转账");
       revise.type = "button";
@@ -91,6 +112,7 @@ const transactionLabels = {posted_at: "日期", merchant: "商户", category: "�
 const factLabels = {available_minor: "可用余额", ledger_balance_minor: "账面余额", currency: "币种",
   capability_id: "服务", account_id: "账户", record_id: "记录", status: "状态", masked_name: "收款人",
   phone_tail: "手机号尾号", is_new: "新收款人", tier_display: "风险级别", assurance: "验证方式",
+  card: "卡片", cards: "卡片", limit_minor: "限额", transfer_result: "转账结果", amount_minor: "金额", total_minor: "总额",
   operation_id: "操作编号"};
 
 function appendTransactions(parent, transactions) {
@@ -113,17 +135,23 @@ function appendTransactions(parent, transactions) {
 }
 
 async function api(path, options = {}) {
+  const generation = state.generation;
+  if (navigator.onLine === false) throw new Error("当前离线，仅可查看页面外壳；联网后可继续银行操作。");
   const response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: {"Content-Type": "application/json", ...(state.token ? {Authorization: `Bearer ${state.token}`} : {}), ...(options.headers || {})}
   });
   const data = await response.json();
+  if (generation !== state.generation) throw new Error("账户已切换，旧请求结果已忽略。");
   if (!response.ok) throw new Error(data.code || data.detail?.code || "请求失败");
   return data;
 }
 
 async function start() {
+  state.generation++;
   const userId = $("userSelect").value;
+  state.token = null; state.cards = []; $("pinButton").disabled = true;
   state.userId = userId;
   state.conversationId = crypto.randomUUID();
   localStorage.removeItem("agentbank_token");
@@ -134,22 +162,29 @@ async function start() {
   $("status").textContent = `已连接模拟银行 · ${userId}`;
   $("messages").replaceChildren();
   addBubble("agent", "我可以帮你查余额、转账、分析账单、管理理财、卡片和订阅。");
+  await loadCards();
   await loadLinkedRecord();
   await loadNotifications();
 }
 
-async function send(text) {
+async function send(text, messageId = crypto.randomUUID(), retry = false) {
+  const generation = state.generation;
   const message = text.trim();
   if (!message) return;
-  addBubble("user", message);
+  if (!retry) addBubble("user", message);
   try {
     const response = await api(`/v1/conversations/${state.conversationId}/messages`, {
-      method: "POST", body: JSON.stringify({text: message})
+      method: "POST", body: JSON.stringify({text: message, message_id: messageId})
     });
+    if (generation !== state.generation) return;
     addBubble(response.kind, response.message, response.fragments, response.data,
       response.record_id, response.display_hash);
   } catch (error) {
+    if (generation !== state.generation) return;
     addBubble("error", error.message);
+    const retryButton = node("button", "重试这条消息");
+    retryButton.onclick = () => { retryButton.disabled = true; send(message, messageId, true); };
+    $("messages").lastElementChild?.append(retryButton);
   }
 }
 
@@ -187,14 +222,16 @@ async function requestOtp() {
 }
 
 async function verify(recordId) {
+  const generation = state.generation;
   const otp = await requestOtp();
-  if (!otp) return;
+  if (!otp || generation !== state.generation) return;
   try {
     const response = await api(`/v1/conversations/${state.conversationId}/records/${recordId}/verify`, {
       method: "POST", body: JSON.stringify({otp})
     });
     addBubble(response.kind, response.message, response.fragments, response.data, response.record_id);
   } catch (error) {
+    if (generation !== state.generation) return;
     addBubble("error", error.message);
   }
 }
@@ -205,15 +242,13 @@ function showDirectResult(response, label) {
     direct_form: true};
   const isTransfer = ["T01", "T02", "T03"].includes(data.capability_id);
   const succeeded = status === "succeeded" && (!isTransfer || data.transfer_result);
-  const kind = ["awaiting_mfa", "mfa_required"].includes(status) ? "mfa" :
-    status === "awaiting_confirmation" ? "confirmation" : ["failed", "rejected"].includes(status) ? "error" :
-    succeeded ? "result" : "pending";
-  const message = status === "awaiting_confirmation" ? "请核对以下收款人和金额，再确认执行。" :
+  const kind = status === "succeeded" && !succeeded ? "pending" : resultKind(status);
+  const message = status === "awaiting_confirmation" ? "请核对以下操作详情，再确认执行。" :
     ["awaiting_mfa", "mfa_required"].includes(status) ? "操作需要设备验证，请在验证码对话框中输入。" :
     ["cooling_required", "cooling"].includes(status) ? "转账仍在安全冷静期内，当前尚未完成。" :
     succeeded ? label : "操作尚未完成，请查看状态或稍后重试。";
   addBubble(kind, message, response.fragments || [], data, response.record_id,
-    response.data?.display_hash || "");
+    response.display_hash || response.data?.display_hash || "");
 }
 
 async function submitDirectForm(path, payload, statusId, label) {
@@ -239,21 +274,23 @@ async function confirmDirect(recordId, displayHash, receiptId) {
     const response = await api(`/v1/capability-records/${recordId}/confirm`, {
       method: "POST", body: JSON.stringify({receipt_id: receiptId, display_hash: displayHash})
     });
-    showDirectResult(response, "转账已完成。");
+    showDirectResult(response, "操作已完成。");
   } catch (error) {
     addBubble("error", error.message);
   }
 }
 
 async function verifyDirect(recordId) {
+  const generation = state.generation;
   const otp = await requestOtp();
-  if (!otp) return;
+  if (!otp || generation !== state.generation) return;
   try {
     const response = await api(`/v1/capability-records/${recordId}/verify`, {
       method: "POST", body: JSON.stringify({otp})
     });
-    showDirectResult(response, "转账验证已完成。");
+    showDirectResult(response, "操作验证已完成。");
   } catch (error) {
+    if (generation !== state.generation) return;
     addBubble("error", error.message);
   }
 }
@@ -275,7 +312,7 @@ async function reviseDirect(recordId, oldBubble) {
       payload, idempotency_key: `revise-${crypto.randomUUID()}`
     })});
     oldBubble.querySelector(".card-actions")?.remove();
-    showDirectResult(response, "转账已完成。");
+    showDirectResult(response, "操作已完成。");
   } catch (error) {
     addBubble("error", `无法修改转账：${error.message}`);
   }
@@ -354,14 +391,29 @@ async function lookupPayees() {
 }
 
 async function loadLinkedRecord() {
-  const recordId = new URLSearchParams(location.search).get("record_id");
+  const params = new URLSearchParams(location.search);
+  const planId = params.get("plan_id");
+  if (planId) {
+    try {
+      const plan = await api(`/v1/plans/${encodeURIComponent(planId)}`);
+      const data = {status: plan.status, display: plan.display || [], receipt_id: plan.receipt_id || "",
+        assurance: plan.assurance, display_hash: plan.display_hash || ""};
+      const kind = plan.status === "awaiting_mfa" ? "mfa" :
+        plan.status === "awaiting_confirmation" ? "plan_confirmation" : "result";
+      addBubble(kind, kind === "mfa" ? "计划需要设备验证码验证。" :
+        kind === "plan_confirmation" ? "请核对计划详情，再确认执行。" : "计划当前状态如下。",
+        [], data, planId, plan.display_hash || "");
+    } catch (error) { addBubble("error", `无法载入该计划：${error.message}`); }
+    const link = node("a", "查看并管理此计划", "ghost-link");
+    link.href = `/app/plan.html?plan_id=${encodeURIComponent(planId)}`;
+    $("messages").append(link);
+    return;
+  }
+  const recordId = params.get("record_id");
   if (!recordId) return;
   try {
     const record = await api(`/v1/capability-records/${recordId}`);
-    const data = {...record.data, direct_form: ["T01", "T02", "T03"].includes(record.data?.capability_id)};
-    addBubble(record.status === "awaiting_mfa" ? "mfa" : "confirmation",
-      "已重新载入待处理操作，请核对以下详情。", [], data,
-      record.record_id, data?.display_hash || "");
+    showDirectResult(record, "该操作已完成。");
   } catch (error) {
     addBubble("error", `无法载入该操作：${error.message}`);
   }
@@ -388,6 +440,7 @@ async function loadNotifications() {
 async function changePin(event) {
   event.preventDefault();
   const form = $("pinForm"), pin = $("newPin").value;
+  if (!state.cards.some(card => card.id === $("pinCard").value)) { $("pinError").textContent = "请选择当前账户的卡片。"; return; }
   if (pin !== $("confirmPin").value) {
     $("pinError").textContent = "两次输入的 PIN 不一致。";
     return;
@@ -399,12 +452,11 @@ async function changePin(event) {
     const response = await api("/v1/capabilities/C08", {
       method: "POST",
       body: JSON.stringify({capability_id: "C08", idempotency_key: `pin-${crypto.randomUUID()}`,
-        payload: {card_id: "card_001", new_pin: pin, assurance: "mfa"}})
+        payload: {card_id: $("pinCard").value, new_pin: pin, assurance: "mfa"}})
     });
     $("pinDialog").close();
     form.reset();
-    addBubble(response.status === "awaiting_mfa" ? "mfa" : "result",
-      "PIN 修改请求已提交，需按安全验证结果完成操作。", [], response.data, response.record_id);
+    showDirectResult(response, "PIN 已修改。");
   } catch (error) {
     $("pinError").textContent = `无法提交：${error.message}`;
   } finally {
@@ -432,3 +484,25 @@ document.querySelectorAll('input[name="queryMode"],input[name="transferMode"]').
 updateFormModes();
 document.querySelectorAll(".quick button").forEach(button => button.onclick = () => send(button.dataset.text));
 start().catch(error => { $("status").textContent = `连接失败：${error.message}`; });
+
+async function loadCards() {
+  const select = $("pinCard");
+  select.replaceChildren(); state.cards = [];
+  try {
+    const response = await api("/v1/cards"); state.cards = response.cards || [];
+    for (const card of state.cards) { const option = node("option", `${card.id} · ${displayValue(card.status)}`); option.value = card.id; select.append(option); }
+    $("pinButton").disabled = !state.cards.length;
+  } catch (error) { $("pinButton").disabled = true; addBubble("error", `卡片暂不可用：${error.message}`); }
+}
+function connectionState() {
+  const offline = navigator.onLine === false;
+  $("offlineNotice").hidden = !offline;
+  document.querySelectorAll('button, .composer input').forEach(control => {
+    if (offline) { control.dataset.offlineDisabled = String(control.disabled); control.disabled = true; }
+    else if (control.dataset.offlineDisabled != null) { control.disabled = control.dataset.offlineDisabled === "true"; delete control.dataset.offlineDisabled; }
+  });
+}
+window.addEventListener("online", connectionState);
+window.addEventListener("offline", connectionState);
+connectionState();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/app/sw.js", {scope:"/app/"}).catch(() => {});
