@@ -479,7 +479,7 @@ class BusinessPlanService:
             else:
                 assurance = "none"
         if assurance == "mfa":
-            DeviceService(self.database).issue_otp(user_id, receipt_id)
+            DeviceService(self.database).issue_otp(user_id, receipt_id, receipt.action_hash)
             return {"plan_id": plan_id, "status": "awaiting_mfa", "receipt_id": receipt_id,
                     "assurance": "mfa"}
         return self.execute_plan(user_id, plan_id, receipt_id, display_hash)
@@ -496,7 +496,7 @@ class BusinessPlanService:
             if plan.status != "awaiting_mfa":
                 raise DomainError("PLAN_STATE_INVALID")
             display_hash = receipt.display_hash
-        DeviceService(self.database).verify(user_id, otp, receipt.id)
+        DeviceService(self.database).verify(user_id, otp, receipt.id, receipt.action_hash)
         with self.database.sessions.begin() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is None or plan.status != "awaiting_mfa":

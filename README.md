@@ -18,7 +18,7 @@
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、M3安全红队与M4发布材料仍需独立实测。逐项证据见 docs/M2-M3-STATUS.md。
+AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、真实环境红队与M4发布材料仍需独立实测。逐项证据见 docs/M2-M3-STATUS.md。M3 本地安全门禁已通过，验证与原始报告见 [M3 本地验收证据](docs/M3-LOCAL-EVIDENCE.md)。
 
 ## 本地运行
 
@@ -46,6 +46,8 @@ POST /v1/capabilities/Q01
 ```powershell
 python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
 ```
+
+本地 M3 页面：评测面板 `/app/eval.html`，模拟手机 `/app/device.html`，坐席工作台 `/app/staff.html`。管理员用 `/admin/v1/devices/pairing-code` 签发一次性配对码，在模拟手机配对后接收 OTP；坐席使用独立的 `AGENTBANK_STAFF_TOKEN`。冷静期内可在 PWA 查看剩余时间或取消，期满后必须再次验证。
 
 ## 双实例部署
 

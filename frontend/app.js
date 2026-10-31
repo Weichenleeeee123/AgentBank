@@ -56,6 +56,33 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     }
     bubble.append(actions);
   }
+  const transferState = data?.transfer_result;
+  if (transferState?.status === "cooling_required") {
+    const actions = node("div", "", "card-actions");
+    const release = node("button", "查看冷静期并重新验证");
+    release.onclick = async () => {
+      try {
+        const cooling = await api(`/v1/cooling/${encodeURIComponent(transferState.operation_id)}`);
+        if (cooling.remaining_seconds > 0) {
+          addBubble("risk", `冷静期尚余 ${Math.ceil(cooling.remaining_seconds / 60)} 分钟，资金尚未转出。`);
+          return;
+        }
+        await api(`/v1/cooling/${encodeURIComponent(cooling.cooling_id)}/release`, {
+          method: "POST", body: JSON.stringify({reconfirmed: true, action_hash: cooling.action_hash,
+            plan_revision: cooling.plan_revision})});
+        if (data?.direct_form) await verifyDirect(recordId); else await verify(recordId);
+      } catch (error) { addBubble("error", error.message); }
+    };
+    const cancel = node("button", "取消并释放资金", "ghost");
+    cancel.onclick = async () => {
+      try {
+        await api(`/v1/cooling/${encodeURIComponent(transferState.operation_id)}/cancel`, {method: "POST"});
+        actions.replaceChildren(node("span", "已取消，资金占用已释放。"));
+      } catch (error) { addBubble("error", error.message); }
+    };
+    actions.append(release, cancel);
+    bubble.append(actions);
+  }
   $("messages").append(bubble);
   bubble.scrollIntoView?.({behavior: "smooth"});
 }

@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from agentbank.clock import utc_now_naive
-from agentbank.db import Challenge, Database, Device, PairingCode, SecurityLock
+from agentbank.db import Challenge, Database, Device, PairingCode, SecurityLock, ReceiptRecord
+from agentbank.audit.store import PersistentAudit
 from agentbank.errors import DomainError
 
 
@@ -36,7 +37,7 @@ class DeviceService:
         return code
 
     def redeem_pairing_code(self, code: str) -> str:
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             pairing = session.scalar(select(PairingCode).where(PairingCode.code_hash == _hash(code),
                                                                PairingCode.consumed.is_(False)))
             if pairing is None or pairing.expires_at <= utc_now_naive():
@@ -45,11 +46,20 @@ class DeviceService:
             raw = secrets.token_urlsafe(32)
             session.add(Device(id=f"dev_{uuid.uuid4().hex}", user_id=pairing.user_id,
                                token_hash=_hash(raw), paired_at=utc_now_naive()))
+            PersistentAudit(self.database).append(session, f"trace_{pairing.id}", pairing.user_id,
+                                                  "device.paired", {"pairing_id": pairing.id})
             return raw
 
     def issue_otp(self, user_id: str, receipt_id: str, action_hash: str = "") -> str:
         code = f"{secrets.randbelow(1_000_000):06d}"
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
+            receipt = session.get(ReceiptRecord, receipt_id)
+            if receipt is not None:
+                if receipt.subject_id != user_id or receipt.status != "pending":
+                    raise DomainError("RECEIPT_INVALID")
+                if action_hash and action_hash != receipt.action_hash:
+                    raise DomainError("OTP_ACTION_MISMATCH")
+                action_hash = receipt.action_hash
             session.add(Challenge(id=f"ch_{uuid.uuid4().hex}", user_id=user_id, receipt_id=receipt_id,
                                   action_hash=action_hash, code_hash=_hash(code), delivery_code=code,
                                   expires_at=utc_now_naive() + timedelta(minutes=5)))
@@ -89,25 +99,14 @@ class DeviceService:
     def record_otp_failure(self, user_id: str, reason: str = "otp_failure",
                            now: datetime | None = None) -> bool:
         current = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
-        window_start = current - timedelta(minutes=10)
-        with self.database.sessions.begin() as session:
-            lock = session.get(SecurityLock, user_id)
-            if lock is None or lock.first_failed_at < window_start:
-                lock = SecurityLock(user_id=user_id, locked_until=current,
-                                    failed_attempts=0, first_failed_at=current, reason=reason)
-                session.add(lock)
-                session.flush()
-            lock.failed_attempts += 1
-            lock.reason = reason
-            if lock.failed_attempts >= 3:
-                lock.locked_until = current + timedelta(minutes=15)
-            return lock.locked_until > current
+        with self.database.atomic() as session:
+            return self._record_otp_failure_in_session(session, user_id, reason, current)
 
     def verify(self, user_id: str, code: str, receipt_id: str | None = None,
                action_hash: str | None = None) -> Challenge:
         failure: str | None = None
         verified: Challenge | None = None
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             current = utc_now_naive()
             lock = session.get(SecurityLock, user_id)
             if lock is not None and lock.locked_until > current:
@@ -130,6 +129,10 @@ class DeviceService:
                     failure = "OTP_INVALID"
                 else:
                     challenge.consumed = True
+                    challenge.delivery_code = None
+                    if lock is not None:
+                        lock.failed_attempts = 0
+                        lock.first_failed_at = current
                     session.flush()
                     verified = challenge
         if failure is not None:
@@ -143,11 +146,14 @@ class DeviceService:
                                         current: datetime) -> bool:
         lock = session.get(SecurityLock, user_id)
         window_start = current - timedelta(minutes=10)
-        if lock is None or lock.first_failed_at < window_start:
+        if lock is None:
             lock = SecurityLock(user_id=user_id, locked_until=current,
                                 failed_attempts=0, first_failed_at=current, reason=reason)
             session.add(lock)
-            session.flush()
+        elif lock.first_failed_at < window_start:
+            lock.first_failed_at = current
+            lock.failed_attempts = 0
+            lock.locked_until = current
         lock.failed_attempts += 1
         lock.reason = reason
         if lock.failed_attempts >= 3:

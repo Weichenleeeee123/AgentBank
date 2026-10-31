@@ -182,7 +182,8 @@ class CapabilityService:
         if capability_id == "C07" and payload.get("action") == "unfreeze" and payload.get("assurance") != "mfa":
             raise DomainError("MFA_REQUIRED")
         read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"} or (capability_id == "T05" and payload.get("action") in {"preview", "status"})
-        protective = capability_id in {"C02", "C03", "C07", "X05"}
+        with self.database.sessions() as policy_session:
+            protective = self._is_protective(policy_session, capability_id, payload)
         if not read_only and not protective and self.breaker.is_locked(user_id):
             with self.database.sessions.begin() as session:
                 self.audit.append(session, f"trace_security_{uuid.uuid4().hex}", user_id, "security.breaker.blocked",
@@ -229,6 +230,8 @@ class CapabilityService:
                 raise DomainError("RECEIPT_REPLAYED")
             data = json.loads(record.data_json)
             safe_payload = dict(data["payload"])
+            self.breaker.require_write(session, user_id,
+                                       protective=record.capability_id != "X05" and self._is_protective(session, record.capability_id, safe_payload))
             receipt: ReceiptRecord | None = None
             if data.get("assurance") == "mfa" and data.get("receipt_id"):
                 receipt = session.get(ReceiptRecord, receipt_id)
@@ -292,6 +295,8 @@ class CapabilityService:
             if receipt.action_hash != action_hash_value or receipt.display_hash != display_hash_value:
                 raise DomainError("HASH_MISMATCH")
             assurance = data.get("assurance", "confirm")
+            self.breaker.require_write(session, user_id,
+                                       protective=self._is_protective(session, record.capability_id, data.get("payload", {})))
             capability_id = record.capability_id
             idempotency_key = record.idempotency_key
             if capability_id not in {"T01", "T02", "T03"}:
@@ -690,7 +695,24 @@ class CapabilityService:
         digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return digest, digest
 
+    @staticmethod
+    def _is_protective(session: Any, capability_id: str, payload: dict[str, Any]) -> bool:
+        if capability_id == "C03" or capability_id == "X05":
+            return True
+        if capability_id == "C07":
+            return bool(payload.get("action", "freeze") != "unfreeze")
+        if capability_id == "C02":
+            card = session.get(Card, str(payload.get("card_id", "card_001")))
+            return bool(card is not None and int(payload.get("limit_minor", card.limit_minor)) <= card.limit_minor)
+        return False
+
     def _dispatch(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
+        from agentbank.security.tool_breaker import guarded_call
+        return guarded_call(self.database, capability_id,
+                            lambda: self._dispatch_handler(user_id, capability_id, payload, idempotency_key),
+                            read_only=capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"})
+
+    def _dispatch_handler(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         if capability_id == "Q01":
             account = self._account(user_id)
             return {"account_id": account.id, "ledger_balance_minor": account.ledger_balance_minor,

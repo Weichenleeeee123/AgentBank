@@ -4,11 +4,11 @@
 
 ## 当前开发阶段
 
-本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、自由生成DAG与只读前置事实解析、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 全量通过、evaluation 227/227、Ruff/Mypy通过。本轮已补齐 M3 冷静期 action/revision 绑定、OTP 用户级锁定、设备边界、DLP/片段防伪造、审计末尾 checkpoint 和自测未授权记账门禁。本轮仍不把模拟设备、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料当作真实生产证据。
+本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、自由生成DAG与只读前置事实解析、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 538 passed、evaluation 227/227、Ruff/Mypy通过。本轮已补齐 M3 冷静期 action/revision 绑定、OTP 用户级锁定、设备边界、DLP/片段防伪造、审计末尾 checkpoint 和自测未授权记账门禁。本轮仍不把模拟设备、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料当作真实生产证据。
 
 六个业务集群的边界用例与主要不变量见 docs/M2-COVERAGE.md；PLAN §11 boundary fixtures 与99条CAP case的代码/测试/版本追溯由 docs/M2-CAP-TRACEABILITY.md 及 executable manifest提供。
 
-M2的阶段内本地门禁已经通过，当前进入 M3 恢复与安全闭环。M3 的本地安全/恢复测试和评测矩阵已通过；外部租户、生产部署和M4发布物仍各自验收，不因本地模拟通过而视为线上完成。
+M2 的阶段内本地门禁已经通过；M3 本地安全收口证据见 docs/M3-LOCAL-EVIDENCE.md。M3 的本地安全/恢复测试和评测矩阵已通过；外部租户、生产部署和M4发布物仍各自验收，不因本地模拟通过而视为线上完成。
 
 99 个 CAP journey 已由 `docs/M2-CAP-TRACEABILITY.md` 逐项绑定到 normal、colloquial、boundary/recovery 分支；这证明本地确定性验收闭环，不等同于真实 provider 联调或 M4 发布完成。
 
@@ -29,7 +29,7 @@ M2的阶段内本地门禁已经通过，当前进入 M3 恢复与安全闭环�
 ## M3 安全与恢复入口
 
 - `FraudDetector`：`high / medium / low / unknown`，高风险在转账提交前拒绝，中风险创建真实时间冷静期。
-- `POST /v1/cooling/{cooling_id}/release`：冷静期过期后才允许带外二次确认放行。
+- `POST /v1/cooling/{cooling_id}/release`：冷静期到期后重新确认，签发新 receipt/OTP，完成 MFA 后提交；取消释放资金。
 - `CircuitBreaker`：30 分钟内同一用户累计 3 次安全拦截后锁定普通写操作，保护性操作仍可执行。
 - `SagaRunner`：订单部分失败时执行已完成步骤的补偿，并返回 `partially_completed`。
 - `UnknownRecoveryService`：unknown 结果转为 processing，保持原幂等键，不重复产生副作用。
@@ -46,7 +46,7 @@ python -m mypy backend/agentbank
 python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
 ```
 
-最近一次结果：全量 pytest 通过；Ruff 通过；Mypy 通过；评测矩阵 `227/227` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
+最近一次结果：全量 pytest 538 passed；Ruff 通过；Mypy 通过；评测矩阵 `227/227` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
 
 ## M2 分阶段提交证据
 

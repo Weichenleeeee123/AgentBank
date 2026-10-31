@@ -322,3 +322,10 @@ git add docs/M3-COVERAGE.md docs/M2-M3-STATUS.md docs/security-self-eval.md
 git commit -m "docs: record M3 security closure evidence"
 ```
 
+
+
+## Execution record — 2026-10-31
+
+Tasks 1–7 were executed inline in `codex/m3-security-closure`. The original implementation outline was refined after negative tests exposed gaps: cooling now reserves funds and signs a new short-lived MFA receipt; transfer MFA rechecks risk and hashes; authenticated API forgery automatically feeds U17; U18 applies only to infrastructure failures; external HMAC audit anchors survive database-only truncation; SEC metrics come from the actual per-case ledger rather than the host database.
+
+Final verification: 538 pytest tests passed, Ruff and Mypy passed, 227/227 evaluation cases passed, eight SEC categories each contain ten cases, HTTP self-test and report reload passed, Node syntax checks passed, and Compose YAML parsed. Exact commands, measured performance, remaining simulation boundaries, and raw evidence are in `docs/M3-LOCAL-EVIDENCE.md` and `docs/evidence/m3-local/`. No file deletion was performed; the external worktree is preserved.

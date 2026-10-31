@@ -66,8 +66,15 @@ def test_cooling_release_api_requires_reconfirmation(tmp_path: Path) -> None:
         cooling.expires_at = utc_now_naive() - timedelta(seconds=1)
     released = client.post(f"/v1/cooling/{cooling_id}/release", headers=headers, json={"reconfirmed": True})
     assert released.status_code == 200
-    assert released.json()["status"] == "succeeded"
-    assert released.json()["operation_id"]
+    assert released.json()["status"] == "mfa_required"
+    from agentbank.auth.devices import DeviceService
+    device = DeviceService(app.state.database)
+    device_token = device.register("user_001")
+    code = device.inbox(device_token)[0]["code"]
+    settled = client.post(f"/v1/plans/{prepared['plan_id']}/verify", headers=headers, json={"otp": code})
+    assert settled.status_code == 200
+    assert settled.json()["status"] == "succeeded"
+    assert settled.json()["ledger_entry_ids"]
 
 
 def test_admin_progresses_due_jobs_and_investments(tmp_path: Path, monkeypatch) -> None:

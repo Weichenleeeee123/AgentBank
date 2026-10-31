@@ -11,11 +11,12 @@ from agentbank.contracts import CapabilityResult
 from agentbank.db import ConversationReference, ConversationState, Database
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.security.fragments import ReplyFragmentChecker
+from agentbank.security.dlp import redact_text
 from agentbank.agent.intent import IntentParser, ParsedIntent
 from agentbank.llm.gateway import LLMGateway
 from agentbank.tools import INPUT_FIELDS
 from agentbank.workflow.recovery import HandoffService
-from agentbank.security.fraud import FraudDetector, FraudLevel
+from agentbank.security.fraud import FraudDetector, FraudLevel, record_risk
 
 
 class AgentResponse:
@@ -43,6 +44,9 @@ class AgentOrchestrator:
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
+        if re.search(r"(?i)(?:otp|验证码)\s*[:：]?\s*\d{6}", text) or re.fullmatch(r"\s*\d{6}\s*", text):
+            return AgentResponse(kind="clarification", intent="security",
+                                 message="验证码已脱敏。请只在 App 专用验证表单中输入，不要发送到聊天。")
         latest_prepared = self._latest_prepared(user_id, conversation_id)
         if latest_prepared is not None and any(token in text for token in ("别转", "取消", "算了", "不要转")):
             with self.database.sessions() as session:
@@ -60,6 +64,12 @@ class AgentOrchestrator:
             return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
                                  record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
         parsed = self.parser.parse(text)
+        rules_risk = FraudDetector().evaluate(" ".join(recent_messages), relation={}, behavior={})
+        record_risk(self.database, user_id, rules_risk.level.value)
+        if rules_risk.level is FraudLevel.high:
+            case = HandoffService(self.database).open(user_id, "transfer", "U07")
+            return AgentResponse(kind="error", intent="transfer", data={"reason_code": "FRAUD_REVIEW_REQUIRED",
+                                 "handoff_case_id": case.id}, message="疑似诱导付款，本次未执行。请联系官方人工核实。")
         pending = self._load_pending(user_id, conversation_id)
         safe_context: dict[str, Any]
         if pending is not None:
@@ -169,6 +179,10 @@ class AgentOrchestrator:
             rules = FraudDetector().evaluate("转账 " + " ".join(recent_messages), relation={}, behavior={})
             fraud = (self.llm.classify_fraud(text, user_id=user_id, recent_user_messages=recent_messages)
                      if self.llm.primary is not None else {"category": "unknown", "confidence": 0.0})
+            if self.llm.primary is not None and fraud.get("category") == "unknown":
+                record_risk(self.database, user_id, "unknown")
+            elif self.llm.primary is not None and fraud.get("category") != "safe":
+                record_risk(self.database, user_id, "high")
             fraud_confidence = fraud.get("confidence")
             if not isinstance(fraud_confidence, (int, float)) or isinstance(fraud_confidence, bool):
                 fraud_confidence = 0.0
@@ -283,9 +297,9 @@ class AgentOrchestrator:
         return result.data
 
     def _store_user_message(self, user_id: str, conversation_id: str, text: str) -> list[str]:
-        stored_text = text
+        stored_text = redact_text(text)
         if re.search(r"(?:PIN|密码|口令)", text, re.IGNORECASE):
-            stored_text = re.sub(r"(?<!\d)\d{4}(?!\d)", "[REDACTED]", text)
+            stored_text = re.sub(r"(?<!\d)\d{4}(?!\d)", "[REDACTED]", stored_text)
         with self.database.sessions.begin() as session:
             state = session.get(ConversationState, (user_id, conversation_id))
             messages = json.loads(state.recent_user_messages_json) if state is not None else []
@@ -498,7 +512,11 @@ class AgentOrchestrator:
         else:
             result = self.capabilities.confirm_capability(user_id, record_id, receipt_id,
                                                           str(data.get("action_hash", "")), display_hash)
-        if result.status == "awaiting_mfa":
+        if result.status == "cooling_required":
+            return AgentResponse(kind="risk", intent="transfer", capability_id=result.capability_id,
+                                 record_id=record_id, data=result.data,
+                                 message="转账进入冷静期，资金已占用但尚未转出。期满后须重新强验证，也可取消并释放资金。")
+        if result.status in {"awaiting_mfa", "mfa_required"}:
             return AgentResponse(kind="mfa", intent="transfer" if result.capability_id.startswith("T") else result.capability_id,
                                  capability_id=result.capability_id, record_id=record_id,
                                  display_hash=display_hash, data=result.data,

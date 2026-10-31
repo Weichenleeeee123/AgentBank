@@ -28,7 +28,7 @@ from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, LedgerEntry, Operation, Payee, PlanNodeRecord,
+from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, Payee, PlanNodeRecord,
                           PlanRecord, ReceiptRecord, User, WebImEvent, WebImNonce)
 from agentbank.evals.runner import run_cases
 from agentbank.evals.traceability import build_traceability_artifact
@@ -38,6 +38,7 @@ from agentbank.security.explain import explain_denial
 from agentbank.security.fraud import FraudDetector
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.security.rate_limit import SlidingWindowLimiter
+from agentbank.security.breaker import CircuitBreaker
 from agentbank.workflow.recovery import HandoffService, UnknownRecoveryService
 from agentbank.workflow.planner import BusinessPlanService
 from agentbank.scheduler import BusinessScheduler
@@ -132,6 +133,19 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 await task
 
     app = FastAPI(title="AgentBank", version="0.1.0", lifespan=scheduler_lifespan)
+    public_mode = os.getenv("AGENTBANK_ENV", "eval") == "public"
+
+    @app.middleware("http")
+    async def public_boundary(request: Request, call_next: Any) -> Any:
+        if public_mode and request.url.path.startswith("/admin/"):
+            return JSONResponse(status_code=403, content={"code": "ADMIN_DISABLED"})
+        if request.method == "POST" and (request.url.path.endswith("/messages") or request.url.path.startswith("/v1/im/")):
+            try:
+                app.state.ip_limiter.check(request.client.host if request.client else "unknown")
+            except DomainError:
+                return JSONResponse(status_code=429, content={"code": "RATE_LIMITED"})
+        return await call_next(request)
+
     app.state.database = database
     app.state.transfer = transfer
     app.state.capabilities = capabilities
@@ -143,6 +157,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     app.state.webim_events = set()
     app.state.webim_nonces = {}
     app.state.message_limiter = SlidingWindowLimiter()
+    app.state.ip_limiter = SlidingWindowLimiter()
     app.state.feishu = FeishuAdapter(os.getenv("AGENTBANK_FEISHU_SECRET", "development-feishu-secret"))
     frontend_root = Path(__file__).resolve().parents[3] / "frontend"
     if frontend_root.exists():
@@ -159,6 +174,17 @@ def create_app(database_url: str | None = None) -> FastAPI:
     @app.exception_handler(DomainError)
     async def domain_error_handler(_request: Request, error: DomainError) -> JSONResponse:
         status = 409 if error.code in {"HASH_MISMATCH", "RECEIPT_REPLAYED", "DAILY_TOTAL_OVER_1000", "MFA_REQUIRED", "WEBIM_REPLAYED"} else 400
+        if error.code in {"HASH_MISMATCH", "NOT_OWNER", "CAPABILITY_INPUT_UNKNOWN_FIELD", "CAPABILITY_NOT_REGISTERED"}:
+            authorization = _request.headers.get("Authorization", "")
+            if authorization.startswith("Bearer "):
+                try:
+                    subject = _verify(authorization[7:], secret)
+                except DomainError:
+                    pass
+                else:
+                    CircuitBreaker(database).record_block(subject, error.code)
+        if error.code == "RATE_LIMITED":
+            status = 429
         reason = error.code
         return JSONResponse(status_code=status, content={"code": error.code, "explanation": explain_denial(reason)})
 
@@ -461,7 +487,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
                                               behavior=dict(payload.get("behavior", {})),
                                               classifier_failed=bool(payload.get("classifier_failed", False)))
         return {"level": assessment.level.value, "reason_codes": assessment.reason_codes,
-                "confidence": assessment.confidence, "signals": assessment.signals}
+                "next_step": "请通过官方渠道核实风险，勿在聊天中发送验证码。"}
 
     @app.post("/v1/handoffs")
     def open_handoff(payload: dict[str, str], user_id: str = Depends(current_user)) -> dict[str, str]:
@@ -489,6 +515,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/plans/{plan_id}/verify")
     def verify_transfer(plan_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id))
+            if node is not None and node.tool != "transfer.create":
+                return plans.verify_plan(user_id, plan_id, payload.otp)
         result = transfer.verify(user_id, plan_id, payload.otp)
         return {"operation_id": result.operation_id, "status": result.status, "amount_minor": result.amount_minor,
                 "ledger_entry_ids": result.ledger_entry_ids, "error_code": result.error_code}
@@ -520,6 +550,22 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 "operation_id": result.operation_id, "amount_minor": result.amount_minor,
                 "ledger_entry_ids": result.ledger_entry_ids,
                 "reconfirmed": bool(payload.get("reconfirmed", False))}
+
+    @app.get("/v1/cooling/{cooling_id}")
+    def get_cooling(cooling_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            cooling = session.get(CoolingPeriod, cooling_id)
+            if cooling is None or cooling.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            return {"cooling_id": cooling.id, "plan_id": cooling.plan_id, "status": cooling.status,
+                    "expires_at": cooling.expires_at.isoformat()+"Z", "action_hash": cooling.action_hash,
+                    "plan_revision": cooling.plan_revision,
+                    "remaining_seconds": max(0, int((cooling.expires_at-datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds()))}
+
+    @app.post("/v1/cooling/{cooling_id}/cancel")
+    def cancel_cooling(cooling_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
+        transfer.cancel_cooling(user_id, cooling_id)
+        return {"cooling_id": cooling_id, "status": "cancelled"}
 
     @app.get("/device/v1/inbox")
     def device_inbox(x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
@@ -630,10 +676,6 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def execute_plan(plan_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         return plans.execute_plan(user_id, plan_id, str(payload.get("receipt_id", "")), str(payload.get("display_hash", "")))
 
-    @app.post("/v1/plans/{plan_id}/verify")
-    def verify_plan(plan_id: str, payload: VerifyRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
-        return plans.verify_plan(user_id, plan_id, payload.otp)
-
     @app.post("/v1/plans/{plan_id}/pause")
     def pause_plan(plan_id: str, user_id: str = Depends(current_user)) -> dict[str, str]:
         return plans.pause(user_id, plan_id)
@@ -687,8 +729,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 response = agent.confirm(callback_user, str(callback_meta["record_id"]),
                                          str(payload.get("display_hash", callback_meta.get("display_hash", ""))),
                                          str(payload.get("receipt_id", callback_meta.get("receipt_id", ""))))
+                if bool(payload.get("group", False)):
+                    return {"event_id": event_id, "type": "generic_status", "message": "请在 App 查看结果。"}
                 return {"event_id": event_id, "type": response.kind, **response.model_dump()}
             return {"event_id": event_id, "type": "callback_ack", "status": "accepted", "record_id": callback_meta.get("record_id")}
+        app.state.message_limiter.check(user_id)
         text = str(payload.get("text", ""))
         response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
@@ -713,6 +758,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         app.state.message_limiter.check(user_id)
         response = agent.handle(user_id, conversation_id, str(payload.get("text", "")), "app")
+        transfer.audit.checkpoint_and_verify()
         return {"conversation_id": conversation_id, "type": response.kind, **response.model_dump()}
 
     @app.post("/v1/conversations/{conversation_id}/records/{record_id}/confirm")
@@ -748,42 +794,53 @@ def create_app(database_url: str | None = None) -> FastAPI:
         if report.total == 0:
             raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
         category_counts = Counter(item.kind for item in report.cases)
-        with database.sessions.begin() as session:
-            ledger_ids_before = set(session.scalars(select(LedgerEntry.id)).all())
+        security_cases = [item for item in report.cases if item.kind == "security"]
+        fp_cases = [item for item in report.cases if item.case_id.startswith("FP-")]
+        coverage_ok = (len(security_cases) >= 80 and len(fp_cases) >= 25
+                       and category_counts.get("m3", 0) >= 11
+                       and len({item.evidence.get("category") for item in security_cases}) == 8)
+        ledger_measured = bool(security_cases) and all(
+            item.evidence.get("ledger_checked") is True
+            and isinstance(item.evidence.get("unauthorized_ledger_writes"), int)
+            for item in security_cases)
+        unauthorized = sum(int(item.evidence.get("unauthorized_ledger_writes", 0)) for item in security_cases)
+        with database.atomic() as session:
             transfer.audit.append(session, f"trace_{run_id}", "admin", "security.self_test.completed",
-                                  {"run_id": run_id, "case_total": report.total, "case_passed": report.passed})
-            ledger_ids_after = set(session.scalars(select(LedgerEntry.id)).all())
-            unauthorized_ledger_writes = 0
-            for entry_id in ledger_ids_after - ledger_ids_before:
-                entry = session.get(LedgerEntry, entry_id)
-                if entry is None:
-                    continue
-                operation = session.get(Operation, entry.operation_id)
-                if operation is None or operation.status != "succeeded":
-                    unauthorized_ledger_writes += 1
+                                  {"run_id": run_id, "case_total": report.total, "case_passed": report.passed,
+                                   "ledger_measured": ledger_measured, "unauthorized_ledger_writes": unauthorized})
         final_checkpoint = transfer.audit.checkpoint_and_verify()
-        audit_verified = transfer.audit.verify()
-        with database.sessions.begin() as session:
-            gate_passed = report.failed == 0 and audit_verified and unauthorized_ledger_writes == 0
-            session.add(DemoRun(id=run_id, status="succeeded" if gate_passed else "failed",
-                                case_total=report.total, case_passed=report.passed))
-        checks = [{"case_id": "EVAL-M3", "passed": report.failed == 0,
-                   "detail": f"{report.passed}/{report.total} cases"},
-                  {"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"},
-                  {"case_id": "SEC-AUDIT-001", "passed": audit_verified,
-                   "detail": "audit chain verified"},
-                  {"case_id": "SEC-LEDGER-001", "passed": unauthorized_ledger_writes == 0,
-                   "detail": f"unauthorized ledger writes: {unauthorized_ledger_writes}"}]
-        return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
-                "failed": sum(1 for check in checks if not check["passed"]), "checks": checks,
-                "case_total": report.total, "case_passed": report.passed,
-                "audit_verified": audit_verified,
-                "unauthorized_ledger_writes": unauthorized_ledger_writes,
-                "final_checkpoint": {"checkpoint_id": final_checkpoint.id if final_checkpoint else None,
-                                      "seq": final_checkpoint.seq if final_checkpoint else None},
-                "case_categories": dict(category_counts),
-                "traceability": build_traceability_artifact(report, project_root),
-                "latency_ms": round((perf_counter() - started) * 1000, 3), "demo_run_id": run_id}
+        audit_verified = transfer.audit.verify() and all(item.evidence.get("audit_verified") for item in security_cases)
+        checks = [{"case_id": "EVAL-M3", "passed": report.failed == 0, "detail": f"{report.passed}/{report.total} cases"},
+                  {"case_id": "SEC-COVERAGE", "passed": coverage_ok, "detail": "8 attack categories, FP and recovery"},
+                  {"case_id": "SEC-AUDIT", "passed": audit_verified, "detail": "case audit chains and final checkpoint"},
+                  {"case_id": "SEC-LEDGER", "passed": ledger_measured and unauthorized == 0,
+                   "detail": f"measured={ledger_measured}, unauthorized={unauthorized}"}]
+        result = {"total": len(checks), "passed": sum(bool(check["passed"]) for check in checks),
+                  "failed": sum(not check["passed"] for check in checks), "checks": checks,
+                  "case_total": report.total, "case_passed": report.passed, "case_categories": dict(category_counts),
+                  "audit_verified": bool(audit_verified), "ledger_measured": ledger_measured,
+                  "unauthorized_ledger_writes": unauthorized if ledger_measured else None,
+                  "final_checkpoint": {"checkpoint_id": final_checkpoint.id if final_checkpoint else None,
+                                       "seq": final_checkpoint.seq if final_checkpoint else None},
+                  "security_cases": [{"case_id": item.case_id, "outcome": item.outcome,
+                                      "evidence": item.evidence, "errors": item.errors} for item in security_cases],
+                  "false_positive": {"total": len(fp_cases), "failed": sum(item.outcome != "passed" for item in fp_cases)},
+                  "traceability": build_traceability_artifact(report, project_root),
+                  "latency_ms": round((perf_counter() - started) * 1000, 3), "demo_run_id": run_id}
+        with database.atomic() as session:
+            session.add(DemoRun(id=run_id, status="succeeded" if result["failed"] == 0 else "failed",
+                                case_total=report.total, case_passed=report.passed,
+                                report_json=json.dumps(result, ensure_ascii=False)))
+        return result
+
+    @app.get("/admin/v1/self-test/{run_id}")
+    def get_self_test(run_id: str, x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        _require_eval_admin(x_admin_token)
+        with database.sessions() as session:
+            run = session.get(DemoRun, run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND"})
+            return cast(dict[str, Any], json.loads(run.report_json))
 
     @app.post("/admin/v1/audit/checkpoint")
     def audit_checkpoint(x_admin_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:

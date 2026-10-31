@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from agentbank.audit.store import PersistentAudit
-from agentbank.db import Database
+from agentbank.db import Database, LLMUsage
+from agentbank.clock import utc_now_naive
 from agentbank.security.dlp import redact_text
 from agentbank.tools import CAPABILITIES, INPUT_FIELDS, READ_ONLY, validate_capability_payload
 from agentbank.planning.validator import PlanValidator
@@ -42,7 +44,21 @@ class LLMGateway:
                  backup: ProviderConfig | None, *, transport: Transport | None = None) -> None:
         self.database, self.primary, self.backup = database, primary, backup
         self.audit = PersistentAudit(database)
-        self.transport = transport or self._http_transport
+        self._provider_transport = transport or self._http_transport
+        self.transport = self._budgeted_transport
+
+    def _budgeted_transport(self, config: ProviderConfig, role: str, payload: dict[str, Any]) -> dict[str, Any]:
+        window = utc_now_naive().strftime("%Y-%m-%dT%H")
+        limit = max(0, int(os.getenv("AGENTBANK_LLM_MAX_CALLS_PER_HOUR", "1000")))
+        with self.database.atomic() as session:
+            usage = session.get(LLMUsage, window)
+            if usage is None:
+                usage = LLMUsage(window=window, calls=0)
+                session.add(usage)
+            if usage.calls >= limit:
+                raise DomainError("LLM_BUDGET_EXHAUSTED")
+            usage.calls += 1
+        return self._provider_transport(config, role, payload)
 
     def classify_intent(self, user_text: str, *, user_id: str,
                         recent_user_messages: list[str] | None = None) -> dict[str, Any]:

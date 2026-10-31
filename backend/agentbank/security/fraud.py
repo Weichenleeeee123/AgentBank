@@ -4,6 +4,23 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from datetime import timedelta
+
+from agentbank.db import Database, RiskContextRecord
+from agentbank.clock import utc_now_naive
+
+
+def record_risk(database: Database, user_id: str, level: str) -> None:
+    if level not in {"high", "medium", "unknown"}:
+        return
+    with database.atomic() as session:
+        existing = session.get(RiskContextRecord, user_id)
+        if existing is None:
+            session.add(RiskContextRecord(user_id=user_id, level=level,
+                                          expires_at=utc_now_naive()+timedelta(minutes=30)))
+        elif existing.expires_at <= utc_now_naive() or existing.level != "high":
+            existing.level = level
+            existing.expires_at = utc_now_naive()+timedelta(minutes=30)
 
 
 class FraudLevel(StrEnum):

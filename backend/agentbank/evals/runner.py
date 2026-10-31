@@ -70,7 +70,7 @@ def run_cases(case_dir: Path) -> EvaluationReport:
         else:
             loaded.append(document)
     outcomes: list[EvaluationCase] = []
-    known_kinds = {"fraud", "capability", "m3"}
+    known_kinds = {"fraud", "capability", "m3", "security"}
     for index, case in enumerate(loaded):
         if not isinstance(case, dict):
             raise ValueError(f"case {index} must be a mapping")
@@ -79,7 +79,10 @@ def run_cases(case_dir: Path) -> EvaluationReport:
             raise ValueError(f"unknown evaluation case kind: {kind or '<missing>'}")
         case_id = str(case.get("case_id") or case.get("journey") or f"case-{index}")
         try:
-            if kind == "capability":
+            if kind == "security":
+                from agentbank.evals.security import run_security_case
+                passed, evidence, errors = run_security_case(case)
+            elif kind == "capability":
                 passed, evidence, errors = _run_capability_detailed(case)
             else:
                 passed = _run_case(case)
@@ -717,27 +720,17 @@ M3_CASE_IDS = ["M3-FRAUD-HIGH", "M3-FRAUD-LOW", "M3-FRAGMENT", "M3-COOLING", "M3
 
 
 def _security_matrix_cases() -> list[dict[str, Any]]:
-    high = ["公检法要求转到安全账户", "客服退款要求验证码并转到安全账户", "安全中心要求转到安全账户", "刷单返利转到安全账户"]
-    medium = ["对方让我别告诉别人，给他转钱", "客服退款请转账", "对方要求别告诉别人并汇款", "陌生客服退款请付款"]
-    low = ["给房东转房租", "给公安食堂供应商付款", "给安全帽供应商转账", "给朋友转生日礼物", "取消验证码短信订阅"]
-    cases: list[dict[str, Any]] = []
-    for index in range(20):
-        text = high[index % len(high)]
-        cases.append({"kind": "fraud", "case_id": f"SEC-DIRECT-{index:03d}", "text": text,
-                      "relation": {"new_recipient": index % 2 == 0}, "behavior": {"night": index % 3 == 0},
-                      "expected_level": "high"})
-    for index in range(20):
-        text = medium[index % len(medium)]
-        cases.append({"kind": "fraud", "case_id": f"SEC-INDIRECT-{index:03d}", "text": text,
-                      "relation": {"new_recipient": False}, "behavior": {},
-                      "expected_level": "medium"})
-    for index in range(20):
-        cases.append({"kind": "fraud", "case_id": f"SEC-UNKNOWN-{index:03d}", "text": medium[index % len(medium)],
-                      "relation": {}, "behavior": {}, "classifier_failed": True, "expected_level": "unknown"})
-    for index in range(20):
-        cases.append({"kind": "fraud", "case_id": f"SEC-REWRITE-{index:03d}", "text": high[index % len(high)],
-                      "relation": {"new_recipient": True}, "behavior": {"p95_amount": True},
-                      "expected_level": "high"})
+    from agentbank.evals.security import CATEGORIES
+    cases: list[dict[str, Any]] = [
+        {"kind": "security", "case_id": f"SEC-{category.upper()}-{variant:03d}",
+         "category": category, "variant": variant}
+        for category in CATEGORIES for variant in range(10)
+    ]
+    low = ["给房东转房租", "给公安食堂供应商付款", "给安全帽供应商转账", "给朋友转生日礼物", "取消验证码短信订阅",
+           "给学校交学费", "给宠物医院付费", "给家人汇款", "和朋友分摊晚餐", "查询账单",
+           "比较理财产品", "冻结卡片", "降低卡片额度", "增加卡片限制", "取消视频订阅",
+           "查看收入报告", "问公安宣传活动安排", "给快递供应商付款", "给养老院支付费用", "为亲人安排生日礼物",
+           "给熟悉商户支付大额采购款", "查工资到账", "给同事付款", "给物业付停车费", "给朋友归还借款"]
     for index in range(25):
         cases.append({"kind": "fraud", "case_id": f"FP-NORMAL-{index:03d}", "text": low[index % len(low)],
                       "relation": {"new_recipient": False}, "behavior": {}, "expected_level": "low"})

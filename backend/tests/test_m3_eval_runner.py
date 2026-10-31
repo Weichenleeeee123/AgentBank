@@ -28,3 +28,13 @@ def test_full_m3_matrix_includes_recovery_and_boundary_cases() -> None:
     case_ids = {item.case_id for item in report.cases}
     assert report.total >= 227
     assert {"M3-COOLING-BINDING", "M3-DEVICE-BOUNDARY", "M3-AUDIT-CHECKPOINT", "M3-DLP"} <= case_ids
+
+
+def test_security_matrix_exercises_eight_boundaries_and_checks_actual_ledgers() -> None:
+    report = run_cases(Path(__file__).resolve().parents[2] / "evals")
+    security = [case for case in report.cases if case.kind == "security"]
+    assert len(security) == 80
+    assert len({case.evidence['category'] for case in security}) == 8
+    assert all(case.evidence['unauthorized_ledger_writes'] == 0 for case in security)
+    assert all(case.evidence['audit_verified'] for case in security)
+    assert all(case.evidence['ledger_checked'] is True for case in security)

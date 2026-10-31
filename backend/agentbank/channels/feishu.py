@@ -43,5 +43,13 @@ class FeishuAdapter:
     def handle(self, payload: dict[str, Any], signature: str | None, agent: AgentOrchestrator) -> dict[str, Any]:
         self.verify_signature(payload, signature)
         event = self.parse(payload)
+        from agentbank.db import WebImEvent
+        with agent.database.atomic() as session:
+            event_key = f"feishu:{event.event_id}"
+            if session.get(WebImEvent, event_key) is not None:
+                raise DomainError("WEBIM_REPLAYED")
+            session.add(WebImEvent(event_id=event_key, user_id=event.user_id, event_type="feishu"))
         response = agent.handle(event.user_id, event.conversation_id, event.text, "feishu")
+        if bool(payload.get("group", False)):
+            return {"event_id": event.event_id, "type": "generic_status", "message": "请在私聊或 App 查看结果。"}
         return {"event_id": event.event_id, "type": response.kind, **response.model_dump()}

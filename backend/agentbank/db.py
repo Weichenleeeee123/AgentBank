@@ -163,6 +163,8 @@ class CoolingPeriod(Base):
     reconfirm_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="active")
     reconfirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    business_day: Mapped[str] = mapped_column(String(10), default="")
+    held: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class SecurityCounter(Base):
@@ -182,8 +184,23 @@ class SecurityLock(Base):
     reason: Mapped[str] = mapped_column(String(120), default="otp_failure")
 
 
+class LLMUsage(Base):
+    __tablename__ = "llm_usage"
+    window: Mapped[str] = mapped_column(String(16), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class RiskContextRecord(Base):
+    __tablename__ = "risk_contexts"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    level: Mapped[str] = mapped_column(String(16))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class HandoffCase(Base):
     __tablename__ = "handoff_cases"
+    resolution_note: Mapped[str] = mapped_column(Text, default="")
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     operation_type: Mapped[str] = mapped_column(String(120))
@@ -510,6 +527,7 @@ class PairingCode(Base):
 
 class DemoRun(Base):
     __tablename__ = "demo_runs"
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     status: Mapped[str] = mapped_column(String(32), default="created")
     case_total: Mapped[int] = mapped_column(Integer, default=0)
@@ -594,6 +612,8 @@ class Database:
         Base.metadata.create_all(self.engine)
         if self.engine.dialect.name == "sqlite":
             migrations = {
+                "handoff_cases": {"resolution_note": "TEXT NOT NULL DEFAULT ''", "context_json": "TEXT NOT NULL DEFAULT '{}'"},
+                "demo_runs": {"report_json": "TEXT NOT NULL DEFAULT '{}'"},
                 "capability_records": {
                     "request_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
                 },
@@ -601,6 +621,8 @@ class Database:
                     "plan_revision": "INTEGER NOT NULL DEFAULT 1",
                     "action_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
                     "reconfirm_deadline": "DATETIME",
+                    "business_day": "VARCHAR(10) NOT NULL DEFAULT ''",
+                    "held": "BOOLEAN NOT NULL DEFAULT 0",
                 },
                 "challenges": {
                     "action_hash": "VARCHAR(128) NOT NULL DEFAULT ''",

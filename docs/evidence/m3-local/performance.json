@@ -1,0 +1,23 @@
+{
+  "balance": {
+    "iterations": 20,
+    "p50_ms": 23.367,
+    "p95_ms": 37.816
+  },
+  "conversation_no_provider": {
+    "iterations": 20,
+    "p50_ms": 70.021,
+    "p95_ms": 103.133
+  },
+  "transfer_prepare_confirm": {
+    "iterations": 20,
+    "p50_ms": 95.474,
+    "p95_ms": 180.247
+  },
+  "fraud_rules": {
+    "iterations": 100,
+    "p50_ms": 0.001,
+    "p95_ms": 0.002
+  },
+  "self_test_latency_ms": 13510.581
+}

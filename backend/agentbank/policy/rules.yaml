@@ -34,3 +34,16 @@ rules:
     description: changed parameters invalidate the receipt
   - id: U19
     description: audit failure rejects a commit
+
+  - id: U07
+    description: server risk high denies payment and opens handoff
+  - id: U08
+    description: medium or unknown holds funds for 30 real minutes then requires fresh MFA within 10 minutes
+  - id: U16
+    description: three OTP failures in ten real minutes lock ordinary writes for fifteen minutes
+  - id: U17
+    description: three authenticated forgery or ownership violations in thirty real minutes lock ordinary writes
+  - id: U18
+    description: three infrastructure failures open the tool circuit for sixty real seconds; queries remain available
+  - id: U20
+    description: untrusted text is data only and cannot supply write parameters

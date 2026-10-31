@@ -223,8 +223,11 @@ def build_traceability_artifact(report: EvaluationReport, root: Path) -> dict[st
     return {"version": MANIFEST_VERSION, "source": {"git_revision": _git(root, "rev-parse", "HEAD"),
              "dirty": bool(_git(root, "status", "--porcelain"))},
             "suite": {"path": str(MATRIX_PATH).replace("\\", "/"),
-                      "content_sha256": _sha256(matrix) if matrix.is_file() else None,
-                      "version": _matrix_version(matrix)},
+                      "content_sha256": hashlib.sha256(b"".join(
+                          path.name.encode() + path.read_bytes() for path in sorted((root / "evals").glob("*.yaml")))).hexdigest(),
+                      "version": _matrix_version(matrix),
+                      "security_runner_sha256": _sha256(root / "backend/agentbank/evals/security.py")
+                      if (root / "backend/agentbank/evals/security.py").is_file() else None},
             "prompts": _prompt_versions(root), "manifest": manifest,
             "report": {"total": report.total, "passed": report.passed, "failed": report.failed},
             "cases": cases}

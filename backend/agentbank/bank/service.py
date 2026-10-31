@@ -7,15 +7,17 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agentbank.audit.store import PersistentAudit
 from agentbank.auth.devices import DeviceService, _hash
 from agentbank.clock import business_date, utc_now_naive
 from agentbank.contracts import Assurance
-from agentbank.security.fraud import FraudDetector, FraudLevel
+from agentbank.security.fraud import FraudDetector, FraudLevel, record_risk
 from agentbank.security.cooling import CoolingPeriodService
+from agentbank.security.breaker import CircuitBreaker
+from agentbank.workflow.recovery import HandoffService
 from agentbank.db import (
     Account,
     Challenge,
@@ -30,6 +32,7 @@ from agentbank.db import (
     ReceiptRecord,
     Database,
     CoolingPeriod,
+    RiskContextRecord,
 )
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
@@ -144,107 +147,164 @@ class TransferService:
                               {"plan_id": plan_id, "tier": decision.tier_display, "reason_codes": decision.reason_codes})
             return PreparedTransfer(plan_id, receipt_id, display_digest, digest, decision.tier_display, decision.assurance, display)
 
+    def _validate(self, session: Session, user_id: str, plan: PlanRecord,
+                  receipt: ReceiptRecord, node: PlanNodeRecord, *, check_expiry: bool = True) -> dict[str, object]:
+        CircuitBreaker(self.database).require_write(session, user_id)
+        if plan.user_id != user_id or receipt.subject_id != user_id or receipt.plan_id != plan.id:
+            raise DomainError("NOT_OWNER")
+        if receipt.status != "pending":
+            raise DomainError("RECEIPT_REPLAYED")
+        if receipt.plan_revision != plan.revision:
+            raise DomainError("PLAN_REVISION_MISMATCH")
+        if plan.status in {"cancelled", "failed", "paused", "succeeded"}:
+            raise DomainError("PLAN_STATE_INVALID")
+        if node.id not in json.loads(receipt.node_ids_json):
+            raise DomainError("RECEIPT_INVALID")
+        if check_expiry and receipt.expires_at <= utc_now_naive():
+            raise DomainError("RECEIPT_EXPIRED")
+        args: dict[str, object] = json.loads(node.args_json)
+        digest = action_hash(node.tool, args)
+        if digest != receipt.action_hash or digest != plan.action_hash:
+            raise DomainError("HASH_MISMATCH")
+        payee = session.get(Payee, str(args.get("recipient_id", "")))
+        if payee is None or payee.owner_user_id != user_id:
+            raise DomainError("NOT_OWNER")
+        display = [{"label": "收款人", "value": payee.masked_name},
+                   {"label": "金额", "value": f"¥{int(str(args['amount_minor'])) / 100:.2f}"},
+                   {"label": "币种", "value": "人民币"}]
+        if _display_hash(display) != receipt.display_hash or receipt.display_hash != plan.display_hash:
+            raise DomainError("HASH_MISMATCH")
+        return args
+
+    def _risk_gate(self, session: Session, user_id: str, plan: PlanRecord,
+                   receipt: ReceiptRecord, node: PlanNodeRecord,
+                   args: dict[str, object]) -> TransferResult | None:
+        assessment = self.fraud.evaluate(str(args.get("memo") or ""), relation={}, behavior={})
+        context = session.get(RiskContextRecord, user_id)
+        level = assessment.level
+        if context is not None and context.expires_at > utc_now_naive():
+            if context.level == "high" or level != FraudLevel.high:
+                level = FraudLevel(context.level)
+        cooling = session.scalar(select(CoolingPeriod).where(CoolingPeriod.plan_id == plan.id,
+                                                             CoolingPeriod.status == "active"))
+        if level is FraudLevel.high:
+            if cooling is not None:
+                self._release_hold(session, cooling, args)
+                cooling.status = "invalidated"
+            plan.status = "failed"
+            receipt.status = "invalidated"
+            HandoffService(self.database).open(user_id, "transfer", "U07")
+            self.audit.append(session, f"trace_{plan.id}", user_id, "security.fraud.blocked",
+                              {"level": "high", "reason_codes": ["U07"]})
+            return TransferResult("", "rejected", 0, [], "FRAUD_HIGH")
+        if cooling is not None:
+            if cooling.action_hash != plan.action_hash or cooling.plan_revision != plan.revision:
+                raise DomainError("ACTION_CHANGED")
+            if cooling.reconfirmed_at is not None and cooling.reconfirm_deadline is not None:
+                if utc_now_naive() <= cooling.reconfirm_deadline and receipt.assurance == "mfa":
+                    return None
+            return TransferResult(cooling.id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
+        if level in {FraudLevel.medium, FraudLevel.unknown}:
+            record_risk(self.database, user_id, level.value)
+            account = session.get(Account, str(args["source_account_id"]))
+            amount = int(str(args["amount_minor"]))
+            if account is None or account.user_id != user_id or account.available_minor < amount:
+                raise DomainError("INSUFFICIENT_FUNDS")
+            view = CoolingPeriodService(self.database).start_in_session(
+                session, user_id, plan.id, amount, action_hash=plan.action_hash, plan_revision=plan.revision)
+            session.flush()
+            cooling = session.get(CoolingPeriod, view.id)
+            assert cooling is not None
+            cooling.held = True
+            cooling.business_day = business_date()
+            account.available_minor -= amount
+            self._bucket(session, user_id).pending_minor += amount
+            plan.status = "paused"
+            node.status = "cooling"
+            self.audit.append(session, f"trace_{plan.id}", user_id, "security.cooling.started",
+                              {"cooling_id": view.id, "action_hash": plan.action_hash,
+                               "expires_at": view.expires_at.isoformat()})
+            return TransferResult(view.id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
+        return None
+
     def confirm(self, user_id: str, plan_id: str, receipt_id: str, display_hash: str) -> TransferResult:
-        with self.database.sessions() as session:
-            session.execute(text("BEGIN IMMEDIATE"))
+        with self.database.atomic() as session:
             plan = session.get(PlanRecord, plan_id)
             receipt = session.get(ReceiptRecord, receipt_id)
-            if plan is None or receipt is None or plan.user_id != user_id or receipt.subject_id != user_id:
-                session.rollback()
-                raise DomainError("NOT_OWNER")
-            if receipt.status != "pending":
-                session.rollback()
-                raise DomainError("RECEIPT_REPLAYED")
-            if receipt.display_hash != display_hash or plan.display_hash != display_hash:
-                session.rollback()
-                raise DomainError("HASH_MISMATCH")
-            if receipt.expires_at <= utc_now_naive():
-                session.rollback()
-                raise DomainError("RECEIPT_EXPIRED")
-            if receipt.assurance == Assurance.mfa.value:
-                session.rollback()
-                return TransferResult("", "mfa_required", 0, [], "MFA_REQUIRED")
             node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id))
-            if node is None:
-                session.rollback()
-                raise DomainError("PRECONDITION_FAILED")
-            args = json.loads(node.args_json)
-            if action_hash(node.tool, args) != receipt.action_hash or action_hash(node.tool, args) != plan.action_hash:
-                session.rollback()
+            if plan is None or receipt is None or node is None:
+                raise DomainError("NOT_OWNER")
+            if display_hash != receipt.display_hash:
                 raise DomainError("HASH_MISMATCH")
-            payee_for_display = session.get(Payee, str(args.get("recipient_id", "")))
-            expected_display = _display_hash([{"label": "收款人", "value": payee_for_display.masked_name if payee_for_display else ""},
-                                              {"label": "金额", "value": f"¥{int(args.get('amount_minor', 0)) / 100:.2f}"},
-                                              {"label": "币种", "value": "人民币"}])
-            if expected_display != receipt.display_hash or expected_display != plan.display_hash:
-                session.rollback()
-                raise DomainError("HASH_MISMATCH")
-            assessment = self.fraud.evaluate(str(args.get("memo") or ""), relation={}, behavior={})
-            if assessment.level is FraudLevel.high:
-                self.audit.append(session, f"trace_{plan_id}", user_id, "security.fraud.blocked",
-                                  {"level": assessment.level.value, "reason_codes": assessment.reason_codes})
-                session.commit()
-                raise DomainError("FRAUD_HIGH")
-            if assessment.level is FraudLevel.medium:
-                cooling = CoolingPeriodService(self.database).start_in_session(
-                    session, user_id, plan_id, int(args["amount_minor"]),
-                    action_hash=receipt.action_hash, plan_revision=receipt.plan_revision)
-                self.audit.append(session, f"trace_{plan_id}", user_id, "security.cooling.started",
-                                  {"cooling_id": cooling.id, "expires_at": cooling.expires_at.isoformat(),
-                                   "reason_codes": assessment.reason_codes})
-                session.commit()
-                return TransferResult(cooling.id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
-            bucket = self._bucket(session, user_id)
-            projected = bucket.completed_minor + bucket.pending_minor + int(args["amount_minor"])
-            if projected > 100_000:
-                receipt.assurance = Assurance.mfa.value
-                plan.status = "awaiting_mfa"
-                self._create_challenge(session, user_id, receipt.id, receipt.action_hash)
-                self.audit.append(session, f"trace_{plan_id}", user_id, "policy.escalated",
-                                  {"reason": "DAILY_TOTAL_OVER_1000", "projected_today_minor": projected})
-                session.commit()
-                return TransferResult("", "mfa_required", 0, [], "DAILY_TOTAL_OVER_1000")
-            result = self._commit_transfer(session, user_id, plan, receipt, node, args)
-            session.commit()
-            return result
+            args = self._validate(session, user_id, plan, receipt, node)
+            result = self._risk_gate(session, user_id, plan, receipt, node, args)
+            if result is None:
+                bucket = self._bucket(session, user_id)
+                payee = session.get(Payee, str(args["recipient_id"]))
+                needs_mfa = receipt.assurance == "mfa" or (payee is not None and payee.is_new) or (
+                    bucket.completed_minor + bucket.pending_minor + int(str(args["amount_minor"])) > 100_000)
+                if needs_mfa:
+                    receipt.assurance = "mfa"
+                    plan.status = "awaiting_mfa"
+                    self._create_challenge(session, user_id, receipt.id, receipt.action_hash)
+                    result = TransferResult("", "mfa_required", 0, [], "MFA_REQUIRED")
+                else:
+                    result = self._commit_transfer(session, user_id, plan, receipt, node, args)
+        if result.error_code == "FRAUD_HIGH":
+            raise DomainError("FRAUD_HIGH")
+        if result.status == "succeeded":
+            self.audit.checkpoint_and_verify()
+        return result
 
     def verify(self, user_id: str, plan_id: str, code: str) -> TransferResult:
         with self.database.sessions() as session:
             plan = session.get(PlanRecord, plan_id)
             receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id,
                                                                  ReceiptRecord.status == "pending").order_by(ReceiptRecord.issued_at.desc()))
-            if receipt is None or plan is None or plan.user_id != user_id:
+            node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id))
+            if receipt is None or plan is None or node is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
-            receipt_id = receipt.id
-            action_digest = receipt.action_hash
-        challenge = self.devices.verify(user_id, code, receipt_id, action_digest)
-        with self.database.sessions() as session:
-            session.execute(text("BEGIN IMMEDIATE"))
-            receipt = session.get(ReceiptRecord, challenge.receipt_id)
+            self._validate(session, user_id, plan, receipt, node)
+            receipt_id, action_digest = receipt.id, receipt.action_hash
+        self.devices.verify(user_id, code, receipt_id, action_digest)
+        with self.database.atomic() as session:
+            receipt = session.get(ReceiptRecord, receipt_id)
             plan = session.get(PlanRecord, plan_id)
             node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id))
-            if receipt is None or plan is None or node is None or receipt.plan_id != plan_id or plan.user_id != user_id:
-                session.rollback()
+            if receipt is None or plan is None or node is None:
                 raise DomainError("NOT_OWNER")
-            if receipt.status != "pending":
-                session.rollback()
-                raise DomainError("RECEIPT_REPLAYED")
-            result = self._commit_transfer(session, user_id, plan, receipt, node, json.loads(node.args_json))
-            session.commit()
-            return result
+            args = self._validate(session, user_id, plan, receipt, node)
+            result = self._risk_gate(session, user_id, plan, receipt, node, args)
+            if result is None:
+                result = self._commit_transfer(session, user_id, plan, receipt, node, args)
+        if result.error_code == "FRAUD_HIGH":
+            raise DomainError("FRAUD_HIGH")
+        if result.status == "succeeded":
+            self.audit.checkpoint_and_verify()
+        return result
+
+    @staticmethod
+    def _release_hold(session: Session, cooling: CoolingPeriod, args: dict[str, object]) -> None:
+        if cooling.held:
+            account = session.get(Account, str(args["source_account_id"]))
+            if account is not None:
+                account.available_minor += cooling.amount_minor
+            bucket = session.get(DailyRiskBucket, (cooling.user_id, cooling.business_day))
+            if bucket is not None:
+                bucket.pending_minor -= cooling.amount_minor
+            cooling.held = False
 
     def release_cooling(self, user_id: str, cooling_id: str, *, action_hash_value: str = "",
                         plan_revision: int | None = None,
                         now: datetime | None = None, reconfirmed: bool = False) -> TransferResult:
-        """Reconfirm and commit a transfer that was held by the cooling period."""
-        current = now or datetime.now(timezone.utc)
+        current = _utc_aware(now or datetime.now(timezone.utc))
         with self.database.atomic() as session:
             cooling = session.get(CoolingPeriod, cooling_id)
             if cooling is None or cooling.user_id != user_id:
                 raise DomainError("NOT_OWNER")
             if cooling.status != "active":
                 raise DomainError("COOLING_NOT_ACTIVE")
-            if action_hash_value and cooling.action_hash and action_hash_value != cooling.action_hash:
+            if action_hash_value and action_hash_value != cooling.action_hash:
                 raise DomainError("ACTION_CHANGED")
             if plan_revision is not None and plan_revision != cooling.plan_revision:
                 raise DomainError("ACTION_CHANGED")
@@ -254,24 +314,60 @@ class TransferService:
             if current > _utc_aware(deadline) or not reconfirmed:
                 raise DomainError("COOLING_RECONFIRMATION_REQUIRED")
             plan = session.get(PlanRecord, cooling.plan_id)
-            receipt = session.scalar(select(ReceiptRecord).where(
-                ReceiptRecord.plan_id == cooling.plan_id,
-                ReceiptRecord.status == "pending",
-            ).order_by(ReceiptRecord.issued_at.desc()))
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == cooling.plan_id,
+                                                                 ReceiptRecord.status == "pending"))
             node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == cooling.plan_id))
-            if plan is None or receipt is None or node is None or plan.user_id != user_id:
+            if plan is None or receipt is None or node is None:
                 raise DomainError("RECEIPT_INVALID")
-            if cooling.action_hash and receipt.action_hash != cooling.action_hash:
+            if plan.revision != cooling.plan_revision or plan.action_hash != cooling.action_hash:
                 raise DomainError("ACTION_CHANGED")
-            result = self._commit_transfer(session, user_id, plan, receipt, node, json.loads(node.args_json))
-            cooling.status = "completed"
-            cooling.reconfirmed_at = current.replace(tzinfo=None)
-            return result
+            plan.status = "awaiting_mfa"
+            args = self._validate(session, user_id, plan, receipt, node, check_expiry=False)
+            result = self._risk_gate(session, user_id, plan, receipt, node, args)
+            if result is None or result.error_code != "FRAUD_HIGH":
+                # The old five-minute receipt cannot cover a thirty-minute wait.
+                receipt.status = "invalidated"
+                fresh = ReceiptRecord(id=f"rcp_{uuid.uuid4().hex}", subject_id=user_id, plan_id=plan.id,
+                                      plan_revision=plan.revision, node_ids_json=receipt.node_ids_json,
+                                      action_hash=plan.action_hash, display_hash=plan.display_hash,
+                                      assurance="mfa", issued_at=current.replace(tzinfo=None),
+                                      expires_at=min(current.replace(tzinfo=None)+timedelta(minutes=5), deadline))
+                session.add(fresh)
+                session.flush()
+                cooling.reconfirmed_at = current.replace(tzinfo=None)
+                self._create_challenge(session, user_id, fresh.id, fresh.action_hash)
+                result = TransferResult(cooling.id, "mfa_required", cooling.amount_minor, [], "MFA_REQUIRED")
+                self.audit.append(session, f"trace_{plan.id}", user_id, "security.cooling.reconfirmed",
+                                  {"cooling_id": cooling.id, "receipt_id": fresh.id})
+        if result.error_code == "FRAUD_HIGH":
+            raise DomainError("FRAUD_HIGH")
+        if result.status == "succeeded":
+            self.audit.checkpoint_and_verify()
+        return result
+
+    def cancel_cooling(self, user_id: str, cooling_id: str) -> None:
+        with self.database.atomic() as session:
+            cooling = session.get(CoolingPeriod, cooling_id)
+            if cooling is None or cooling.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            if cooling.status != "active":
+                raise DomainError("COOLING_NOT_ACTIVE")
+            node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == cooling.plan_id))
+            plan = session.get(PlanRecord, cooling.plan_id)
+            if node is None or plan is None:
+                raise DomainError("PLAN_STATE_INVALID")
+            self._release_hold(session, cooling, json.loads(node.args_json))
+            cooling.status = "cancelled"
+            plan.status, node.status = "cancelled", "cancelled"
+            for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan.id)).all():
+                receipt.status = "invalidated"
+            self.audit.append(session, f"trace_{plan.id}", user_id, "security.cooling.cancelled", {"cooling_id": cooling.id})
 
     def commit_scheduled(self, user_id: str, recipient_id: str, amount_minor: int, plan_id: str,
                          node_id: str, idempotency_key: str, *,
                          scheduled_business_date: str | None = None) -> TransferResult:
         with self.database.atomic() as session:
+            CircuitBreaker(self.database).require_write(session, user_id)
             existing = session.scalar(select(Operation).where(Operation.idempotency_key == idempotency_key))
             if existing is not None:
                 return TransferResult(existing.id, existing.status, existing.amount_minor, [], existing.error_code)
@@ -309,7 +405,15 @@ class TransferService:
 
     def _commit_transfer(self, session: Session, user_id: str, plan: PlanRecord, receipt: ReceiptRecord,
                          node: PlanNodeRecord, args: dict[str, object]) -> TransferResult:
+        self._validate(session, user_id, plan, receipt, node)
+        cooling = session.scalar(select(CoolingPeriod).where(CoolingPeriod.plan_id == plan.id,
+                                                             CoolingPeriod.status == "active"))
         amount = int(str(args["amount_minor"]))
+        if cooling is not None:
+            if cooling.reconfirmed_at is None or receipt.assurance != "mfa":
+                raise DomainError("COOLING_PERIOD_ACTIVE")
+            self._release_hold(session, cooling, args)
+            cooling.status = "completed"
         account = session.get(Account, str(args["source_account_id"]))
         if account is None or account.user_id != user_id:
             raise DomainError("NOT_OWNER")
@@ -327,6 +431,7 @@ class TransferService:
                               plan_id=plan.id, node_id=node.id, status="succeeded", amount_minor=amount,
                               recipient_id=str(args["recipient_id"]))
         account.available_minor -= amount
+        account.ledger_balance_minor -= amount
         bucket.completed_minor += amount
         session.add(operation)
         debit_id = f"le_{uuid.uuid4().hex}"
