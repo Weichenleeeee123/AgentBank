@@ -504,13 +504,20 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 "idempotency_key": recovered.idempotency_key}
 
     @app.post("/v1/cooling/{cooling_id}/release")
-    def release_cooling(cooling_id: str, payload: dict[str, bool], user_id: str = Depends(current_user)) -> dict[str, Any]:
+    def release_cooling(cooling_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
         with database.sessions() as session:
             cooling = session.get(CoolingPeriod, cooling_id)
             if cooling is None or cooling.user_id != user_id:
                 raise DomainError("NOT_OWNER")
-        released = CoolingPeriodService(database).release(cooling_id, reconfirmed=bool(payload.get("reconfirmed", False)))
-        return {"cooling_id": cooling_id, "status": "released" if released else "active", "reconfirmed": bool(payload.get("reconfirmed", False))}
+        requested_revision = payload.get("plan_revision")
+        released = CoolingPeriodService(database).release(
+            cooling_id,
+            action_hash=str(payload.get("action_hash", "")),
+            plan_revision=int(requested_revision) if requested_revision is not None else None,
+            reconfirmed=bool(payload.get("reconfirmed", False)),
+        )
+        return {"cooling_id": cooling_id, "status": "completed" if released else "active",
+                "reconfirmed": bool(payload.get("reconfirmed", False))}
 
     @app.get("/device/v1/inbox")
     def device_inbox(x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:

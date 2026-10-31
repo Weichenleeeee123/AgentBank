@@ -149,21 +149,31 @@ class CapabilityService:
                 raise DomainError("MFA_REQUIRED")
             device_token = payload.get("device_token")
             otp = payload.get("otp")
+            security_payload = {key: value for key, value in payload.items()
+                               if key not in {"device_token", "otp", "assurance"}}
+            if capability_id == "X05":
+                expected_action, expected_display = self._loss_report_hashes(
+                    capability_id, str(idempotency_key), str(security_payload.get("card_id", "card_001"))
+                )
+            else:
+                expected_action, expected_display = self._payload_hashes(capability_id, security_payload)
             if self.require_device_mfa and not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
                 record_id = f"cap_{uuid.uuid4().hex}"
-                pending_data = {"payload": self._safe_payload(capability_id, payload), "assurance": "mfa", "challenge_record_id": record_id}
+                pending_data = {"payload": self._safe_payload(capability_id, payload), "assurance": "mfa",
+                                "action_hash": expected_action, "display_hash": expected_display,
+                                "challenge_record_id": record_id}
                 with self.database.sessions.begin() as session:
                     session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
                                                  status="awaiting_mfa", data_json=json.dumps(pending_data, ensure_ascii=False),
                                                  idempotency_key=idempotency_key, request_hash=request_hash))
                 if user_id in self.device_tokens:
-                    DeviceService(self.database).issue_otp(user_id, record_id)
+                    DeviceService(self.database).issue_otp(user_id, record_id, expected_action)
                 return CapabilityResult(capability_id=capability_id, record_id=record_id, status="awaiting_mfa",
                                         data=pending_data, evidence={"audit_event": f"capability.{capability_id}.awaiting_mfa",
                                                                        "idempotency_key": idempotency_key})
             if self.require_device_mfa and not payload.get("_mfa_verified"):
                 DeviceService(self.database).validate_token(user_id, str(device_token))
-                DeviceService(self.database).verify(user_id, str(otp))
+                DeviceService(self.database).verify(user_id, str(otp), None, expected_action)
         if capability_id == "C02":
             with self.database.sessions() as session:
                 card = session.get(Card, str(payload.get("card_id", "card_001")))
@@ -211,7 +221,7 @@ class CapabilityService:
                 expected_action, expected_display = self._payload_hashes(capability_id, payload)
             if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                 raise DomainError("HASH_MISMATCH")
-        DeviceService(self.database).verify(user_id, code, receipt_id)
+        DeviceService(self.database).verify(user_id, code, receipt_id, str(data.get("action_hash", "")) or None)
         with self.database.atomic():
             session = self.database.sessions()
             record = session.get(CapabilityRecord, record_id)
@@ -355,9 +365,9 @@ class CapabilityService:
                                   {"record_id": record_id, "status": status})
                 result = self._result(record)
         if mfa_receipt_id is not None and user_id in self.device_tokens:
-            DeviceService(self.database).issue_otp(user_id, mfa_receipt_id)
+            DeviceService(self.database).issue_otp(user_id, mfa_receipt_id, action_digest)
         elif otp_receipt_id is not None:
-            DeviceService(self.database).issue_otp(user_id, otp_receipt_id)
+            DeviceService(self.database).issue_otp(user_id, otp_receipt_id, str(data.get("action_hash", "")))
         return result
 
     def get(self, user_id: str, record_id: str) -> CapabilityResult:

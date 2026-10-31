@@ -155,9 +155,12 @@ class CoolingPeriod(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     plan_id: Mapped[str] = mapped_column(String(64))
+    plan_revision: Mapped[int] = mapped_column(Integer, default=1)
+    action_hash: Mapped[str] = mapped_column(String(128), default="")
     amount_minor: Mapped[int] = mapped_column(Integer)
     started_at: Mapped[datetime] = mapped_column(DateTime)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
+    reconfirm_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="active")
     reconfirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -168,6 +171,15 @@ class SecurityCounter(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     reason: Mapped[str] = mapped_column(String(120))
     occurred_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class SecurityLock(Base):
+    __tablename__ = "security_locks"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    locked_until: Mapped[datetime] = mapped_column(DateTime)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    first_failed_at: Mapped[datetime] = mapped_column(DateTime)
+    reason: Mapped[str] = mapped_column(String(120), default="otp_failure")
 
 
 class HandoffCase(Base):
@@ -434,6 +446,7 @@ class Challenge(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     receipt_id: Mapped[str] = mapped_column(String(64))
+    action_hash: Mapped[str] = mapped_column(String(128), default="")
     code_hash: Mapped[str] = mapped_column(String(128))
     delivery_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
@@ -580,12 +593,27 @@ class Database:
     def create_schema(self) -> None:
         Base.metadata.create_all(self.engine)
         if self.engine.dialect.name == "sqlite":
-            columns = {column["name"] for column in inspect(self.engine).get_columns("capability_records")}
-            if "request_hash" not in columns:
-                with self.engine.begin() as connection:
-                    connection.exec_driver_sql(
-                        "ALTER TABLE capability_records ADD COLUMN request_hash VARCHAR(128) NOT NULL DEFAULT ''"
-                    )
+            migrations = {
+                "capability_records": {
+                    "request_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
+                },
+                "cooling_periods": {
+                    "plan_revision": "INTEGER NOT NULL DEFAULT 1",
+                    "action_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
+                    "reconfirm_deadline": "DATETIME",
+                },
+                "challenges": {
+                    "action_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
+                },
+            }
+            with self.engine.begin() as connection:
+                for table, fields in migrations.items():
+                    columns = {column["name"] for column in inspect(self.engine).get_columns(table)}
+                    for name, definition in fields.items():
+                        if name not in columns:
+                            connection.exec_driver_sql(
+                                f"ALTER TABLE {table} ADD COLUMN {name} {definition}"
+                            )
 
 
 def _configure_sqlite(dbapi_connection: Any, _connection_record: Any) -> None:

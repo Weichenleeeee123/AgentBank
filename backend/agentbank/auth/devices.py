@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import secrets
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.orm import Session
 
 from sqlalchemy import select
 
 from agentbank.clock import utc_now_naive
-from agentbank.db import Challenge, Database, Device, PairingCode
+from agentbank.db import Challenge, Database, Device, PairingCode, SecurityLock
 from agentbank.errors import DomainError
 
 
@@ -46,11 +47,11 @@ class DeviceService:
                                token_hash=_hash(raw), paired_at=utc_now_naive()))
             return raw
 
-    def issue_otp(self, user_id: str, receipt_id: str) -> str:
+    def issue_otp(self, user_id: str, receipt_id: str, action_hash: str = "") -> str:
         code = f"{secrets.randbelow(1_000_000):06d}"
         with self.database.sessions.begin() as session:
             session.add(Challenge(id=f"ch_{uuid.uuid4().hex}", user_id=user_id, receipt_id=receipt_id,
-                                  code_hash=_hash(code), delivery_code=code,
+                                  action_hash=action_hash, code_hash=_hash(code), delivery_code=code,
                                   expires_at=utc_now_naive() + timedelta(minutes=5)))
         return code
 
@@ -79,19 +80,76 @@ class DeviceService:
                 raise DomainError("DEVICE_UNAUTHORIZED")
             return device.user_id
 
-    def verify(self, user_id: str, code: str, receipt_id: str | None = None) -> Challenge:
+    def is_user_locked(self, user_id: str, now: datetime | None = None) -> bool:
+        current = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+        with self.database.sessions() as session:
+            lock = session.get(SecurityLock, user_id)
+            return lock is not None and lock.locked_until > current
+
+    def record_otp_failure(self, user_id: str, reason: str = "otp_failure",
+                           now: datetime | None = None) -> bool:
+        current = (now or datetime.now(timezone.utc)).replace(tzinfo=None)
+        window_start = current - timedelta(minutes=10)
         with self.database.sessions.begin() as session:
+            lock = session.get(SecurityLock, user_id)
+            if lock is None or lock.first_failed_at < window_start:
+                lock = SecurityLock(user_id=user_id, locked_until=current,
+                                    failed_attempts=0, first_failed_at=current, reason=reason)
+                session.add(lock)
+                session.flush()
+            lock.failed_attempts += 1
+            lock.reason = reason
+            if lock.failed_attempts >= 3:
+                lock.locked_until = current + timedelta(minutes=15)
+            return lock.locked_until > current
+
+    def verify(self, user_id: str, code: str, receipt_id: str | None = None,
+               action_hash: str | None = None) -> Challenge:
+        failure: str | None = None
+        verified: Challenge | None = None
+        with self.database.sessions.begin() as session:
+            current = utc_now_naive()
+            lock = session.get(SecurityLock, user_id)
+            if lock is not None and lock.locked_until > current:
+                raise DomainError("OTP_LOCKED")
             query = select(Challenge).where(Challenge.user_id == user_id, Challenge.consumed.is_(False))
             if receipt_id is not None:
                 query = query.where(Challenge.receipt_id == receipt_id)
             challenge = session.scalar(query.order_by(Challenge.expires_at.desc()))
-            if challenge is None or challenge.expires_at <= utc_now_naive():
+            if challenge is None or challenge.expires_at <= current:
                 raise DomainError("OTP_EXPIRED")
+            if action_hash is not None and challenge.action_hash and challenge.action_hash != action_hash:
+                raise DomainError("OTP_ACTION_MISMATCH")
             if challenge.attempts >= 3:
-                raise DomainError("LOCKED")
-            challenge.attempts += 1
-            if not secrets.compare_digest(challenge.code_hash, _hash(code)):
-                raise DomainError("OTP_INVALID")
-            challenge.consumed = True
+                self._record_otp_failure_in_session(session, user_id, "challenge_attempt_limit", current)
+                failure = "OTP_LOCKED"
+            else:
+                challenge.attempts += 1
+                if not secrets.compare_digest(challenge.code_hash, _hash(code)):
+                    self._record_otp_failure_in_session(session, user_id, "otp_failure", current)
+                    failure = "OTP_INVALID"
+                else:
+                    challenge.consumed = True
+                    session.flush()
+                    verified = challenge
+        if failure is not None:
+            raise DomainError(failure)
+        if verified is None:
+            raise DomainError("OTP_INVALID")
+        return verified
+
+    @staticmethod
+    def _record_otp_failure_in_session(session: Session, user_id: str, reason: str,
+                                        current: datetime) -> bool:
+        lock = session.get(SecurityLock, user_id)
+        window_start = current - timedelta(minutes=10)
+        if lock is None or lock.first_failed_at < window_start:
+            lock = SecurityLock(user_id=user_id, locked_until=current,
+                                failed_attempts=0, first_failed_at=current, reason=reason)
+            session.add(lock)
             session.flush()
-            return challenge
+        lock.failed_attempts += 1
+        lock.reason = reason
+        if lock.failed_attempts >= 3:
+            lock.locked_until = current + timedelta(minutes=15)
+        return lock.locked_until > current

@@ -15,6 +15,7 @@ from agentbank.auth.devices import DeviceService, _hash
 from agentbank.clock import business_date, utc_now_naive
 from agentbank.contracts import Assurance
 from agentbank.security.fraud import FraudDetector, FraudLevel
+from agentbank.security.cooling import CoolingPeriodService
 from agentbank.db import (
     Account,
     Challenge,
@@ -28,7 +29,6 @@ from agentbank.db import (
     ReceiptConsumption,
     ReceiptRecord,
     Database,
-    CoolingPeriod,
 )
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
@@ -134,7 +134,7 @@ class TransferService:
                                       expires_at=utc_now_naive() + timedelta(minutes=5)))
             session.flush()
             if decision.assurance is Assurance.mfa:
-                self._create_challenge(session, user_id, receipt_id)
+                self._create_challenge(session, user_id, receipt_id, digest)
             self.audit.append(session, f"trace_{plan_id}", user_id, "policy.decided",
                               {"plan_id": plan_id, "tier": decision.tier_display, "reason_codes": decision.reason_codes})
             return PreparedTransfer(plan_id, receipt_id, display_digest, digest, decision.tier_display, decision.assurance, display)
@@ -181,23 +181,20 @@ class TransferService:
                 session.commit()
                 raise DomainError("FRAUD_HIGH")
             if assessment.level is FraudLevel.medium:
-                started = utc_now_naive()
-                cooling_id = f"cool_{uuid.uuid4().hex}"
-                expires = started + timedelta(minutes=30)
-                session.add(CoolingPeriod(id=cooling_id, user_id=user_id, plan_id=plan_id,
-                                          amount_minor=int(args["amount_minor"]), started_at=started,
-                                          expires_at=expires, status="active"))
+                cooling = CoolingPeriodService(self.database).start_in_session(
+                    session, user_id, plan_id, int(args["amount_minor"]),
+                    action_hash=receipt.action_hash, plan_revision=receipt.plan_revision)
                 self.audit.append(session, f"trace_{plan_id}", user_id, "security.cooling.started",
-                                  {"cooling_id": cooling_id, "expires_at": expires.isoformat(),
+                                  {"cooling_id": cooling.id, "expires_at": cooling.expires_at.isoformat(),
                                    "reason_codes": assessment.reason_codes})
                 session.commit()
-                return TransferResult(cooling_id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
+                return TransferResult(cooling.id, "cooling_required", 0, [], "COOLING_PERIOD_REQUIRED")
             bucket = self._bucket(session, user_id)
             projected = bucket.completed_minor + bucket.pending_minor + int(args["amount_minor"])
             if projected > 100_000:
                 receipt.assurance = Assurance.mfa.value
                 plan.status = "awaiting_mfa"
-                self._create_challenge(session, user_id, receipt.id)
+                self._create_challenge(session, user_id, receipt.id, receipt.action_hash)
                 self.audit.append(session, f"trace_{plan_id}", user_id, "policy.escalated",
                                   {"reason": "DAILY_TOTAL_OVER_1000", "projected_today_minor": projected})
                 session.commit()
@@ -207,10 +204,18 @@ class TransferService:
             return result
 
     def verify(self, user_id: str, plan_id: str, code: str) -> TransferResult:
-        challenge = self.devices.verify(user_id, code)
+        with self.database.sessions() as session:
+            plan = session.get(PlanRecord, plan_id)
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id,
+                                                                 ReceiptRecord.status == "pending").order_by(ReceiptRecord.issued_at.desc()))
+            if receipt is None or plan is None or plan.user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            receipt_id = receipt.id
+            action_digest = receipt.action_hash
+        challenge = self.devices.verify(user_id, code, receipt_id, action_digest)
         with self.database.sessions() as session:
             session.execute(text("BEGIN IMMEDIATE"))
-            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.id == challenge.receipt_id))
+            receipt = session.get(ReceiptRecord, challenge.receipt_id)
             plan = session.get(PlanRecord, plan_id)
             node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id))
             if receipt is None or plan is None or node is None or receipt.plan_id != plan_id or plan.user_id != user_id:
@@ -312,9 +317,9 @@ class TransferService:
         return bucket
 
     @staticmethod
-    def _create_challenge(session: Session, user_id: str, receipt_id: str) -> str:
+    def _create_challenge(session: Session, user_id: str, receipt_id: str, action_hash: str = "") -> str:
         code = f"{secrets.randbelow(1_000_000):06d}"
         session.add(Challenge(id=f"ch_{uuid.uuid4().hex}", user_id=user_id, receipt_id=receipt_id,
-                              code_hash=_hash(code), delivery_code=code,
+                              action_hash=action_hash, code_hash=_hash(code), delivery_code=code,
                               expires_at=utc_now_naive() + timedelta(minutes=5)))
         return code
