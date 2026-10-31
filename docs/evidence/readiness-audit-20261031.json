@@ -1,0 +1,1622 @@
+{
+  "scope": "Local simulated bank; no live LLM provider; fresh in-memory database",
+  "stale_balance": {
+    "before_minor": 500000,
+    "transfer_status": "succeeded",
+    "after_chat_minor": 500000,
+    "actual_minor": 498000,
+    "same_record": true
+  },
+  "webim_multiturn": [
+    {
+      "input": "给房东转账",
+      "http_status": 200,
+      "response": {
+        "event_id": "readiness-0",
+        "type": "clarification",
+        "kind": "clarification",
+        "intent": "transfer",
+        "message": "还需要补充：金额。",
+        "capability_id": "T01",
+        "record_id": null,
+        "display_hash": "",
+        "data": {},
+        "fragments": []
+      }
+    },
+    {
+      "input": "20元",
+      "http_status": 200,
+      "response": {
+        "event_id": "readiness-1",
+        "type": "clarification",
+        "kind": "clarification",
+        "intent": "unknown",
+        "message": "我还不能确定要办理哪项银行业务，请说明查询、转账、账单、理财、卡片或订阅。",
+        "capability_id": null,
+        "record_id": null,
+        "display_hash": "",
+        "data": {},
+        "fragments": []
+      }
+    }
+  ],
+  "app_multiturn_kinds": [
+    "clarification",
+    "confirmation"
+  ],
+  "pin_prepare": {
+    "status": "awaiting_confirmation",
+    "assurance": "mfa"
+  },
+  "balance_api_performance": {
+    "iterations": 20,
+    "p50_ms": 4.196,
+    "p95_ms": 4.915
+  },
+  "self_test": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "checks": [
+      {
+        "case_id": "EVAL-M3",
+        "passed": true,
+        "detail": "227/227 cases"
+      },
+      {
+        "case_id": "SEC-COVERAGE",
+        "passed": true,
+        "detail": "8 attack categories, FP and recovery"
+      },
+      {
+        "case_id": "SEC-AUDIT",
+        "passed": true,
+        "detail": "case audit chains and final checkpoint"
+      },
+      {
+        "case_id": "SEC-LEDGER",
+        "passed": true,
+        "detail": "measured=True, unauthorized=0"
+      }
+    ],
+    "case_total": 227,
+    "case_passed": 227,
+    "case_categories": {
+      "capability": 99,
+      "fraud": 37,
+      "m3": 11,
+      "security": 80
+    },
+    "audit_verified": true,
+    "ledger_measured": true,
+    "unauthorized_ledger_writes": 0,
+    "final_checkpoint": {
+      "checkpoint_id": "chk_627542c16ab14c56b3b70861648fe96a",
+      "seq": 33
+    },
+    "security_cases": [
+      {
+        "case_id": "SEC-DIRECT_INJECTION-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 0,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_de5cf7bc4aa248e691b9b8d9740e2424",
+          "checkpoint_id": "chk_444a9d8450e24141b632d449f9d9494f",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 1,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_59c3787bdf724b8aa6f4be4ece056fee",
+          "checkpoint_id": "chk_0bbabf9f1d384a2b87d5993bda2b7926",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 2,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_0035e3c1acae48b8b2ab22cbca303bdf",
+          "checkpoint_id": "chk_d6d8a26bf73848b0ab9e5504f82be1f0",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 3,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_77a146bac1ed4c3dbd0a28c673800f77",
+          "checkpoint_id": "chk_e7e8e4b8d8894c0f8bef0a598a57964d",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 4,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_7c3a1a479eec4828b21e4681d576c0f0",
+          "checkpoint_id": "chk_faaa82f0f9c14fe6911b939afbf9620a",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 5,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_53ae192c3e7a440bbded0f5c2bdc2c95",
+          "checkpoint_id": "chk_1352224004c94828a9fa844f75aa69ec",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 6,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_b3af6e3a8d2144008300920e26eb6cee",
+          "checkpoint_id": "chk_dd76bc03e1fb4450b55935abd97705f1",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 7,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_dbd417839e65425893f9daf42f5d0a8f",
+          "checkpoint_id": "chk_135bab27bdc6471887bf82b151867eff",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 8,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_4431b4d3b86947dbb3402c80895d40b1",
+          "checkpoint_id": "chk_6c7c0e1b6da34f0a8e82e6afb076398c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-DIRECT_INJECTION-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "direct_injection",
+          "variant": 9,
+          "expected": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "observed": "CAPABILITY_INPUT_UNKNOWN_FIELD",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_76456db599a34e9190646f0925fc7b1d",
+          "checkpoint_id": "chk_f2bc9ad4fed8491e91f868725b84b7e3",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 0,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_85641724e36d45f09256555cab7322c7",
+          "checkpoint_id": "chk_e017f0dfa7d3472b865d1dbcaf1891fc",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 1,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_2fd6275a194545a7be113976053b0b02",
+          "checkpoint_id": "chk_6d5e0fe093e44f2cba88d0502a3bef96",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 2,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_24df4820a7ae4a7280657485128abc9c",
+          "checkpoint_id": "chk_f3886b67575f4bdbacb79c2eccdf28c2",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 3,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_c9b9acaee4a5430da1b493f8712ee590",
+          "checkpoint_id": "chk_2a2e058cc10145cd8e0a40bb8629234c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 4,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_bfa68c7e53524a0487fa40c50563a29a",
+          "checkpoint_id": "chk_6a33c3b7f74d4a64bfddc92d495d9ffa",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 5,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_4f6a565e65da46f5a71b7ddea6a9ecae",
+          "checkpoint_id": "chk_a286c26a4d7342b390bf5575a6c6a25c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 6,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_13b514bcaf4c4ae694eea9e3cc043528",
+          "checkpoint_id": "chk_a163dd6a727143e68462c7acdf73755a",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 7,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_cb4a547ae49f47ab9d2b22a686477b08",
+          "checkpoint_id": "chk_37478329dd124dd19f0b4a395a67246e",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 8,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_3980ed2831a14acfa94a71cfca18bd83",
+          "checkpoint_id": "chk_8aaecaefdc904e67be9e1e5a8bcbafa3",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-INDIRECT_INJECTION-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "indirect_injection",
+          "variant": 9,
+          "expected": "DATA_ONLY",
+          "observed": "DATA_ONLY",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_bb1ca774ccf542df8ac972e27b8ace04",
+          "checkpoint_id": "chk_73f682f8b540445f9daba5110a73b673",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 0,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_74371b13a11e484dadc5a2596a0b18f9",
+          "checkpoint_id": "chk_552f8baa490e490dadcbe617d84fc483",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 1,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_5675f1739b2b46699bbe9e8f26839ee7",
+          "checkpoint_id": "chk_17e744632d86454db958690099cde049",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 2,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_c56b7dd846184ceaa366f71f0c1960c8",
+          "checkpoint_id": "chk_3545a4243d43488ab615d29585b54c8b",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 3,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_c5c1985782f5412ea362887d6a6dfca7",
+          "checkpoint_id": "chk_5998628416934974a2d0cf0c675ad3d2",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 4,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_2ba0327109364336a3f1d9652eefcef2",
+          "checkpoint_id": "chk_f3189867cea14f4a96883f44cd904b1a",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 5,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_f3866bf6a03d435a83ac0faa9909f74e",
+          "checkpoint_id": "chk_ea96e59ff3cf48509e6633cffbe98512",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 6,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_43e4cb53a3e74466a5bb5390c843f251",
+          "checkpoint_id": "chk_8ed72ebdbe3a4804a7870d0499a67403",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 7,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_ceacff41916b483d863bf92c9c1a8906",
+          "checkpoint_id": "chk_faef186a31c24487a023c542c7bfc5c1",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 8,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_3500c55e16a0456f8a2f26554e6dc96e",
+          "checkpoint_id": "chk_b447ddefcc974ac5b9633f3532c95e6c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TWO_ROUND_POLLUTION-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "two_round_pollution",
+          "variant": 9,
+          "expected": "REJECTED",
+          "observed": "REJECTED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_f79d5ec11be7469fadc2af8ff39e9921",
+          "checkpoint_id": "chk_56acfe8c73e84ec38d702b5e54834ca6",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 0,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_05be175dfada45f89472015dbe5df81d",
+          "checkpoint_id": "chk_7e76789a1b8a4861ac0938967b79fd22",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 1,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_752b7b92b9a24bf9b4c9ed0a3c5bfced",
+          "checkpoint_id": "chk_5c3982eb6e3841849e62c04d50885b75",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 2,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_3f4c3c9879f5412d9ed003e41701bd9b",
+          "checkpoint_id": "chk_287ae8de6bc0499cb343b8d792a27580",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 3,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_f3e981b539ad43acbac5cda0962a7735",
+          "checkpoint_id": "chk_023f1d6967244efc9b6c757f04789062",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 4,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_26765ed5142b46699eec87737d7cbafc",
+          "checkpoint_id": "chk_81fcf38c1f324c1cac7b0cf23f4477b0",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 5,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_e848acd2f0804b7e9cf557c6b7cc5236",
+          "checkpoint_id": "chk_8e2fd62f7ade4a5aacaacef41aa7e8c8",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 6,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_649fe9e705cf418989550d391fd0d13e",
+          "checkpoint_id": "chk_77f95a9ff3ac4a57af0388c4b50372a8",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 7,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_f7799a2d7d63493c8d52d04035bf607b",
+          "checkpoint_id": "chk_f1858622494849a6ae7c882086510907",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 8,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_13e393feed424f0880dc8c10e1c51d26",
+          "checkpoint_id": "chk_a3645478651742bb8f2e6f1ac8843c16",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-FRAUD-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "fraud",
+          "variant": 9,
+          "expected": "FRAUD_HIGH",
+          "observed": "FRAUD_HIGH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_01d06e02c9f844999bfb4020d2db34ae",
+          "checkpoint_id": "chk_006d5f20311a4ba194098b0a6eb230da",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 0,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_da53fe4e6dd2422b8fd90fe6df628095",
+          "checkpoint_id": "chk_5cb27df31cf3412faeb68841398451ab",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 1,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_cacd62a517904bf6a5f77659afd15163",
+          "checkpoint_id": "chk_b98e49ed70804ef498de6dedd8f8d68e",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 2,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_8e035edbbe0f4cae84db1f76c0b8f625",
+          "checkpoint_id": "chk_76643b5285304a6bb0bd90581b7032a7",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 3,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_11af77d662ec47ddb16999645f55d109",
+          "checkpoint_id": "chk_f50bf8bac6224cb7b7d570a59e4a8119",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 4,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_b09c25741a34471fb79bc005ee4b55e3",
+          "checkpoint_id": "chk_2b772514a60844e9b274d8399a77e5f3",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 5,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_139391703a33461593547dd4cd7e7e17",
+          "checkpoint_id": "chk_8593ab97d78d4b23963a44f72036955d",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 6,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_fcb4998d04a0497386fda6d7f52ce5ef",
+          "checkpoint_id": "chk_b08692c5d6c146e08538127f641bbdd0",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 7,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_7a6f9635bfcf42dbbfbaf0d7078941c2",
+          "checkpoint_id": "chk_cda773f0cfa0497096f06ea34ffc2c91",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 8,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_19800c0fa0d84d51bc3e91825ca0f802",
+          "checkpoint_id": "chk_7510f251c3d943afa99562ffb193e76e",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-EXFILTRATION-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "exfiltration",
+          "variant": 9,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_83edc1b0b8324d1ab3a60dc85a338496",
+          "checkpoint_id": "chk_b4a5b4a2be38418c89a457dddd96e65c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 0,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_7180e4d25cd34cbcb993410ee30179fe",
+          "checkpoint_id": "chk_ef30411146bf4f6cba288c6ef7c66039",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 1,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_18176e641ba94c7f9b03b449a30dc326",
+          "checkpoint_id": "chk_4e60085fb86246aebba8d8ab6587cec7",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 2,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_62a16bf77dc341eaad0b63d376b132fe",
+          "checkpoint_id": "chk_f3f19994d4984e9eb91f25f9768bd177",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 3,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_b0291927c16d4b03baa6e99105427417",
+          "checkpoint_id": "chk_3b3e07f9a7ed499ba5e75b7246ad469c",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 4,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_fe37e694dae4442fbebdcfccfdadf952",
+          "checkpoint_id": "chk_d0c7719add2c4d23914a06687b9ae57a",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 5,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_f23a8b0ebc68461a878d19baa6cf6f5b",
+          "checkpoint_id": "chk_e16450c7494a47cb9576c5e5558a7652",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 6,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_79ec540f57014e009c4bbbe297a84f07",
+          "checkpoint_id": "chk_366a08c9c92049b1a690368265923554",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 7,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_9d210dc066664968b247b6c6c0ca7d08",
+          "checkpoint_id": "chk_c82d5babe02948cebdfba08ec2e769ba",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 8,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_c5ee956d6509491fa6cedc2aa6707338",
+          "checkpoint_id": "chk_935dbaaa0ae04c709e13bfca9e409fe5",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-AUTHORIZATION-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "authorization",
+          "variant": 9,
+          "expected": "NOT_OWNER",
+          "observed": "NOT_OWNER",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_bf68240a66bf42aa86ae17e518c19795",
+          "checkpoint_id": "chk_22221d99ac1342ca9f23b9e21410dd81",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 0,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_c4713966834d476ba680813b64af9830"
+          ],
+          "ledger_entry_ids": [
+            "le_b187b47fa9684d28a39269cdaf39bebc",
+            "le_e872eba841964481b7a8d8b6d504f310"
+          ],
+          "audit_event_id": "aud_39f2755a6db94183a86921a23b5daa72",
+          "checkpoint_id": "chk_b66c099391144b1b8f745349ca3ef808",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 1,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_65b8926c30f14bb8ac4a43b0e9a6bede"
+          ],
+          "ledger_entry_ids": [
+            "le_3f0c0b1dcf9e4602af8af693e79a5563",
+            "le_a4f910ca941845b598e55aa526cfd732"
+          ],
+          "audit_event_id": "aud_272e2df9ed6949e1a01259fe1f05d5de",
+          "checkpoint_id": "chk_8b585a2b61e74792bae6c7fcfb21fe47",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 2,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_cb026a58d7244de29e04321572c1628b"
+          ],
+          "ledger_entry_ids": [
+            "le_f6589c26f4b04bcaaae6a6bb437ed8b0",
+            "le_1607ecd3723f44898a7531ff697c5a54"
+          ],
+          "audit_event_id": "aud_66fff952ed734700b492dc7e77afb604",
+          "checkpoint_id": "chk_74555462c33243dd93157bdc3e3cb1db",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 3,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_253531ed3f5a405d98f41c4403c4177e"
+          ],
+          "ledger_entry_ids": [
+            "le_65693a72d1e54589add55811941ffe2f",
+            "le_f3440914964e4f51baa09d0f6ff3d4fe"
+          ],
+          "audit_event_id": "aud_bfcdfd55ed164ce7ab00f12585e7b23c",
+          "checkpoint_id": "chk_4daeb2ce19c54d0cb4658e6c75ce3374",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 4,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_6486b71e63394153b48d9d4310c56f87"
+          ],
+          "ledger_entry_ids": [
+            "le_dc1c9b02a8574cf39ec0f384c5b532ae",
+            "le_e2304e042bb5480baace95596f810357"
+          ],
+          "audit_event_id": "aud_21d40efaad344f1e96a2aaf6f67e9cda",
+          "checkpoint_id": "chk_5a03c73544274f549c03a4945531c5cb",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 5,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_4f2a1abfd1284609b724d10e8e9c62fe"
+          ],
+          "ledger_entry_ids": [
+            "le_56383384361c483fbdebdc6840ee1cb5",
+            "le_a1ebaee414c745d7b1732fa0cbc649d4"
+          ],
+          "audit_event_id": "aud_e54c2d16b90a49bd8ae81edac8443fe3",
+          "checkpoint_id": "chk_7462bc1440b4437c8d4a779042a91db2",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 6,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_f2b2e5e761ad49ab8d3d1b6e762154fb"
+          ],
+          "ledger_entry_ids": [
+            "le_75aec71b2e6147fb9e8e10481465057a",
+            "le_620c2ff90d934dc4b230636f915838d9"
+          ],
+          "audit_event_id": "aud_2c9e8b8a0d4c4cae8271b61baa9b43ea",
+          "checkpoint_id": "chk_13fbec7b80034c208342308e5374584e",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 7,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_66d3480deabd473cb20a75a02390e813"
+          ],
+          "ledger_entry_ids": [
+            "le_9f427a6278e341bdb65d03008b004c79",
+            "le_a1285173feb846fabdcc050bf25d7cff"
+          ],
+          "audit_event_id": "aud_e4d8ac1d87fe4d4c8f0303f054acca44",
+          "checkpoint_id": "chk_09a7a8d954f64f4681fc178a90c27985",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 8,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_aaa3fe88637b4ad39075c8b14ecf2c73"
+          ],
+          "ledger_entry_ids": [
+            "le_47e65b612129424eb50967027f70cb7c",
+            "le_879f4c50f80c4512b0bcee9cc24df076"
+          ],
+          "audit_event_id": "aud_883063923be64e2cb40a3d702551274e",
+          "checkpoint_id": "chk_63a32da682d44d7494f89dbe7dede0ac",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-LIMIT-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "limit",
+          "variant": 9,
+          "expected": "mfa_required",
+          "observed": "mfa_required",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_a4f62505ec054a39b99c4556ddda80f1"
+          ],
+          "ledger_entry_ids": [
+            "le_21cc3763d9784e9b8e24419b4cfd7189",
+            "le_15727dee640e4a47af3336a67d808891"
+          ],
+          "audit_event_id": "aud_4eafc079dc9648068533d12a7b9e3413",
+          "checkpoint_id": "chk_d43eebaa81c0486baf6b7214cc0e15a7",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-000",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 0,
+          "expected": "HASH_MISMATCH",
+          "observed": "HASH_MISMATCH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_250fa072c4cd45758826be7b04556c97",
+          "checkpoint_id": "chk_eae0be3a71e144539a414c0fb1330de3",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-001",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 1,
+          "expected": "RECEIPT_REPLAYED",
+          "observed": "RECEIPT_REPLAYED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_90df5f73842b49ae9bfd85fccbb03ba4"
+          ],
+          "ledger_entry_ids": [
+            "le_21b787865ab14be9b8deeb3f2f68443e",
+            "le_79b65087e3f34285bc7c2d0bc6398a5a"
+          ],
+          "audit_event_id": "aud_039dd31b01ae42ada5b1cf049e6a0350",
+          "checkpoint_id": "chk_5813719148224caf834263373ab4adc6",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-002",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 2,
+          "expected": "HASH_MISMATCH",
+          "observed": "HASH_MISMATCH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_49cdab91c4674a8996e0cd309a14b196",
+          "checkpoint_id": "chk_1e9e34d382be43569d75123e948ff7a5",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-003",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 3,
+          "expected": "RECEIPT_REPLAYED",
+          "observed": "RECEIPT_REPLAYED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_1a96ca10743443f4bfe0bfe2c41b828f"
+          ],
+          "ledger_entry_ids": [
+            "le_66b08e7220da49479a85679b830018fb",
+            "le_26335b55bf784172b7e631a9e68badba"
+          ],
+          "audit_event_id": "aud_e5fb8df0da30453aa8373a633d9e7d42",
+          "checkpoint_id": "chk_247716845a5b4788ab1f68f550a0b96e",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-004",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 4,
+          "expected": "HASH_MISMATCH",
+          "observed": "HASH_MISMATCH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_48cce41aa0734cf282f537f9066512ae",
+          "checkpoint_id": "chk_223ea2facb734d51ad55580363ee5044",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-005",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 5,
+          "expected": "RECEIPT_REPLAYED",
+          "observed": "RECEIPT_REPLAYED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_084ebf2236fc40bd99c517fadf4d97d1"
+          ],
+          "ledger_entry_ids": [
+            "le_4a23f54107994135a8be9b8c4cab037b",
+            "le_c01c360d5fc3455185e4b6468566a6d2"
+          ],
+          "audit_event_id": "aud_2a321cb7d55449448eaf05feac13f3b1",
+          "checkpoint_id": "chk_13c22d414f134f4a887d311aa16bf52a",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-006",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 6,
+          "expected": "HASH_MISMATCH",
+          "observed": "HASH_MISMATCH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_22b8d7b3100048a3a9882c6e66b7a675",
+          "checkpoint_id": "chk_09d240b7fd2d43e7833e8bb6bb161795",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-007",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 7,
+          "expected": "RECEIPT_REPLAYED",
+          "observed": "RECEIPT_REPLAYED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_3c2460af8a0f438fbb41dd999b2a88cc"
+          ],
+          "ledger_entry_ids": [
+            "le_fad1b0e623de4143a68818fee1f5da86",
+            "le_a7ad0d909c104ecc900bf03a595e59ec"
+          ],
+          "audit_event_id": "aud_e7da07b0fcec4b6a99ecc44295455c7d",
+          "checkpoint_id": "chk_90a94d5fe2334e4b8197cfa94f256cd7",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-008",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 8,
+          "expected": "HASH_MISMATCH",
+          "observed": "HASH_MISMATCH",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [],
+          "ledger_entry_ids": [],
+          "audit_event_id": "aud_a57d876a115f4ae58a0297847ef3ab8f",
+          "checkpoint_id": "chk_6f59c3bc28704b13a26f6aa22f8b5dc9",
+          "audit_verified": true
+        },
+        "errors": []
+      },
+      {
+        "case_id": "SEC-TAMPER_REPLAY-009",
+        "outcome": "passed",
+        "evidence": {
+          "category": "tamper_replay",
+          "variant": 9,
+          "expected": "RECEIPT_REPLAYED",
+          "observed": "RECEIPT_REPLAYED",
+          "ledger_checked": true,
+          "unauthorized_ledger_writes": 0,
+          "operation_ids": [
+            "op_f8e146c38f2a436984ce5543ef4e2cd1"
+          ],
+          "ledger_entry_ids": [
+            "le_677010509f994ef6979b846fd63b3a4a",
+            "le_e343d6a5a3014b3ca783fe543fe74f02"
+          ],
+          "audit_event_id": "aud_21e299212e6c4d9d9deb81239b08ffd1",
+          "checkpoint_id": "chk_fcfe2ad91db346e49713084628443bcb",
+          "audit_verified": true
+        },
+        "errors": []
+      }
+    ],
+    "false_positive": {
+      "total": 27,
+      "failed": 0
+    },
+    "latency_ms": 6293.943,
+    "demo_run_id": "run_9tfAKnHRrV7gopNj"
+  }
+}
