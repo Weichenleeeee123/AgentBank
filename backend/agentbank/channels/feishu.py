@@ -35,10 +35,10 @@ class FeishuAdapter:
         text = str(payload.get("text", ""))
         if not event_id or not user_id:
             raise DomainError("IM_EVENT_INVALID")
-        if event_id in self.seen_events:
-            raise DomainError("WEBIM_REPLAYED")
-        self.seen_events.add(event_id)
-        return FeishuEvent(event_id, user_id, text, f"feishu-{event_id}")
+        chat = str(payload.get("conversation_id") or payload.get("chat_id") or "private")
+        scope = "group" if bool(payload.get("group", False)) else "private"
+        conversation = "feishu-" + hashlib.sha256(f"{user_id}:{scope}:{chat}".encode()).hexdigest()
+        return FeishuEvent(event_id, user_id, text, conversation)
 
     def handle(self, payload: dict[str, Any], signature: str | None, agent: AgentOrchestrator) -> dict[str, Any]:
         self.verify_signature(payload, signature)
@@ -49,7 +49,7 @@ class FeishuAdapter:
             if session.get(WebImEvent, event_key) is not None:
                 raise DomainError("WEBIM_REPLAYED")
             session.add(WebImEvent(event_id=event_key, user_id=event.user_id, event_type="feishu"))
-        response = agent.handle(event.user_id, event.conversation_id, event.text, "feishu")
+        response = agent.handle(event.user_id, event.conversation_id, event.text, "feishu", message_id=event.event_id)
         if bool(payload.get("group", False)):
             return {"event_id": event.event_id, "type": "generic_status", "message": "请在私聊或 App 查看结果。"}
         return {"event_id": event.event_id, "type": response.kind, **response.model_dump()}

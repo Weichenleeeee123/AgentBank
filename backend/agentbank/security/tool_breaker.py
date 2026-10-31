@@ -16,6 +16,16 @@ _states: WeakKeyDictionary[Database, dict[str, tuple[int, float]]] = WeakKeyDict
 _lock = RLock()
 
 
+def snapshot(database: Database) -> dict[str, object]:
+    with _lock:
+        current = monotonic()
+        observed = _states.get(database, {})
+        return {'scope': 'process-local tool infrastructure failures',
+                'tools': [{'tool': tool, 'consecutive_failures': failures,
+                           'open': until > current, 'remaining_seconds': max(0, int(until - current))}
+                          for tool, (failures, until) in sorted(observed.items())]}
+
+
 def guarded_call(database: Database, tool: str, action: Callable[[], T], *, read_only: bool) -> T:
     if read_only:
         return action()

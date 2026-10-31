@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from typing import Any
 from sqlalchemy import select
 
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.contracts import CapabilityResult
-from agentbank.db import ConversationReference, ConversationState, Database
+from agentbank.db import AgentMessage, ConversationReference, ConversationState, Database
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.security.dlp import redact_text
@@ -42,7 +43,47 @@ class AgentOrchestrator:
         self.parser = IntentParser()
         self.llm = llm or LLMGateway.from_environment(database)
 
-    def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app") -> AgentResponse:
+    def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app",
+               *, message_id: str | None = None) -> AgentResponse:
+        request_id = message_id or uuid.uuid4().hex
+        if not request_id or len(request_id) > 120 or not text.strip() or len(text) > 4000 or len(conversation_id) > 200:
+            raise DomainError("MESSAGE_INPUT_INVALID")
+        request_hash = hashlib.sha256(json.dumps([channel, text], ensure_ascii=False).encode()).hexdigest()
+        # Persist the claim before any external model call. Business services
+        # retain their own atomic commit boundaries; paid-call metering must
+        # survive a later message failure. A crash leaves an explicit unknown
+        # outcome instead of silently reissuing potentially completed work.
+        with self.database.atomic() as session:
+            cached = session.get(AgentMessage, (user_id, conversation_id, request_id))
+            if cached is not None:
+                if cached.request_hash != request_hash:
+                    raise DomainError("IDEMPOTENCY_CONFLICT")
+                if cached.status == 'failed':
+                    raise DomainError(cached.error_code)
+                if cached.status != 'completed':
+                    raise DomainError('MESSAGE_OUTCOME_UNKNOWN')
+                return AgentResponse(**json.loads(cached.response_json))
+            session.add(AgentMessage(user_id=user_id, conversation_id=conversation_id, message_id=request_id,
+                                     request_hash=request_hash, response_json='', status='processing'))
+        key = "agent-" + hashlib.sha256(json.dumps([user_id, conversation_id, request_id]).encode()).hexdigest()
+        try:
+            response = self._handle_message(user_id, conversation_id, text, channel, key)
+        except Exception as error:
+            with self.database.atomic() as session:
+                cached = session.get(AgentMessage, (user_id, conversation_id, request_id))
+                assert cached is not None
+                cached.status = 'failed'
+                cached.error_code = error.code if isinstance(error, DomainError) else 'MESSAGE_PROCESSING_FAILED'
+            raise
+        with self.database.atomic() as session:
+            cached = session.get(AgentMessage, (user_id, conversation_id, request_id))
+            assert cached is not None
+            cached.status = 'completed'
+            cached.response_json = json.dumps(response.model_dump(), ensure_ascii=False)
+        return response
+
+    def _handle_message(self, user_id: str, conversation_id: str, text: str, channel: str,
+                        key: str) -> AgentResponse:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
         if re.search(r"(?i)(?:otp|验证码)\s*[:：]?\s*\d{6}", text) or re.fullmatch(r"\s*\d{6}\s*", text):
             return AgentResponse(kind="clarification", intent="security",
@@ -170,7 +211,6 @@ class AgentOrchestrator:
                                      message="没有找到可赎回的该理财持仓，请提供订单号。")
             parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "order_id": order.id},
                                   parsed.missing, parsed.ambiguities, parsed.references)
-        key = "agent-" + hashlib.sha256(f"{conversation_id}:{text}".encode()).hexdigest()[:32]
         if parsed.capability_id in {"W04", "W05", "C02", "C04", "C05", "C06", "C07", "C08"}:
             parsed = ParsedIntent(parsed.intent, parsed.capability_id, {**parsed.slots, "assurance": "mfa"}, parsed.missing, parsed.ambiguities)
         capability_id = parsed.capability_id
@@ -293,7 +333,7 @@ class AgentOrchestrator:
         if capability_id not in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}:
             raise DomainError("EXPLORATION_TOOL_NOT_ALLOWED")
         result = self.capabilities.execute(user_id, capability_id, payload,
-                                           f"explore-{conversation_id}-{step}-{capability_id}")
+                                           f"explore-{uuid.uuid4().hex}-{step}-{capability_id}")
         return result.data
 
     def _store_user_message(self, user_id: str, conversation_id: str, text: str) -> list[str]:

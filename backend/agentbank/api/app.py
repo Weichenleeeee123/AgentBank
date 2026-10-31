@@ -26,9 +26,9 @@ from agentbank.agent.orchestrator import AgentOrchestrator
 from agentbank.channels.feishu import FeishuAdapter
 from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
-from agentbank.clock import BusinessClock
+from agentbank.clock import BusinessClock, utc_now_naive
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, Payee, PlanNodeRecord,
+from agentbank.db import (CapabilityRecord, Card, CoolingPeriod, Database, DemoRun, Operation, Payee, PlanNodeRecord,
                           PlanRecord, ReceiptRecord, User, WebImEvent, WebImNonce)
 from agentbank.evals.runner import run_cases
 from agentbank.evals.traceability import build_traceability_artifact
@@ -71,6 +71,12 @@ class VerifyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     otp: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class MessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=4000)
+    message_id: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 def _sign(user_id: str, secret: str) -> str:
@@ -137,14 +143,21 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def public_boundary(request: Request, call_next: Any) -> Any:
-        if public_mode and request.url.path.startswith("/admin/"):
+        if public_mode and request.url.path.startswith(("/admin/", "/v1/eval/")):
             return JSONResponse(status_code=403, content={"code": "ADMIN_DISABLED"})
         if request.method == "POST" and (request.url.path.endswith("/messages") or request.url.path.startswith("/v1/im/")):
             try:
                 app.state.ip_limiter.check(request.client.host if request.client else "unknown")
             except DomainError:
                 return JSONResponse(status_code=429, content={"code": "RATE_LIMITED"})
-        return await call_next(request)
+        response = await call_next(request)
+        if hasattr(app.state, 'request_metrics'):
+            route = request.scope.get('route')
+            app.state.request_metrics.append((utc_now_naive(), response.status_code,
+                                              getattr(route, 'path', 'unmatched')))
+        if request.url.path.startswith(('/v1/', '/device/', '/staff/', '/admin/')):
+            response.headers['Cache-Control'] = 'no-store'
+        return response
 
     app.state.database = database
     app.state.transfer = transfer
@@ -203,6 +216,13 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return {"account_id": account.id, "available_minor": account.available_minor,
                 "ledger_balance_minor": account.ledger_balance_minor, "currency": "CNY", "as_of": datetime.now(timezone.utc).isoformat(),
                 "fragments": fragments}
+
+    @app.get('/v1/cards')
+    def current_cards(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        with database.sessions() as session:
+            cards = session.scalars(select(Card).where(Card.user_id == user_id).order_by(Card.id)).all()
+            return {'cards': [{'id': item.id, 'status': item.status, 'limit_minor': item.limit_minor}
+                              for item in cards]}
 
     @app.post("/v1/capabilities/{capability_id}")
     def execute_capability(capability_id: str, payload: CapabilityCommandRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -690,6 +710,12 @@ def create_app(database_url: str | None = None) -> FastAPI:
 
     @app.post("/v1/im/webim/events")
     def webim_event(payload: dict[str, Any], x_im_signature: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+        if payload.get('event_type') == 'card_callback':
+            with database.atomic():
+                return process_webim_event(payload, x_im_signature)
+        return process_webim_event(payload, x_im_signature)
+
+    def process_webim_event(payload: dict[str, Any], x_im_signature: str | None) -> dict[str, Any]:
         body = __import__("json").dumps(payload, ensure_ascii=False, separators=(",", ":"))
         expected = hmac.new(secret.encode(), body.encode(), hashlib.sha256).hexdigest()
         if not x_im_signature or not hmac.compare_digest(x_im_signature, expected):
@@ -713,6 +739,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
                     update(WebImNonce)
                     .where(WebImNonce.nonce == nonce_hash, WebImNonce.user_id == callback_user,
                            WebImNonce.expires_at > now,
+                           WebImNonce.channel_session == str(payload.get('channel_session', '')),
                            WebImNonce.consumed.is_(False))
                     .values(consumed=True)
                 ))
@@ -726,6 +753,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
             if callback_meta["user_id"] != callback_user:
                 raise DomainError("WEBIM_CALLBACK_INVALID")
             if payload.get("action") == "confirm":
+                with database.sessions() as session:
+                    authorization = session.get(ReceiptRecord, str(callback_meta['receipt_id']))
+                    if authorization is not None and authorization.assurance == 'mfa':
+                        if bool(payload.get('group', False)):
+                            return {'event_id': event_id, 'type': 'generic_status', 'message': '请在 App 查看结果。'}
+                        target = 'record_id' if session.get(CapabilityRecord, str(callback_meta['record_id'])) else 'plan_id'
+                        return {'event_id': event_id, 'type': 'mfa', 'kind': 'mfa',
+                                'record_id': callback_meta['record_id'],
+                                'message': '请前往 App 核对操作并完成强验证。',
+                                'app_deep_link': f"/app/?{target}={callback_meta['record_id']}"}
                 response = agent.confirm(callback_user, str(callback_meta["record_id"]),
                                          str(payload.get("display_hash", callback_meta.get("display_hash", ""))),
                                          str(payload.get("receipt_id", callback_meta.get("receipt_id", ""))))
@@ -735,7 +772,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
             return {"event_id": event_id, "type": "callback_ack", "status": "accepted", "record_id": callback_meta.get("record_id")}
         app.state.message_limiter.check(user_id)
         text = str(payload.get("text", ""))
-        response = agent.handle(user_id, f"webim-{event_id}", text, "webim")
+        scope = "group" if bool(payload.get("group", False)) else "private"
+        chat = str(payload.get("conversation_id") or payload.get("chat_id") or "main")
+        conversation = "webim-" + hashlib.sha256(f"{user_id}:{scope}:{chat}".encode()).hexdigest()
+        response = agent.handle(user_id, conversation, text, "webim", message_id=event_id)
         result = {"event_id": event_id, "type": response.kind, **response.model_dump()}
         if response.kind in {"confirmation", "mfa", "plan_confirmation"}:
             nonce = secrets.token_urlsafe(16)
@@ -744,8 +784,11 @@ def create_app(database_url: str | None = None) -> FastAPI:
                 session.add(WebImNonce(nonce=nonce_hash, user_id=user_id, record_id=str(response.record_id),
                                        display_hash=response.display_hash,
                                        receipt_id=str(response.data.get("receipt_id", "")),
+                                       channel_session=str(payload.get('channel_session', '')),
                                        expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=5)))
-            result["app_deep_link"] = f"/app/?record_id={response.record_id}&nonce={nonce}"
+            target = 'plan_id' if response.kind == 'plan_confirmation' else 'record_id'
+            result["app_deep_link"] = f"/app/?{target}={response.record_id}&nonce={nonce}"
+            result['nonce'] = nonce
         if bool(payload.get("group", False)):
             result = {"event_id": event_id, "type": "generic_status", "message": "已处理，请前往私聊或 App 查看详情。"}
         return result
@@ -755,9 +798,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return cast(FeishuAdapter, app.state.feishu).handle(payload, x_feishu_signature, agent)
 
     @app.post("/v1/conversations/{conversation_id}/messages")
-    def conversation_message(conversation_id: str, payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
+    def conversation_message(conversation_id: str, payload: MessageRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         app.state.message_limiter.check(user_id)
-        response = agent.handle(user_id, conversation_id, str(payload.get("text", "")), "app")
+        response = agent.handle(user_id, conversation_id, payload.text, "app", message_id=payload.message_id)
         transfer.audit.checkpoint_and_verify()
         return {"conversation_id": conversation_id, "type": response.kind, **response.model_dump()}
 
@@ -861,4 +904,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def redeem_pairing_code(payload: dict[str, str]) -> dict[str, str]:
         return {"device_token": DeviceService(database).redeem_pairing_code(payload.get("pairing_code", ""))}
 
+    from agentbank.api.webim import register_webim_routes
+    register_webim_routes(app, database, current_user, webim_event)
+    from agentbank.api.staff import register_staff_routes
+    from agentbank.security.tool_breaker import snapshot
+    register_staff_routes(app, database)
+    app.state.tool_breaker_snapshot = lambda: snapshot(database)
     return app

@@ -135,9 +135,38 @@ class WebImNonce(Base):
     record_id: Mapped[str] = mapped_column(String(80))
     display_hash: Mapped[str] = mapped_column(String(128))
     receipt_id: Mapped[str] = mapped_column(String(80), default="")
+    channel_session: Mapped[str] = mapped_column(String(64), default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     consumed: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class AgentMessage(Base):
+    __tablename__ = "agent_messages"
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    message_id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(128))
+    response_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24), default='processing')
+    error_code: Mapped[str] = mapped_column(String(120), default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now_naive)
+
+
+class ImSession(Base):
+    __tablename__ = "im_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    identity: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+
+
+class ImDelivery(Base):
+    __tablename__ = "im_deliveries"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
 
 
 class Reservation(Base):
@@ -612,6 +641,9 @@ class Database:
         Base.metadata.create_all(self.engine)
         if self.engine.dialect.name == "sqlite":
             migrations = {
+                "agent_messages": {"status": "VARCHAR(24) NOT NULL DEFAULT 'completed'",
+                                   "error_code": "VARCHAR(120) NOT NULL DEFAULT ''"},
+                "webim_nonces": {"channel_session": "VARCHAR(64) NOT NULL DEFAULT ''"},
                 "handoff_cases": {"resolution_note": "TEXT NOT NULL DEFAULT ''", "context_json": "TEXT NOT NULL DEFAULT '{}'"},
                 "demo_runs": {"report_json": "TEXT NOT NULL DEFAULT '{}'"},
                 "capability_records": {

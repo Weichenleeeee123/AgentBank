@@ -5,6 +5,7 @@ from typing import Any
 
 
 _PATTERNS = (
+    (re.compile(r"(?i)(?:pin|password|密码|口令)\s*[:：=]?\s*[A-Za-z0-9_!@#$%^&*.-]+"), "[SECRET_REDACTED]"),
     (re.compile(r"(?<!\d)(\d{16,19})(?!\d)"), "[CARD_REDACTED]"),
     (re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)"), "[PHONE_REDACTED]"),
     (re.compile(r"(?i)(otp|验证码)\s*[:：]?\s*\d{6}"), "[OTP_REDACTED]"),
@@ -27,7 +28,9 @@ def redact_payload(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key).lower()
-            if key_text in {"otp", "code", "verification_code", "验证码"}:
+            if key_text in {"pin", "new_pin", "password", "secret", "api_key", "密码", "口令"}:
+                redacted[str(key)] = "[SECRET_REDACTED]"
+            elif key_text in {"otp", "code", "verification_code", "验证码"}:
                 redacted[str(key)] = "[OTP_REDACTED]"
             else:
                 redacted[str(key)] = redact_payload(item)

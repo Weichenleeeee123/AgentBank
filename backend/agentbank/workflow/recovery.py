@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import uuid
 import json
-from typing import Callable
+from typing import Any, Callable
 from sqlalchemy import select
 
 from agentbank.clock import utc_now_naive
@@ -11,7 +11,7 @@ from agentbank.db import Database, HandoffCase, Operation
 from agentbank.errors import DomainError
 from agentbank.audit.store import PersistentAudit
 from agentbank.security.dlp import redact_text
-from agentbank.db import PlanRecord, PlanNodeRecord, ReceiptRecord
+from agentbank.db import PlanRecord, PlanNodeRecord, ReceiptRecord, UserNotification
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,8 @@ class HandoffService:
                      "context_json": case.context_json} for case in cases]
 
     def resolve(self, case_id: str, note: str) -> HandoffView:
-        with self.database.sessions.begin() as session:
+        self._validate_note(note)
+        with self.database.atomic() as session:
             case = session.get(HandoffCase, case_id)
             if case is None:
                 raise DomainError("HANDOFF_NOT_FOUND")
@@ -89,6 +90,71 @@ class HandoffService:
                                                   "staff.handoff.resolved", {"case_id": case.id,
                                                                              "note": case.resolution_note})
             return HandoffView(case.id, case.status)
+
+    @staticmethod
+    def _validate_note(note: str) -> None:
+        if not isinstance(note, str) or not note.strip() or len(note) > 2000:
+            raise DomainError("HANDOFF_INPUT_INVALID")
+
+    @staticmethod
+    def _context(case: HandoffCase) -> dict[str, Any]:
+        try:
+            context = json.loads(case.context_json)
+        except (ValueError, TypeError) as exc:
+            raise DomainError("HANDOFF_STATE_INVALID") from exc
+        if not isinstance(context, dict):
+            raise DomainError("HANDOFF_STATE_INVALID")
+        return context
+
+    def save_draft(self, case_id: str, *, note: str, user_message: str = "") -> dict[str, object]:
+        self._validate_note(note)
+        if not isinstance(user_message, str) or len(user_message) > 2000:
+            raise DomainError("HANDOFF_INPUT_INVALID")
+        with self.database.atomic() as session:
+            case = session.get(HandoffCase, case_id)
+            if case is None:
+                raise DomainError("HANDOFF_NOT_FOUND")
+            if case.status != "open":
+                raise DomainError("HANDOFF_STATE_INVALID")
+            context = self._context(case)
+            if "retry_request" in context:
+                raise DomainError("HANDOFF_STATE_INVALID")
+            draft = {"note": redact_text(note), "user_message": redact_text(user_message),
+                     "updated_at": utc_now_naive().isoformat()}
+            context["staff_draft"] = draft
+            case.context_json = json.dumps(context, ensure_ascii=False)
+            PersistentAudit(self.database).append(session, f"trace_{case.id}", case.user_id,
+                "staff.handoff.draft_saved", {"case_id": case.id, **draft})
+            return {"case_id": case.id, "status": case.status, "draft": draft}
+
+    def request_retry(self, case_id: str, note: str) -> dict[str, object]:
+        self._validate_note(note)
+        with self.database.atomic() as session:
+            case = session.get(HandoffCase, case_id)
+            if case is None:
+                raise DomainError("HANDOFF_NOT_FOUND")
+            if case.status != "open":
+                raise DomainError("HANDOFF_STATE_INVALID")
+            context = self._context(case)
+            if "retry_request" in context or "staff_draft" not in context:
+                raise DomainError("HANDOFF_STATE_INVALID")
+            if not isinstance(context["staff_draft"], dict) or not isinstance(
+                context["staff_draft"].get("user_message", ""), str
+            ):
+                raise DomainError("HANDOFF_STATE_INVALID")
+            request = {"note": redact_text(note), "requested_at": utc_now_naive().isoformat(),
+                       "status": "awaiting_user", "requires_fresh_authorization": True,
+                       "receipt_ids": []}
+            context["retry_request"] = request
+            case.context_json = json.dumps(context, ensure_ascii=False)
+            session.add(UserNotification(id=f"notice_{uuid.uuid4().hex}", user_id=case.user_id,
+                event_type="handoff.retry_requested", title="人工处理建议已就绪",
+                body="请在 App 重新发起并核对操作；涉及资金或权限的操作须重新授权。"
+                     + context["staff_draft"].get("user_message", ""),
+                dedupe_key=f"handoff-retry:{case.id}"))
+            PersistentAudit(self.database).append(session, f"trace_{case.id}", case.user_id,
+                "staff.handoff.retry_requested", {"case_id": case.id, **request})
+            return {"case_id": case.id, **request}
 
 
 @dataclass(frozen=True)
