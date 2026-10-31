@@ -40,7 +40,8 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   }
   if (Array.isArray(data?.display)) {
     for (const item of data.display) {
-      appendFact(item.label || "详情", item.value);
+      const inFen = /[（(]分[）)]$/.test(item.label || "") && /^-?[0-9]+$/.test(String(item.value));
+      appendFact(inFen ? item.label.replace(/[（(]分[）)]$/, "") : item.label || "详情", item.value, "", inFen);
       const yuan = typeof item.value === "string" ? item.value.match(/^[¥￥]([0-9]+(?:\.[0-9]{1,2})?)$/) : null;
       if (yuan) appendFact(`${item.label || "金额"}（大写）`, uppercaseMoney(Math.round(Number(yuan[1]) * 100)));
     }

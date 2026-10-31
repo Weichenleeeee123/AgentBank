@@ -58,3 +58,4 @@ for (const status of ['awaiting_confirmation','awaiting_mfa']) test(`linked ${st
 test('new payee placeholder never masquerades as selected payee ID',async()=>{
  const h=harness();h.get('recipientName').value='房东';h.context.fetch=async()=>({ok:true,json:async()=>({payees:[{id:'payee-landlord',masked_name:'房东',phone_tail:null}]})});await h.run('lookupPayees()');assert.equal(h.get('recipientCandidate').children[0].value,'');assert.doesNotMatch(h.get('recipientCandidate').text,/null/);
 });
+test('server display fields explicitly marked fen render yuan with uppercase',()=>{const h=harness();h.run(`addBubble('plan_confirmation','核对',[],{display:[{label:'资金预留（分）',value:'1000'}]})`);assert.match(h.get('messages').text,/¥10\.00（壹拾元整）/);});
