@@ -56,7 +56,11 @@ def _transfer_display(account: Account, payee: Payee, amount_minor: int,
                {"label": "付款账户", "value": f"尾号 {account.id[-4:]}"},
                {"label": "收款账户", "value": f"尾号 {payee.account_id[-4:]}"},
                {"label": "金额", "value": f"¥{amount_minor // 100}.{amount_minor % 100:02d}"},
-               {"label": "币种", "value": "人民币"}]
+               {"label": "币种", "value": "人民币"},
+               {"label": "执行时间", "value": "确认且所需验证通过后执行"},
+               {"label": "费用", "value": "本地模拟免费"},
+               {"label": "后果", "value": "转出账户余额减少，并记录转账账本"},
+               {"label": "撤销", "value": "提交前可取消；完成后不可直接撤销"}]
     if memo:
         display.append({"label": "备注", "value": memo})
     return display

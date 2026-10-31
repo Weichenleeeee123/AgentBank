@@ -75,6 +75,10 @@ def test_transfer_confirmation_persists_complete_exact_display_and_target_snapsh
     assert labels["金额"] == "¥90071992547409.93"
     assert labels["备注"] == "十月房租"
     assert labels["付款账户"] and labels["收款账户"]
+    assert labels["执行时间"] == "确认且所需验证通过后执行"
+    assert labels["费用"] == "本地模拟免费"
+    assert labels["后果"] == "转出账户余额减少，并记录转账账本"
+    assert labels["撤销"] == "提交前可取消；完成后不可直接撤销"
     with db.sessions() as session:
         plan = session.get(PlanRecord, prepared.plan_id)
         assert json.loads(plan.display_json) == prepared.display
