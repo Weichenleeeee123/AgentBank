@@ -1,0 +1,151 @@
+{
+  "created_at": "2026-10-31T09:05:58.183590+00:00",
+  "scope": "synthetic local seed; real primary HTTP; no money execution",
+  "configured_backup": false,
+  "primary_timeout_seconds": 8.0,
+  "role_checks": {
+    "planner": true,
+    "reply": true,
+    "explorer": true,
+    "fraud": true
+  },
+  "reply_source": "agentbank_llm_primary",
+  "journeys": [
+    {
+      "case": 1,
+      "kind": "facts",
+      "capability_id": "Q01",
+      "passed": true,
+      "seconds": 3.669
+    },
+    {
+      "case": 2,
+      "kind": "clarification",
+      "capability_id": "T01",
+      "passed": true,
+      "seconds": 2.855
+    },
+    {
+      "case": 3,
+      "kind": "confirmation",
+      "capability_id": "T01",
+      "passed": true,
+      "seconds": 7.952
+    },
+    {
+      "case": 4,
+      "kind": "facts",
+      "capability_id": "W06",
+      "passed": true,
+      "seconds": 3.118
+    },
+    {
+      "case": 5,
+      "kind": "confirmation",
+      "capability_id": "S01",
+      "passed": true,
+      "seconds": 1.758
+    },
+    {
+      "case": 6,
+      "kind": "facts",
+      "capability_id": "Q02",
+      "passed": true,
+      "seconds": 3.62
+    }
+  ],
+  "calls": [
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.75
+    },
+    {
+      "role": "reply",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.943
+    },
+    {
+      "role": "explorer",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 0.95
+    },
+    {
+      "role": "fraud",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.118
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.42
+    },
+    {
+      "role": "reply",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 2.228
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 2.848
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 6.286
+    },
+    {
+      "role": "fraud",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.643
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.625
+    },
+    {
+      "role": "reply",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.483
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.75
+    },
+    {
+      "role": "planner",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.797
+    },
+    {
+      "role": "reply",
+      "provider": "agentbank_llm_primary",
+      "status": "received_json",
+      "seconds": 1.812
+    }
+  ],
+  "call_counts": {
+    "planner": 7,
+    "reply": 4,
+    "explorer": 1,
+    "fraud": 2
+  },
+  "ledger_unchanged": true,
+  "all_passed": true
+}
