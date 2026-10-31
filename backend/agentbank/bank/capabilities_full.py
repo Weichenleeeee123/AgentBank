@@ -64,6 +64,11 @@ class CapabilityService:
                     raise DomainError("IDEMPOTENCY_CONFLICT")
                 return self._result(existing)
         payload = dict(payload)
+        if capability_id == 'C08':
+            with self.database.sessions() as session:
+                owned_card = session.get(Card, str(payload.get('card_id', 'card_001')))
+                if owned_card is None or owned_card.user_id != user_id:
+                    raise DomainError('NOT_OWNER')
         if capability_id in {"X03", "X04"}:
             item = "flower" if capability_id == "X03" else "cake"
             delivery_date = str(payload.get("delivery_date", self.clock.business_date()))
@@ -94,11 +99,7 @@ class CapabilityService:
                 display_digest = str(prepared["display_hash"])
                 assurance = str(prepared["assurance"])
             else:
-                safe_payload = self._safe_payload(capability_id, payload)
-                canonical = json.dumps({"capability_id": capability_id, "payload": safe_payload}, ensure_ascii=False,
-                                       sort_keys=True, separators=(",", ":"))
-                action_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-                display_digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                action_digest, display_digest = self._payload_hashes(capability_id, payload)
                 red = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))) or (capability_id == "C07" and payload.get("action") == "unfreeze")
                 if capability_id == "C02":
                     with self.database.sessions() as session:
@@ -109,8 +110,10 @@ class CapabilityService:
                 assurance = "mfa" if red else "confirm"
             record_id = f"cap_{uuid.uuid4().hex}"
             record_status = "awaiting_confirmation"
-            data = {"capability_id": capability_id, "payload": self._safe_payload(capability_id, payload), "action_hash": action_digest,
+            data: dict[str, Any] = {"capability_id": capability_id, "payload": self._safe_payload(capability_id, payload), "action_hash": action_digest,
                     "display_hash": display_digest, "assurance": assurance}
+            if capability_id == 'C08':
+                data['display'] = self._pin_display(payload)
             if capability_id in {"T01", "T02", "T03"}:
                 data.update(prepared)
                 data["capability_id"] = capability_id
@@ -159,9 +162,11 @@ class CapabilityService:
                 expected_action, expected_display = self._payload_hashes(capability_id, security_payload)
             if self.require_device_mfa and not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
                 record_id = f"cap_{uuid.uuid4().hex}"
-                pending_data = {"payload": self._safe_payload(capability_id, payload), "assurance": "mfa",
+                pending_data: dict[str, Any] = {"payload": self._safe_payload(capability_id, security_payload), "assurance": "mfa",
                                 "action_hash": expected_action, "display_hash": expected_display,
                                 "challenge_record_id": record_id}
+                if capability_id == 'C08':
+                    pending_data['display'] = self._pin_display(payload)
                 with self.database.sessions.begin() as session:
                     session.add(CapabilityRecord(id=record_id, capability_id=capability_id, user_id=user_id,
                                                  status="awaiting_mfa", data_json=json.dumps(pending_data, ensure_ascii=False),
@@ -220,6 +225,8 @@ class CapabilityService:
                 )
             else:
                 expected_action, expected_display = self._payload_hashes(capability_id, payload)
+            if capability_id == 'C08':
+                expected_display = self._payload_display_hash(expected_action, data.get('display', []))
             if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                 raise DomainError("HASH_MISMATCH")
         DeviceService(self.database).verify(user_id, code, receipt_id, str(data.get("action_hash", "")) or None)
@@ -228,7 +235,11 @@ class CapabilityService:
             record = session.get(CapabilityRecord, record_id)
             if record is None or record.user_id != user_id or record.status != "awaiting_mfa":
                 raise DomainError("RECEIPT_REPLAYED")
+            if record.capability_id != capability_id:
+                raise DomainError("HASH_MISMATCH")
             data = json.loads(record.data_json)
+            if str(data.get("receipt_id") or record_id) != receipt_id or data.get("assurance") != "mfa":
+                raise DomainError("RECEIPT_INVALID")
             safe_payload = dict(data["payload"])
             self.breaker.require_write(session, user_id,
                                        protective=record.capability_id != "X05" and self._is_protective(session, record.capability_id, safe_payload))
@@ -242,16 +253,21 @@ class CapabilityService:
                 if (receipt.action_hash != data.get("action_hash")
                         or receipt.display_hash != data.get("display_hash")):
                     raise DomainError("HASH_MISMATCH")
-                if capability_id not in {"T01", "T02", "T03"}:
-                    if capability_id == "X05":
-                        expected_action, expected_display = self._loss_report_hashes(
-                            capability_id, record_id, str(safe_payload.get("card_id", "card_001"))
-                        )
-                    else:
-                        expected_action, expected_display = self._payload_hashes(capability_id, safe_payload)
-                    if (data.get("action_hash") != expected_action
-                            or data.get("display_hash") != expected_display):
-                        raise DomainError("HASH_MISMATCH")
+            # Direct-MFA records can use a challenge bound to the record rather
+            # than a ReceiptRecord. Both paths must recheck the authorized
+            # payload and display after OTP verification, inside the commit.
+            if capability_id not in {"T01", "T02", "T03"}:
+                if capability_id == "X05":
+                    expected_action, expected_display = self._loss_report_hashes(
+                        capability_id, record_id, str(safe_payload.get("card_id", "card_001"))
+                    )
+                else:
+                    expected_action, expected_display = self._payload_hashes(capability_id, safe_payload)
+                if capability_id == 'C08':
+                    expected_display = self._payload_display_hash(expected_action, data.get('display', []))
+                if (data.get("action_hash") != expected_action
+                        or data.get("display_hash") != expected_display):
+                    raise DomainError("HASH_MISMATCH")
             payload = safe_payload | {"_mfa_verified": True}
             result_data, status = self._dispatch(user_id, record.capability_id, payload, record.idempotency_key)
             record.status = status
@@ -303,7 +319,7 @@ class CapabilityService:
                 expected_action, expected_display = self._payload_hashes(
                     capability_id, dict(data.get("payload", {}))
                 )
-                if data.get("flow") == "merchant_price_reconfirmation":
+                if data.get("flow") == "merchant_price_reconfirmation" or capability_id == 'C08':
                     expected_display = self._payload_display_hash(expected_action, data.get("display", []))
                 if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                     raise DomainError("HASH_MISMATCH")
@@ -646,7 +662,18 @@ class CapabilityService:
                                 "payload": self._safe_payload(capability_id, payload)},
                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if capability_id == 'C08':
+            return digest, self._payload_display_hash(digest, self._pin_display(payload))
         return digest, digest
+
+    @staticmethod
+    def _pin_display(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return [{'label': '业务', 'value': '修改卡片 PIN（模拟）'},
+                {'label': '卡片', 'value': str(payload.get('card_id', 'card_001'))},
+                {'label': '生效时间', 'value': '确认且设备强验证通过后'},
+                {'label': '费用', 'value': '本地模拟不收取费用'},
+                {'label': '后果', 'value': '记录模拟变更结果，不保存新 PIN，不修改真实银行卡'},
+                {'label': '撤销', 'value': '验证前可以取消；验证完成后须重新发起修改'}]
 
     @staticmethod
     def _payload_display_hash(action_hash_value: str, display: list[dict[str, Any]]) -> str:
@@ -1159,6 +1186,10 @@ class CapabilityService:
                 card.restrictions_json = json.dumps([item for item in json.loads(card.restrictions_json) if item != restriction])
             return {"card_id": card_id, "restriction": restriction, "status": "active", "payment_blocked": False}, "succeeded"
         if capability_id == "C08":
+            with self.database.sessions() as session:
+                card = session.get(Card, str(payload.get('card_id', 'card_001')))
+                if card is None or card.user_id != user_id:
+                    raise DomainError('NOT_OWNER')
             return {"card_id": str(payload.get("card_id", "card_001")), "status": "pin_changed", "secret_persisted": False}, "succeeded"
         raise DomainError("CAPABILITY_NOT_IMPLEMENTED")
 

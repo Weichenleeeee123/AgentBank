@@ -616,8 +616,14 @@ def create_app(database_url: str | None = None) -> FastAPI:
             if plan is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
             nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
+            receipt = session.scalar(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id,
+                                                                 ReceiptRecord.status == 'pending')
+                                     .order_by(ReceiptRecord.issued_at.desc()))
             return {"plan_id": plan.id, "status": plan.status, "revision": plan.revision,
                     "display_hash": plan.display_hash, "action_hash": plan.action_hash,
+                    "display": json.loads(plan.display_json),
+                    "receipt_id": receipt.id if receipt else None,
+                    "assurance": receipt.assurance if receipt else 'none',
                     "nodes": [{"node_id": node.id, "tool": node.tool, "status": node.status,
                                "idempotency_key": node.idempotency_key} for node in nodes]}
 
