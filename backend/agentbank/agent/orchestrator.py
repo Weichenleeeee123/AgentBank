@@ -176,7 +176,15 @@ class AgentOrchestrator:
                 return self._prepare_composite_plan(user_id, conversation_id, planned)
             if planned_parsed is not None:
                 transfer_family = {"T01", "T02", "T03"}
-                if parsed.capability_id in transfer_family and planned_parsed.capability_id in transfer_family:
+                if (pending is not None and continued.capability_id in transfer_family
+                        and planned_parsed.capability_id in transfer_family
+                        and (parsed.capability_id is None or parsed.capability_id in transfer_family)
+                        and not any(parsed.slots.get(field) for field in ("recipient_name", "phone", "alias"))):
+                    # An amount-only reply fills the existing transfer. A model
+                    # route change must not discard or replace the recipient
+                    # already supplied by the user, or the amount just parsed.
+                    planned_parsed = continued
+                elif parsed.capability_id in transfer_family and planned_parsed.capability_id in transfer_family:
                     planned_slots = {key: value for key, value in planned_parsed.slots.items()
                                      if key not in {"recipient_name", "phone", "alias"}}
                     planned_parsed = ParsedIntent(planned_parsed.intent, parsed.capability_id,
