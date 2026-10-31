@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.db
+*.db-shm
+*.db-wal
+frontend/node_modules
+.env
+.env.*
+.tmp
+output
+.playwright-cli
+*.checkpoints.jsonl
+*.checkpoints.key
+*.log
+backend/*.egg-info

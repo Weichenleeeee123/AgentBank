@@ -29,4 +29,6 @@
 ## M2 验收边界
 
 - 33×3 CAP journey 已绑定 normal、colloquial、boundary/recovery 分支，并由 `docs/M2-CAP-TRACEABILITY.md` 记录终态证据。
-- 本地验收使用确定性数据和可注入 transport；真实LLM、外部通知/商户/银行租户、飞书及公网部署属于外部验收，不能由 `223/223` 替代。
+- 本地验收使用确定性数据和可注入 transport；真实LLM、外部通知/商户/银行租户、飞书及公网部署属于外部验收，不能由确定性评测通过数替代。当前评测目录基线为 227 个用例；历史报告的 `223/223` 保留为当时版本证据，不作当前验收数字。
+
+当前 M4 本地候选的最终验收状态见 [M4-LOCAL-CANDIDATE.md](M4-LOCAL-CANDIDATE.md)；本表记录能力与回归映射，不自动证明当前提交已通过完整发布门禁。

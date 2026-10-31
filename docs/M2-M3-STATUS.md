@@ -4,7 +4,7 @@
 
 ## 当前开发阶段
 
-本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、自由生成DAG与只读前置事实解析、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 538 passed、evaluation 227/227、Ruff/Mypy通过。本轮已补齐 M3 冷静期 action/revision 绑定、OTP 用户级锁定、设备边界、DLP/片段防伪造、审计末尾 checkpoint 和自测未授权记账门禁。本轮仍不把模拟设备、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料当作真实生产证据。
+本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、自由生成DAG与只读前置事实解析、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。此前 M3 本地验收记录包含 pytest 538 passed、evaluation 227/227 和 Ruff/Mypy 通过；这些是历史基线，不是当前 M4 候选的最终验收结果。本轮已补齐 M3 冷静期 action/revision 绑定、OTP 用户级锁定、设备边界、DLP/片段防伪造、审计末尾 checkpoint 和自测未授权记账门禁。本轮仍不把模拟设备、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料当作真实生产证据。
 
 六个业务集群的边界用例与主要不变量见 docs/M2-COVERAGE.md；PLAN §11 boundary fixtures 与99条CAP case的代码/测试/版本追溯由 docs/M2-CAP-TRACEABILITY.md 及 executable manifest提供。
 
@@ -40,13 +40,11 @@ M2 的阶段内本地门禁已经通过；M3 本地安全收口证据见 docs/M3
 ## 当前验证命令
 
 ```powershell
-python -m pytest backend/tests -q
-python -m ruff check backend
-python -m mypy backend/agentbank
-python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
+# 先按 README 在独立环境安装 requirements-dev.lock 和项目
+.tmp/m4-review-001/Scripts/python.exe scripts/release.py
 ```
 
-最近一次结果：全量 pytest 538 passed；Ruff 通过；Mypy 通过；评测矩阵 `227/227` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
+历史 M3 基线：全量 pytest 538 passed、Ruff/Mypy 通过、评测矩阵 `227/227` 通过，原始证据保留在 `M3-LOCAL-EVIDENCE.md`。当前代码已继续修复，M4 最终测试数须由锁定环境重新执行 `scripts/release.py` 后记录；不沿用历史数字宣称当前通过。候选范围和外部待验项见 [M4-LOCAL-CANDIDATE.md](M4-LOCAL-CANDIDATE.md)。
 
 ## M2 分阶段提交证据
 
