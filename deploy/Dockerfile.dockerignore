@@ -4,6 +4,7 @@ __pycache__
 *.db
 *.db-shm
 *.db-wal
+**/*.message-locks
 frontend/node_modules
 .env
 .env.*

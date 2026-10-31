@@ -1,0 +1,8 @@
+# Reviewed non-secret historical fixtures; exact fingerprints only.
+# SHA-256 of backend/agentbank/evals/api_performance.py in the source manifest.
+b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/source-manifest.json:generic-api-key:37
+# Deterministic reminder deduplication key: cap-S02-normal.
+b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/api-self-test.json:generic-api-key:9176
+b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/evaluation.json:generic-api-key:4240
+# Negative authorization test idempotency key: x05-forged-mfa.
+f3c398e130d36540220d54ec4a6e803b14746ffd:backend/tests/test_m2_unified_authorization.py:generic-api-key:135

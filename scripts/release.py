@@ -23,6 +23,7 @@ ROOT_FILES = {
     "requirements-dev.lock",
     ".env.example",
     ".gitignore",
+    ".gitleaksignore",
 }
 EXCLUDED_PARTS = {
     "__pycache__",
@@ -42,7 +43,7 @@ def included(path: str) -> bool:
     p = Path(path)
     return (
         (p.parts[0] in SOURCE_DIRS or path in ROOT_FILES)
-        and not any(x in EXCLUDED_PARTS or x.endswith(".egg-info") for x in p.parts)
+        and not any(x in EXCLUDED_PARTS or x.endswith((".egg-info", ".message-locks")) for x in p.parts)
         and (not any(part.startswith(".env") for part in p.parts) or path == ".env.example")
         and not any(
             p.name.endswith(x)
@@ -109,6 +110,7 @@ def source_paths() -> list[str]:
                     if part not in EXCLUDED_PARTS
                     and not part.startswith(".env")
                     and not part.endswith(".egg-info")
+                    and not part.endswith(".message-locks")
                     and not (Path(current) / part).is_symlink()
                 ]
                 candidates.update(

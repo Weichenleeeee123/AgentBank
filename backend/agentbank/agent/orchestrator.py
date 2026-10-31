@@ -14,6 +14,7 @@ from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.security.fragments import ReplyFragmentChecker
 from agentbank.security.dlp import redact_text
 from agentbank.agent.intent import IntentParser, ParsedIntent
+from agentbank.agent.message_lock import conversation_lock
 from agentbank.llm.gateway import LLMGateway
 from agentbank.tools import INPUT_FIELDS
 from agentbank.workflow.recovery import HandoffService
@@ -45,6 +46,31 @@ class AgentOrchestrator:
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app",
                *, message_id: str | None = None) -> AgentResponse:
+        if not text.strip() or len(text) > 4000 or len(conversation_id) > 200:
+            raise DomainError("MESSAGE_INPUT_INVALID")
+        if message_id is not None and (not message_id or len(message_id) > 120):
+            raise DomainError("MESSAGE_INPUT_INVALID")
+        # The OS releases this lock even on abrupt process termination. Holding
+        # it proves no worker can still mutate this conversation, unlike a TTL.
+        with conversation_lock(self.database, user_id, conversation_id):
+            with self.database.atomic() as session:
+                abandoned = session.scalars(select(AgentMessage).where(
+                    AgentMessage.user_id == user_id,
+                    AgentMessage.conversation_id == conversation_id,
+                    AgentMessage.status == 'processing')).all()
+                for message in abandoned:
+                    message.status = 'unknown'
+                    message.error_code = 'MESSAGE_OUTCOME_UNKNOWN'
+                    self.capabilities.audit.append(session, f'trace_message_{uuid.uuid4().hex}',
+                        user_id, 'agent.message.interrupted',
+                        {'conversation_id': conversation_id, 'message_id': message.message_id,
+                         'status': 'unknown'})
+            # Commit recovery separately: retrying the old ID must remain unknown
+            # without rolling recovery back or dispatching its business work again.
+            return self._handle_claimed(user_id, conversation_id, text, channel, message_id=message_id)
+
+    def _handle_claimed(self, user_id: str, conversation_id: str, text: str, channel: str,
+                        *, message_id: str | None) -> AgentResponse:
         request_id = message_id or uuid.uuid4().hex
         if not request_id or len(request_id) > 120 or not text.strip() or len(text) > 4000 or len(conversation_id) > 200:
             raise DomainError("MESSAGE_INPUT_INVALID")

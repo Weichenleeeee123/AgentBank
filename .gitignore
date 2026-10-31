@@ -18,6 +18,7 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+*.message-locks/
 .context/
 .tmp/
 

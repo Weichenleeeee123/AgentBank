@@ -23,6 +23,7 @@ def test_gitless_export_discovers_only_source_and_supports_gate_inventory(
         "README.md": "exported source",
         "requirements.lock": "example==1.0",
         ".env.example": "EXAMPLE=",
+        ".gitleaksignore": "# Reviewed historical false positives only",
         "backend/agentbank/app.py": "pass",
         "frontend/app.js": "const app = 1;",
         "tests/frontend/app.test.mjs": "export {};",
@@ -36,6 +37,7 @@ def test_gitless_export_discovers_only_source_and_supports_gate_inventory(
         "backend/__pycache__/app.pyc": "generated",
         "backend/demo.db": "local state",
         "backend/demo.db.checkpoints.key": "local key",
+        "backend/demo.db.message-locks/conversation.lock": "runtime lock",
         "frontend/node_modules/vendor.js": "generated",
     }
     for name, content in (exported | excluded).items():
@@ -71,6 +73,7 @@ def test_archive_excludes_local_credentials_state_and_generated_files() -> None:
         "backend/x.db",
         "backend/x.db-wal",
         "backend/x.db.checkpoints.key",
+        "backend/x.db.message-locks/conversation.lock",
         "backend/__pycache__/x.pyc",
         "backend/agentbank.egg-info/PKG-INFO",
         "frontend/node_modules/x.js",
@@ -79,6 +82,7 @@ def test_archive_excludes_local_credentials_state_and_generated_files() -> None:
         assert not release.included(path), path
     for path in (
         ".env.example",
+        ".gitleaksignore",
         "requirements.lock",
         "requirements-dev.lock",
         "backend/agentbank/agent/prompts/planner.md",
