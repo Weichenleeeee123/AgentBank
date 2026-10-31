@@ -60,7 +60,8 @@ def test_gate_inventory_covers_release_quality_and_every_frontend_file(tmp_path:
     } <= commands.keys()
     assert commands["ruff"][-3:] == ["backend", "scripts", "tests"]
     assert commands["mypy"][-1] == "backend/agentbank"
-    assert commands["python-tests"][-2:] == ["backend/tests", "tests"]
+    assert commands["python-tests"][3:5] == ["backend/tests", "tests"]
+    assert commands["python-tests"][-2:] == ["--basetemp", str(tmp_path / "pytest")]
     for path in (ROOT / "tests/frontend").glob("*.test.mjs"):
         assert path.relative_to(ROOT).as_posix() in commands["frontend-tests"]
     for path in (ROOT / "frontend").rglob("*"):

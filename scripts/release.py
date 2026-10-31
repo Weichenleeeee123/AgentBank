@@ -92,7 +92,8 @@ def gate_commands(out: Path) -> list[tuple[str, list[str]]]:
         ("dependencies", [sys.executable, "-m", "pip", "check"]),
         ("ruff", [sys.executable, "-m", "ruff", "check", "backend", "scripts", "tests"]),
         ("mypy", [sys.executable, "-m", "mypy", "backend/agentbank"]),
-        ("python-tests", [sys.executable, "-m", "pytest", "backend/tests", "tests"]),
+        ("python-tests", [sys.executable, "-m", "pytest", "backend/tests", "tests",
+                          "--basetemp", str(out / "pytest")]),
         ("frontend-tests", ["node", "--test", *frontend_tests]),
     ]
     commands.extend(
