@@ -4,11 +4,11 @@
 
 ## 当前开发阶段
 
-本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 499 passed、evaluation 223/223、Ruff/Mypy通过。本轮已用 DeepSeek Flash 在线 smoke 验证 planner、reply、fraud 三角色；一次分类请求经历主 provider 重试后成功。备用 provider/费用预算、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料仍需分别验收。本地双实例已fresh build/restart/health/self-test，不等于公网生产部署。
+本地模拟范围内，33项能力、结构化LLM planner/explorer/reply/fraud角色、自由生成DAG与只读前置事实解析、两类复合只读计划、生日报价DAG、原子授权、Web IM持久防重放、PWA直达表单/修订、DSL完整deadline、方向可追溯月/年报及CAP traceability均已实现并加回归。当前本地验证为 pytest 508 passed、evaluation 223/223、Ruff/Mypy通过。本轮已用 DeepSeek Flash 在线 smoke 验证 planner、reply、fraud 三角色；一次分类请求经历主 provider 重试后成功。备用 provider/费用预算、外部商户/推送/银行租户、飞书生产租户、公网HTTPS和M4材料仍需分别验收。本地双实例已fresh build/restart/health/self-test，不等于公网生产部署。
 
 六个业务集群的边界用例与主要不变量见 docs/M2-COVERAGE.md；PLAN §11 boundary fixtures 与99条CAP case的代码/测试/版本追溯由 docs/M2-CAP-TRACEABILITY.md 及 executable manifest提供。
 
-M2的阶段内本地门禁已经通过。M3安全闭环（冷静期真实时间、熔断攻击/误拦覆盖、设备边界与自测面板深度）和M4发布物仍各自验收，不因M2通过而视为完成。
+M2的阶段内本地门禁已经通过，当前进入 M3 恢复与安全闭环。M3 的本地安全/恢复测试和评测矩阵已通过；外部租户、生产部署和M4发布物仍各自验收，不因本地模拟通过而视为线上完成。
 
 99 个 CAP journey 已由 `docs/M2-CAP-TRACEABILITY.md` 逐项绑定到 normal、colloquial、boundary/recovery 分支；这证明本地确定性验收闭环，不等同于真实 provider 联调或 M4 发布完成。
 
@@ -46,7 +46,7 @@ python -m mypy backend/agentbank
 python -c "from pathlib import Path; from agentbank.evals.runner import run_cases; print(run_cases(Path('evals')))"
 ```
 
-最近一次结果：全量 pytest 499 passed；Ruff 通过；Mypy 通过；评测矩阵 `223/223` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
+最近一次结果：全量 pytest 508 passed；Ruff 通过；Mypy 通过；评测矩阵 `223/223` 通过。评测数字是当前本地模拟数据和代码版本的实测值，不代表线上部署性能或真实银行效果。
 
 ## M2 分阶段提交证据
 
@@ -58,3 +58,5 @@ python -c "from pathlib import Path; from agentbank.evals.runner import run_case
 - `cc0ea7e`：DSL 字段、metrics、排序、只读和行数硬限制；
 - `f5c62d0`：生日计划日期、修订、暂停/恢复/取消和订单资金结算；
 - `3e94626`：剩余 M2 能力自然语言 Agent 路由。
+- `a353fee`：模型提出的通用能力 DAG、分级确认与计划级 MFA。
+- `aa800fe`：只读前置事实解析、引用来源约束、计划 MFA 分流和 PWA 计划确认交互。

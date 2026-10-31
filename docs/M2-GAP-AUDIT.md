@@ -6,7 +6,7 @@
 |---|---|---|---|
 | A | 理解/规划/只读探索/回复/反诈分类 LLM 角色 | llm gateway + 版本化 fraud prompt；结构化 schema、主备、2秒 fraud timeout；转账 prepare 前规则+分类检查，不安全/未知走 handoff；test_fraud_llm_role、test_llm_gateway、test_agent_planning | 本地闭环；DeepSeek Flash 在线 smoke 已测；backup provider故障域与费用预算未联调 |
 | B | 结构化对话持久化、最近 6 条用户消息、用户隔离 | ConversationState/Reference；test_agent_core/test_agent_planning | 本地闭环 |
-| C | 有界 ReAct 和有限复合计划 | 五步只读探索；固定 query_analysis_report、investment_review、birthday 模板；composite checkpoint 用幂等键恢复；test_llm_gateway/test_composite_plans/test_agent_planning | 本地闭环；写工具不进入自由探索循环 |
+| C | 有界 ReAct 和计划 DAG | 五步只读探索；固定 query_analysis_report、investment_review、birthday 模板；模型可提出注册能力 DAG；服务端对只读前置节点做事实预执行并解析 `$ref`，随后生成不可变 action/display hash；composite/generic checkpoint 用幂等键恢复；test_llm_gateway/test_composite_plans/test_free_dag_security/test_agent_planning | 本地闭环；写工具不进入探索循环，模型不能提供授权或服务端字段 |
 | D | 33 项输入/输出契约、策略前置条件、补偿、展示元数据 | capability_contracts 为33项定义严格输入、授权、业务/状态结果、嵌套终态证据；tools 注册表由合同派生；CapabilityService 返回强制校验；test_capability_contracts_full | 本地闭环；补偿是本地模拟声明，不等于外部补偿已履约 |
 | E | Prepare、receipt/mandate、hash复算、业务与审计原子提交 | Database.atomic scoped session；确认/MFA/回执/领域副作用/审计原子提交；C08 redaction、X05 staged hash；test_m2_atomic_commit/test_m2_unified_authorization | 本地闭环 |
 | F | 会话身份、强类型字段、来源与所有权 | 33项严格输入合同、服务端 user_id、owner 检查、模型 slot grounding；test_capability_contracts_full/test_m2_api_matrix/test_llm_runtime | 本地闭环 |
