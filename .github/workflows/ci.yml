@@ -12,17 +12,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
-      - run: python -m ruff check backend
-      - run: python -m mypy backend/agentbank
-      - run: python -m pytest
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: python -m pip install -r requirements-dev.lock
+      - run: python -m pip install --no-deps -e .
+      - name: Full local release gates
+        run: python scripts/release.py --package
+      - name: Preserve release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-release-evidence
+          path: |
+            .tmp/releases/**/gates.json
+            .tmp/releases/**/check-*.txt
+            .tmp/releases/**/eval-cases.json
+            .tmp/releases/**/http-self-test.json
+            .tmp/releases/**/manifest.json
+            .tmp/releases/**/agentbank-m4-source.zip
       - name: Scan secrets
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build image
         run: docker build -f deploy/Dockerfile .
-      - name: Frontend smoke
-        run: python -c "from pathlib import Path; assert Path('frontend/index.html').exists(); assert Path('frontend/app.js').exists()"
