@@ -63,6 +63,15 @@ class AgentOrchestrator:
                 if cached.status != 'completed':
                     raise DomainError('MESSAGE_OUTCOME_UNKNOWN')
                 return AgentResponse(**json.loads(cached.response_json))
+            # Different transport IDs still share pending slots and the latest
+            # prepared action. Claim the conversation before releasing the DB
+            # transaction so concurrent workers cannot interleave those writes.
+            processing = session.scalar(select(AgentMessage.message_id).where(
+                AgentMessage.user_id == user_id,
+                AgentMessage.conversation_id == conversation_id,
+                AgentMessage.status == 'processing').limit(1))
+            if processing is not None:
+                raise DomainError('CONVERSATION_BUSY')
             session.add(AgentMessage(user_id=user_id, conversation_id=conversation_id, message_id=request_id,
                                      request_hash=request_hash, response_json='', status='processing'))
         key = "agent-" + hashlib.sha256(json.dumps([user_id, conversation_id, request_id]).encode()).hexdigest()

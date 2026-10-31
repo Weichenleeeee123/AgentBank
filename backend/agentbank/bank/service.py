@@ -17,6 +17,7 @@ from agentbank.contracts import Assurance
 from agentbank.security.fraud import FraudDetector, FraudLevel, record_risk
 from agentbank.security.cooling import CoolingPeriodService
 from agentbank.security.breaker import CircuitBreaker
+from agentbank.security.dlp import redact_text
 from agentbank.workflow.recovery import HandoffService
 from agentbank.db import (
     Account,
@@ -45,6 +46,20 @@ def _display_hash(display: list[dict[str, str]]) -> str:
 
 def _utc_aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _transfer_display(account: Account, payee: Payee, amount_minor: int,
+                      memo: str | None) -> list[dict[str, str]]:
+    # Integer formatting preserves every minor unit, including amounts beyond
+    # the exact range of an IEEE float. Account destinations are shown masked.
+    display = [{"label": "收款人", "value": payee.masked_name},
+               {"label": "付款账户", "value": f"尾号 {account.id[-4:]}"},
+               {"label": "收款账户", "value": f"尾号 {payee.account_id[-4:]}"},
+               {"label": "金额", "value": f"¥{amount_minor // 100}.{amount_minor % 100:02d}"},
+               {"label": "币种", "value": "人民币"}]
+    if memo:
+        display.append({"label": "备注", "value": memo})
+    return display
 
 
 @dataclass(frozen=True)
@@ -114,7 +129,9 @@ class TransferService:
             completed = bucket.completed_minor if bucket else 0
             pending = bucket.pending_minor if bucket else 0
             operation_id = f"op_{uuid.uuid4().hex}"
-            args = {"source_account_id": account.id, "recipient_id": payee.id, "amount_minor": amount_minor,
+            memo = redact_text(memo) if memo is not None else None
+            args = {"source_account_id": account.id, "recipient_id": payee.id,
+                    "recipient_account_id": payee.account_id, "amount_minor": amount_minor,
                     "currency": "CNY", "memo": memo}
             decision = decide("transfer.create", PolicyContext(projected_today_minor=completed + pending + amount_minor,
                                                                 new_recipient=payee.is_new), operation_id=operation_id)
@@ -122,13 +139,12 @@ class TransferService:
                 raise DomainError(decision.reason_codes[0])
             plan_id = f"plan_{uuid.uuid4().hex}"
             node_id = f"transfer_{uuid.uuid4().hex}"
-            display = [{"label": "收款人", "value": payee.masked_name},
-                       {"label": "金额", "value": f"¥{amount_minor / 100:.2f}"},
-                       {"label": "币种", "value": "人民币"}]
+            display = _transfer_display(account, payee, amount_minor, memo)
             display_digest = _display_hash(display)
             digest = action_hash("transfer.create", args)
             session.add(PlanRecord(id=plan_id, user_id=user_id, revision=1, status="awaiting_confirmation" if decision.assurance is Assurance.confirm else "awaiting_mfa",
-                                   display_hash=display_digest, action_hash=digest))
+                                   display_hash=display_digest, action_hash=digest,
+                                   display_json=json.dumps(display, ensure_ascii=False)))
             session.add(PlanNodeRecord(id=node_id, plan_id=plan_id, tool="transfer.create", args_json=json.dumps(args, ensure_ascii=False),
                                        idempotency_key=f"idem_{plan_id}"))
             session.add(DecisionRecord(id=decision.decision_id, plan_id=plan_id, operation_id=operation_id,
@@ -169,10 +185,16 @@ class TransferService:
         payee = session.get(Payee, str(args.get("recipient_id", "")))
         if payee is None or payee.owner_user_id != user_id:
             raise DomainError("NOT_OWNER")
-        display = [{"label": "收款人", "value": payee.masked_name},
-                   {"label": "金额", "value": f"¥{int(str(args['amount_minor'])) / 100:.2f}"},
-                   {"label": "币种", "value": "人民币"}]
-        if _display_hash(display) != receipt.display_hash or receipt.display_hash != plan.display_hash:
+        if args.get("recipient_account_id") != payee.account_id:
+            raise DomainError("ACTION_CHANGED")
+        account = session.get(Account, str(args.get("source_account_id", "")))
+        if account is None or account.user_id != user_id:
+            raise DomainError("NOT_OWNER")
+        memo = args.get("memo")
+        display = _transfer_display(account, payee, int(str(args["amount_minor"])),
+                                    str(memo) if memo is not None else None)
+        if (_display_hash(display) != receipt.display_hash or receipt.display_hash != plan.display_hash
+                or json.loads(plan.display_json) != display):
             raise DomainError("HASH_MISMATCH")
         return args
 
