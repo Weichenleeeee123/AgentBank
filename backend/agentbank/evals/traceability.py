@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from agentbank.evals.runner import CAPABILITY_IDS, CAP_JOURNEYS, EvaluationReport
 
