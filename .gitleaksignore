@@ -1,8 +1,11 @@
 # Reviewed non-secret historical fixtures; exact fingerprints only.
 # SHA-256 of backend/agentbank/evals/api_performance.py in the source manifest.
 b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/source-manifest.json:generic-api-key:37
-# Deterministic reminder deduplication key: cap-S02-normal.
+# Deterministic reminder identifiers in recorded test evidence.
 b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/api-self-test.json:generic-api-key:9176
 b8d6507710ca6a491b58837fcf2f6447470818de:docs/evidence/m3-local/evaluation.json:generic-api-key:4240
-# Negative authorization test idempotency key: x05-forged-mfa.
+# Deterministic identifier in a negative authorization test.
 f3c398e130d36540220d54ec4a6e803b14746ffd:backend/tests/test_m2_unified_authorization.py:generic-api-key:135
+# The explanatory comments in the initial allowlist repeated those same fixtures.
+4d771472f3da3e9da60177eba1726738e709c0fc:.gitleaksignore:generic-api-key:4
+4d771472f3da3e9da60177eba1726738e709c0fc:.gitleaksignore:generic-api-key:7
