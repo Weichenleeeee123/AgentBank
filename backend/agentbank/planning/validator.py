@@ -20,6 +20,7 @@ _REQUIRED_PLAN_ARGUMENTS: dict[str, set[str]] = {
     "X02": {"amount_minor"}, "X03": {"delivery_date"}, "X04": {"delivery_date"},
     "X05": {"card_id"},
 }
+_SERVER_OWNED_FIELDS = {"assurance", "device_token", "otp", "new_pin", "plan_id", "quote_id", "reservation_id"}
 
 
 class PlanValidator:
@@ -28,7 +29,8 @@ class PlanValidator:
         self.max_nodes = max_nodes
 
     @classmethod
-    def validate_proposal(cls, nodes: list[dict[str, Any]], *, max_nodes: int = 20) -> list[str]:
+    def validate_proposal(cls, nodes: list[dict[str, Any]], *, max_nodes: int = 20,
+                          allow_server_owned: bool = False) -> list[str]:
         """Validate model-proposed capability nodes before server-side compilation."""
         registry = {
             capability_id: {"kind": TOOL_REGISTRY[capability_id]["kind"],
@@ -45,8 +47,8 @@ class PlanValidator:
                 continue
             candidate = dict(node)
             candidate.setdefault("idempotency_key", f"model-{index}")
-            if definition.get("kind") == "command":
-                candidate.setdefault("compensation", CAPABILITY_CONTRACTS[capability_id].compensation)
+            if definition.get("kind") == "command" and not candidate.get("compensation"):
+                candidate["compensation"] = CAPABILITY_CONTRACTS[capability_id].compensation
             normalized.append(candidate)
         order = cls(registry, max_nodes=max_nodes).validate(normalized)
         for node in normalized:
@@ -56,13 +58,15 @@ class PlanValidator:
             args = node.get("args", {})
             if set(args) - INPUT_FIELDS[capability_id]:
                 raise DomainError("PLAN_ARGUMENT_INVALID")
+            if not allow_server_owned:
+                cls._reject_server_owned_literals(args)
             missing = _REQUIRED_PLAN_ARGUMENTS.get(capability_id, set()) - set(args)
             if missing:
                 raise DomainError("PLAN_ARGUMENT_MISSING")
             if capability_id in {"T01", "T03", "T04"} and not (set(args) & {"recipient_id", "recipient_name", "alias"}):
                 raise DomainError("PLAN_ARGUMENT_MISSING")
             try:
-                validate_capability_payload(capability_id, cls._replace_refs(args))
+                validate_capability_payload(capability_id, cls._replace_refs(args, capability_id))
             except DomainError as error:
                 raise DomainError("PLAN_ARGUMENT_INVALID") from error
             expected_compensation = CAPABILITY_CONTRACTS[capability_id].compensation
@@ -72,14 +76,39 @@ class PlanValidator:
         return order
 
     @staticmethod
-    def _replace_refs(value: Any) -> Any:
+    def _replace_refs(value: Any, capability_id: str = "", field: str = "") -> Any:
         if isinstance(value, dict):
             if set(value) == {"$ref"}:
-                return "__reference__"
-            return {key: PlanValidator._replace_refs(child) for key, child in value.items()}
+                return PlanValidator._placeholder_for(field)
+            return {key: PlanValidator._replace_refs(child, capability_id, key) for key, child in value.items()}
         if isinstance(value, list):
-            return [PlanValidator._replace_refs(child) for child in value]
+            return [PlanValidator._replace_refs(child, capability_id, field) for child in value]
         return value
+
+    @staticmethod
+    def _reject_server_owned_literals(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in _SERVER_OWNED_FIELDS and not (isinstance(child, dict) and set(child) == {"$ref"}):
+                    raise DomainError("PLAN_SERVER_FIELD")
+                PlanValidator._reject_server_owned_literals(child)
+        elif isinstance(value, list):
+            for child in value:
+                PlanValidator._reject_server_owned_literals(child)
+
+    @staticmethod
+    def _placeholder_for(field: str) -> Any:
+        if field.endswith("_minor"):
+            return 1
+        if field in {"product_ids", "participant_ids"}:
+            return ["ref", "ref"] if field == "participant_ids" else ["ref"]
+        if field == "answers":
+            return [1] * 10
+        if field in {"virtual"}:
+            return True
+        if field in {"days", "max_uses", "limit"}:
+            return 1
+        return "ref"
 
     def validate(self, nodes: list[dict[str, Any]]) -> list[str]:
         if not nodes or len(nodes) > self.max_nodes:

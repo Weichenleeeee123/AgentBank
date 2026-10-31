@@ -11,7 +11,7 @@ function node(tag, text = "", className = "") {
 
 function addBubble(kind, text, fragments = [], data = {}, recordId = null, displayHash = "") {
   const bubble = node("article", "", `bubble ${kind}`);
-  const title = kind === "user" ? "你" : kind === "confirmation" ? "待确认" :
+  const title = kind === "user" ? "你" : ["confirmation", "plan_confirmation"].includes(kind) ? "待确认" :
     kind === "mfa" ? "需要强验证" : kind === "error" ? "处理失败" : "AgentBank";
   bubble.append(node("h3", title), node("p", text || ""));
 
@@ -39,7 +39,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   }
   if (Array.isArray(data?.transactions)) appendTransactions(bubble, data.transactions);
 
-  if (recordId && ["confirmation", "mfa"].includes(kind)) {
+  if (recordId && ["confirmation", "plan_confirmation", "mfa"].includes(kind)) {
     const actions = node("div", "", "card-actions");
     const button = node("button", kind === "mfa" ? "输入验证码" : "确认执行");
     button.type = "button";

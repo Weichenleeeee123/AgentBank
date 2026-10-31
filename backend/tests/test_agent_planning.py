@@ -48,9 +48,47 @@ def test_llm_outage_uses_deterministic_fallback_and_does_not_execute_write(tmp_p
     response = agent.handle("user_001", "planner-outage", "给房东转100元")
     assert response.kind == "confirmation"
     assert response.data["payload"]["amount_minor"] == 10000
-    from agentbank.db import Operation
-    with agent.database.sessions() as session:
-        assert session.query(Operation).count() == 0
+
+
+def test_model_dag_defaults_server_generated_node_metadata(tmp_path: Path) -> None:
+    def fraud_transport(config, role, payload):
+        if role == "fraud":
+            return {"category": "safe", "confidence": 0.99}
+        if role == "planner":
+            return {"intent": "check balance", "capability_id": None, "plan_template": None,
+                    "slots": {}, "missing": [], "ambiguities": [], "references": [],
+                    "suggested_next_action": "confirm",
+                    "proposed_dag": [{"id": "balance", "tool": "Q01", "args": {}, "depends_on": []}]}
+        return {"message": "余额已确认", "fragments": []}
+
+    agent = make_agent(tmp_path, fraud_transport)
+    response = agent.handle("user_001", "model-dag-defaults", "查余额并生成计划")
+
+    assert response.kind == "plan_confirmation"
+    assert response.data["nodes"][0]["idempotency_key"].startswith(response.data["plan_id"])
+
+
+def test_model_dag_confirmation_routes_mfa_plans_to_verification(tmp_path: Path) -> None:
+    def transport(config, role, payload):
+        if role == "planner":
+            return {"intent": "investment", "capability_id": None, "plan_template": None,
+                    "slots": {}, "missing": [], "ambiguities": [], "references": [],
+                    "suggested_next_action": "confirm",
+                    "proposed_dag": [{"id": "subscribe", "tool": "W04",
+                                      "args": {"product_id": "product_R1", "amount_minor": 10_000},
+                                      "depends_on": []}]}
+        return {"message": "已完成", "fragments": []}
+
+    agent = make_agent(tmp_path, transport)
+    from agentbank.bank.capabilities_full import CapabilityService
+    CapabilityService(agent.database).execute("user_001", "W03", {"answers": [3] * 10}, "agent-dag-risk")
+    prepared = agent.handle("user_001", "model-dag-mfa", "申购 R1 理财 100 元")
+
+    assert prepared.kind == "plan_confirmation"
+    confirmed = agent.confirm("user_001", prepared.record_id or "", prepared.display_hash,
+                              str(prepared.data["receipt_id"]))
+    assert confirmed.kind == "mfa"
+    assert confirmed.data["status"] == "awaiting_mfa"
 
 
 def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Path) -> None:

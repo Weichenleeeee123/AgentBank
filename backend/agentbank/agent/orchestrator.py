@@ -441,7 +441,14 @@ class AgentOrchestrator:
         from agentbank.workflow.planner import BusinessPlanService
 
         try:
-            nodes = [PlanNode.model_validate(node) for node in planned["proposed_dag"]]
+            normalized_nodes: list[dict[str, Any]] = []
+            for index, raw_node in enumerate(planned["proposed_dag"]):
+                node = dict(raw_node)
+                node.setdefault("depends_on", [])
+                node.setdefault("timeout_ms", 5_000)
+                node.setdefault("idempotency_key", f"model-{node.get('id', index)}")
+                normalized_nodes.append(node)
+            nodes = [PlanNode.model_validate(node) for node in normalized_nodes]
             plan = BusinessPlanService(self.database).create_proposed_plan(
                 user_id, str(planned.get("intent", "business plan")), nodes)
         except (DomainError, ValueError, TypeError) as error:
@@ -479,6 +486,10 @@ class AgentOrchestrator:
         if plan_confirmation:
             from agentbank.workflow.planner import BusinessPlanService
             plan_result = BusinessPlanService(self.database).confirm_plan(user_id, record_id, receipt_id, display_hash)
+            if plan_result.get("status") == "awaiting_mfa":
+                return AgentResponse(kind="mfa", intent="business_plan", record_id=record_id,
+                                     display_hash=display_hash, data=plan_result,
+                                     message="计划已确认；请在模拟手机中完成强验证后继续。")
             return AgentResponse(kind="result", intent="birthday_plan", record_id=record_id,
                                  display_hash=display_hash, data=plan_result,
                                  message="计划确认已记录，系统将按授权要求继续执行。")
