@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import {uppercaseMoney,displayValue,money,resultKind} from '../../frontend/presentation.mjs';
 class Element {
-  constructor(tag='div') { this.tagName=tag; this.children=[]; this.value=''; this.textContent=''; this.dataset={}; this.listeners={}; this.parentElement=this; this.disabled=false; }
+  constructor(tag='div') { this.tagName=tag; this.children=[]; this._value=null; this.textContent=''; this.dataset={}; this.listeners={}; this.parentElement=this; this.disabled=false; }
+  get value() { return this._value ?? (this.tagName === 'option' ? this.textContent : ''); }
+  set value(value) { this._value=value; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children=children; }
   querySelector() { return new Element('button'); }
@@ -51,4 +53,8 @@ for (const status of ['awaiting_confirmation','awaiting_mfa']) test(`linked ${st
  const h=harness();h.context.location.search='?plan_id=plan-red';h.context.fetch=async(path,options)=>{h.calls.push({path,options});return {ok:true,json:async()=>({plan_id:'plan-red',status,receipt_id:'plan-receipt',display_hash:'plan-hash',assurance:'mfa',display:[{label:'操作',value:'订阅取消'}]})}};
  await h.run('loadLinkedRecord()');assert.equal(h.calls.at(-1).path,'/v1/plans/plan-red');const card=h.get('messages').children.find(c=>c.className.includes('bubble'));assert.match(card.text,status==='awaiting_mfa'?/输入验证码/:/确认执行/);
  if(status==='awaiting_confirmation'){await card.children.find(c=>c.className==='card-actions').children[0].onclick();const request=h.calls.at(-1);assert.match(request.path,/\/conversations\/.+\/records\/plan-red\/confirm/);assert.deepEqual(JSON.parse(request.options.body),{receipt_id:'plan-receipt',display_hash:'plan-hash'});}
+});
+
+test('new payee placeholder never masquerades as selected payee ID',async()=>{
+ const h=harness();h.get('recipientName').value='房东';h.context.fetch=async()=>({ok:true,json:async()=>({payees:[{id:'payee-landlord',masked_name:'房东',phone_tail:null}]})});await h.run('lookupPayees()');assert.equal(h.get('recipientCandidate').children[0].value,'');assert.doesNotMatch(h.get('recipientCandidate').text,/null/);
 });

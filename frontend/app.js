@@ -379,9 +379,10 @@ async function lookupPayees() {
   try {
     const response = await api(`/v1/payees?name=${encodeURIComponent(name)}`);
     if (lookup !== payeeLookup) return;
-    select.replaceChildren(node("option", "使用新收款人"));
+    const newPayee = node("option", "使用新收款人"); newPayee.value = "";
+    select.replaceChildren(newPayee);
     for (const payee of response.payees || []) {
-      const option = node("option", `${payee.masked_name || name} · 尾号 ${payee.phone_tail}${payee.is_new ? " · 新收款人" : ""}`);
+      const option = node("option", `${payee.masked_name || name}${payee.phone_tail ? ` · 尾号 ${payee.phone_tail}` : ""}${payee.is_new ? " · 新收款人" : ""}`);
       option.value = payee.id;
       select.append(option);
     }
