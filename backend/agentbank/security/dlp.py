@@ -20,8 +20,17 @@ def redact_text(value: str) -> str:
 def redact_payload(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
+    if isinstance(value, (int, float)):
+        return value
     if isinstance(value, dict):
-        return {str(key): redact_payload(item) for key, item in value.items()}
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if key_text in {"otp", "code", "verification_code", "验证码"}:
+                redacted[str(key)] = "[OTP_REDACTED]"
+            else:
+                redacted[str(key)] = redact_payload(item)
+        return redacted
     if isinstance(value, list):
         return [redact_payload(item) for item in value]
     return value

@@ -10,6 +10,8 @@ from agentbank.db import Database
 from agentbank.errors import DomainError
 from agentbank.security.cooling import CoolingPeriodService
 from agentbank.security.dlp import redact_payload
+from agentbank.security.fragments import ReplyFragmentChecker
+from agentbank.audit.store import PersistentAudit
 from agentbank.seed.loader import load_seed
 
 
@@ -80,3 +82,25 @@ def test_dlp_redacts_standalone_otp_in_nested_payload() -> None:
     redacted = redact_payload({"nested": ["OTP 123456", {"value": "验证码：654321"}]})
     assert "123456" not in str(redacted)
     assert "654321" not in str(redacted)
+
+
+def test_dlp_redacts_otp_key_and_standalone_six_digits() -> None:
+    redacted = redact_payload({"otp": 123456, "message": "备用验证码 777777"})
+    assert redacted["otp"] == "[OTP_REDACTED]"
+    assert "777777" not in str(redacted)
+
+
+def test_reply_checker_rejects_numeric_and_status_claims_in_text() -> None:
+    checker = ReplyFragmentChecker()
+    for text in ("转账已经成功", "余额是 100 元", "结果待核实之外已完成"):
+        with pytest.raises(DomainError):
+            checker.validate([{"type": "text", "text": text}])
+
+
+def test_audit_checkpoint_and_verify_creates_final_evidence(database: Database) -> None:
+    audit = PersistentAudit(database)
+    with database.sessions.begin() as session:
+        audit.append(session, "trace-checkpoint", "user_001", "security.test", {"ok": True})
+    checkpoint = audit.checkpoint_and_verify()
+    assert checkpoint is not None
+    assert audit.verify() is True

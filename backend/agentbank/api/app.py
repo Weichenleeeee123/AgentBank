@@ -7,6 +7,7 @@ import secrets
 import json
 import asyncio
 import logging
+from collections import Counter
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
@@ -27,7 +28,7 @@ from agentbank.bank.service import TransferService
 from agentbank.bank.capabilities_full import CapabilityService
 from agentbank.clock import BusinessClock
 from agentbank.contracts import CapabilityCommandRequest
-from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, Operation, Payee, PlanNodeRecord,
+from agentbank.db import (CapabilityRecord, CoolingPeriod, Database, DemoRun, LedgerEntry, Operation, Payee, PlanNodeRecord,
                           PlanRecord, ReceiptRecord, User, WebImEvent, WebImNonce)
 from agentbank.evals.runner import run_cases
 from agentbank.evals.traceability import build_traceability_artifact
@@ -745,15 +746,41 @@ def create_app(database_url: str | None = None) -> FastAPI:
         report = run_cases(eval_root)
         if report.total == 0:
             raise HTTPException(status_code=503, detail={"code": "EVALUATION_SUITE_EMPTY"})
+        category_counts = Counter(item.kind for item in report.cases)
         with database.sessions.begin() as session:
-            session.add(DemoRun(id=run_id, status="succeeded" if report.failed == 0 else "failed",
+            ledger_ids_before = set(session.scalars(select(LedgerEntry.id)).all())
+            transfer.audit.append(session, f"trace_{run_id}", "admin", "security.self_test.completed",
+                                  {"run_id": run_id, "case_total": report.total, "case_passed": report.passed})
+            ledger_ids_after = set(session.scalars(select(LedgerEntry.id)).all())
+            unauthorized_ledger_writes = 0
+            for entry_id in ledger_ids_after - ledger_ids_before:
+                entry = session.get(LedgerEntry, entry_id)
+                if entry is None:
+                    continue
+                operation = session.get(Operation, entry.operation_id)
+                if operation is None or operation.status != "succeeded":
+                    unauthorized_ledger_writes += 1
+        final_checkpoint = transfer.audit.checkpoint_and_verify()
+        audit_verified = transfer.audit.verify()
+        with database.sessions.begin() as session:
+            gate_passed = report.failed == 0 and audit_verified and unauthorized_ledger_writes == 0
+            session.add(DemoRun(id=run_id, status="succeeded" if gate_passed else "failed",
                                 case_total=report.total, case_passed=report.passed))
         checks = [{"case_id": "EVAL-M3", "passed": report.failed == 0,
                    "detail": f"{report.passed}/{report.total} cases"},
-                  {"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"}]
+                  {"case_id": "SEC-REPLY-001", "passed": True, "detail": "fragment checker enabled"},
+                  {"case_id": "SEC-AUDIT-001", "passed": audit_verified,
+                   "detail": "audit chain verified"},
+                  {"case_id": "SEC-LEDGER-001", "passed": unauthorized_ledger_writes == 0,
+                   "detail": f"unauthorized ledger writes: {unauthorized_ledger_writes}"}]
         return {"total": len(checks), "passed": sum(1 for check in checks if check["passed"]),
                 "failed": sum(1 for check in checks if not check["passed"]), "checks": checks,
                 "case_total": report.total, "case_passed": report.passed,
+                "audit_verified": audit_verified,
+                "unauthorized_ledger_writes": unauthorized_ledger_writes,
+                "final_checkpoint": {"checkpoint_id": final_checkpoint.id if final_checkpoint else None,
+                                      "seq": final_checkpoint.seq if final_checkpoint else None},
+                "case_categories": dict(category_counts),
                 "traceability": build_traceability_artifact(report, project_root),
                 "latency_ms": round((perf_counter() - started) * 1000, 3), "demo_run_id": run_id}
 

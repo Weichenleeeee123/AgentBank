@@ -55,6 +55,10 @@ def test_rate_limit_and_demo_run_endpoint(tmp_path: Path, monkeypatch) -> None:
     assert traceability["report"] == {"total": 223, "passed": 223, "failed": 0}
     assert traceability["suite"]["content_sha256"]
     assert len(traceability["manifest"]["cases"]) == 99
+    assert response.json()["audit_verified"] is True
+    assert response.json()["unauthorized_ledger_writes"] == 0
+    assert response.json()["final_checkpoint"]["checkpoint_id"]
+    assert response.json()["case_categories"]["fraud"] >= 1
 
 
 def test_self_test_rejects_empty_evaluation_suite(tmp_path: Path, monkeypatch) -> None:
