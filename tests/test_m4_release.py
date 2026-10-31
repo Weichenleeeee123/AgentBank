@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import yaml
@@ -12,6 +13,48 @@ spec = importlib.util.spec_from_file_location("local_release", ROOT / "scripts/r
 assert spec and spec.loader
 release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
+
+
+def test_gitless_export_discovers_only_source_and_supports_gate_inventory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(release, "ROOT", tmp_path)
+    exported = {
+        "README.md": "exported source",
+        "requirements.lock": "example==1.0",
+        ".env.example": "EXAMPLE=",
+        "backend/agentbank/app.py": "pass",
+        "frontend/app.js": "const app = 1;",
+        "tests/frontend/app.test.mjs": "export {};",
+        ".github/workflows/ci.yml": "name: ci",
+    }
+    excluded = {
+        ".env": "private local value",
+        ".tmp/local-demo/eval.env": "private local value",
+        "backend/.tmp/local.txt": "generated",
+        "backend/.env.local/credentials.txt": "private local value",
+        "backend/__pycache__/app.pyc": "generated",
+        "backend/demo.db": "local state",
+        "backend/demo.db.checkpoints.key": "local key",
+        "frontend/node_modules/vendor.js": "generated",
+    }
+    for name, content in (exported | excluded).items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    assert not (tmp_path / ".git").exists()
+    assert release.source_paths() == sorted(exported)
+    assert release.secret_findings(release.source_paths()) == []
+    commands = dict(release.gate_commands(tmp_path / ".tmp/evidence"))
+    assert commands["frontend-tests"] == ["node", "--test", "tests/frontend/app.test.mjs"]
+    assert ["node", "--check", "frontend/app.js"] in commands.values()
+    assert release.source_revision() == "source-archive"
+    original = "a" * 40
+    (tmp_path / "release-manifest.json").write_text(
+        json.dumps({"git_head": original}), encoding="utf-8"
+    )
+    assert release.source_revision() == original
+    assert "release-manifest.json" not in release.source_paths()
 
 
 def test_business_timezone_is_available_in_clean_runtime() -> None:

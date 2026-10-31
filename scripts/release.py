@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,7 +24,18 @@ ROOT_FILES = {
     ".env.example",
     ".gitignore",
 }
-EXCLUDED_PARTS = {"__pycache__", "node_modules", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+EXCLUDED_PARTS = {
+    "__pycache__",
+    "node_modules",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".git",
+    ".tmp",
+    ".venv",
+    "venv",
+    ".hypothesis",
+}
 
 
 def included(path: str) -> bool:
@@ -31,7 +43,7 @@ def included(path: str) -> bool:
     return (
         (p.parts[0] in SOURCE_DIRS or path in ROOT_FILES)
         and not any(x in EXCLUDED_PARTS or x.endswith(".egg-info") for x in p.parts)
-        and (not p.name.startswith(".env") or path == ".env.example")
+        and (not any(part.startswith(".env") for part in p.parts) or path == ".env.example")
         and not any(
             p.name.endswith(x)
             for x in (
@@ -47,18 +59,65 @@ def included(path: str) -> bool:
     )
 
 
+def git_root_is_source_root() -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=ROOT, capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0 and Path(result.stdout.strip()).resolve() == ROOT.resolve()
+
+
+def source_revision() -> str:
+    if git_root_is_source_root():
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    original_manifest = ROOT / "release-manifest.json"
+    if original_manifest.is_file():
+        try:
+            original = json.loads(original_manifest.read_text(encoding="utf-8"))
+            revision = original.get("git_head")
+            if isinstance(revision, str) and revision.strip():
+                return revision
+        except (ValueError, AttributeError):
+            pass
+    return "source-archive"
+
+
 def source_paths() -> list[str]:
-    # Both tracked modifications and intended, untracked source are hashed and scanned.
-    result = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    )
+    # An export nested under another checkout must not inherit that checkout's Git identity.
+    if git_root_is_source_root():
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        candidates = set(result.stdout.decode().split("\0"))
+    else:
+        # Source archives have no .git or ignore engine: traverse only the explicit roots,
+        # pruning generated directories before descent and applying the same file boundary.
+        candidates = {name for name in ROOT_FILES if (ROOT / name).is_file()}
+        for name in SOURCE_DIRS:
+            directory = ROOT / name
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            for current, directories, files in os.walk(directory, followlinks=False):
+                directories[:] = [
+                    part
+                    for part in directories
+                    if part not in EXCLUDED_PARTS
+                    and not part.startswith(".env")
+                    and not part.endswith(".egg-info")
+                    and not (Path(current) / part).is_symlink()
+                ]
+                candidates.update(
+                    (Path(current) / filename).relative_to(ROOT).as_posix() for filename in files
+                )
     return sorted(
         p
-        for p in set(result.stdout.decode().split("\0"))
-        if p and included(p) and (ROOT / p).is_file()
+        for p in candidates
+        if p and included(p) and (ROOT / p).is_file() and not (ROOT / p).is_symlink()
     )
 
 
@@ -92,8 +151,18 @@ def gate_commands(out: Path) -> list[tuple[str, list[str]]]:
         ("dependencies", [sys.executable, "-m", "pip", "check"]),
         ("ruff", [sys.executable, "-m", "ruff", "check", "backend", "scripts", "tests"]),
         ("mypy", [sys.executable, "-m", "mypy", "backend/agentbank"]),
-        ("python-tests", [sys.executable, "-m", "pytest", "backend/tests", "tests",
-                          "--basetemp", str(out / "pytest")]),
+        (
+            "python-tests",
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "backend/tests",
+                "tests",
+                "--basetemp",
+                str(out / "pytest"),
+            ],
+        ),
         ("frontend-tests", ["node", "--test", *frontend_tests]),
     ]
     commands.extend(
@@ -152,9 +221,7 @@ def main() -> None:
     manifest = {
         "created_at": stamp,
         "python": sys.version,
-        "git_head": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-        ).strip(),
+        "git_head": source_revision(),
         "files": before,
         "source_digest": hashlib.sha256(json.dumps(before, sort_keys=True).encode()).hexdigest(),
         "local_gates": "passed",

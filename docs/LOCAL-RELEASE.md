@@ -68,3 +68,9 @@ candidate, not an offline wheel bundle. The manifest records external gates as
 not run. Preserve the directory to retain exact evidence; these scripts never
 delete files. A passing local manifest does not certify live LLM credentials,
 Docker image behavior, TLS, public hosting or real banking integrations.
+
+An extracted source ZIP can run the same installation and verification commands
+without Git metadata or a Git executable. Discovery uses the same explicit source
+roots and exclusions. New manifests preserve the original `git_head` from
+`release-manifest.json`; exports without that provenance say `source-archive`.
+An export nested inside another checkout never inherits its parent's Git identity.
