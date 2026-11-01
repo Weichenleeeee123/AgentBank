@@ -1,87 +1,70 @@
-# AgentBank
+# 行止（ActSure）
 
-2026 深圳国际金融科技大赛（微众银行金融科技大学生挑战赛），人工智能赛道（国内）参赛作品：银行 AI 智能体。
+行止（ActSure）是参加深圳国际金融科技大赛人工智能赛道的银行 AI 智能体作品；源码仓库和 Python 包仍使用内部名称 AgentBank。它通过自然语言对话办理转账、账单分析、理财、卡片、订阅和跨场景计划等业务。
 
-核心原则：**模型只负责提议，执行与否由代码裁决，最终由用户在带外确认。**
+**模型负责理解和提出计划，确定性业务内核负责权限判断与执行，用户在操作前明确授权。**行止把授权绑定到具体对象和金额：任务修订会使旧授权失效，提交时重新读取状态并复核风险；结果未知时沿原操作核实，不重复发起付款；计划可暂停、恢复或取消。系统使用本地模拟账户、交易、商户和设备，不连接真实银行，也不处理真实资金。
 
-在线自然语言理解由 LLM 负责，输出结构化业务动作、槽位和原文依据；代码校验来源、单位、日期、权限和业务终态，不再让正则解析覆盖模型判断。手机号以不透明引用交给模型，复杂操作无法可靠理解时追问。保留的离线解析用于确定性评测与受限降级。
+## 评委快速开始
 
-## 文档
+先按下方“本地运行”安装依赖并启动服务，再打开 [银行 App](http://127.0.0.1:8001/app/)。这是本机地址，服务运行后才能访问。
 
-| 文件 | 内容 |
-|---|---|
-| [docs/PLAN.md](docs/PLAN.md) | **整体方案与开发计划（定稿）**：33 项能力矩阵、架构、契约、权限规则、安全机制、测试、里程碑、提交物 |
-| [docs/brief.md](docs/brief.md) | 赛题事实，是所有设计判断的唯一依据 |
-| [docs/architecture.md](docs/architecture.md) | 当前系统边界、Agent、执行内核、DAG 和渠道 |
-| [docs/algorithms.md](docs/algorithms.md) | 已实现算法和验证口径 |
-| [docs/security-self-eval.md](docs/security-self-eval.md) | 已验证安全行为、已知边界和禁止的过度结论 |
-| [docs/LOCAL-REVIEW-GUIDE.md](docs/LOCAL-REVIEW-GUIDE.md) | 评委本地复现与演示顺序 |
-| [docs/M4-LOCAL-CANDIDATE.md](docs/M4-LOCAL-CANDIDATE.md)、[docs/LOCAL-RELEASE.md](docs/LOCAL-RELEASE.md) | 本地候选范围、锁定安装、验收和打包 |
-| [docs/submission-checklist.md](docs/submission-checklist.md) | M4 提交门禁清单（当前未冻结） |
-| [docs/M3-COVERAGE.md](docs/M3-COVERAGE.md) | M3 安全闭环逐项证据 |
-| [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
-| [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
+1. 选择演示账户 `user_001`，输入“查余额”。
+2. 输入“给房东转账”，按追问补充“20 元”，核对确认卡后确认。
+3. 再查余额和交易记录，观察扣款与流水；不要把待确认状态当作成功。
 
-AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、真实环境红队与M4发布材料分别验收；当前优先收口可复现的本地候选，不要求立即公网发布。逐项证据见 docs/M2-M3-STATUS.md。历史 M3 本地安全门禁曾通过，当前候选请以最新 `.tmp/releases/*/manifest.json` 为准。
+基础路径无需模型 API Key。自由口语规划需配置模型；设备验证、模拟 IM、生日计划与评测面板的完整步骤见 [评委体验指南](docs/LOCAL-REVIEW-GUIDE.md)。
 
-代码仓库：[github.com/Weichenleeeee123/AgentBank](https://github.com/Weichenleeeee123/AgentBank)（提交前确认评委可访问）。
+## 提交材料
+
+- [作品简介](docs/submission-intro.md)
+- [系统架构与架构图](docs/architecture.md) · [可单独查看的架构图](docs/architecture.svg)
+- [核心算法说明](docs/algorithms.md)
+- [能力追溯表](docs/capability-traceability.md)
+- [安全设计](docs/security-design.md) · [安全自评报告](docs/security-self-eval.md)
+- [评委本地复现与演示指南](docs/LOCAL-REVIEW-GUIDE.md)
+- [第三方组件许可清单](docs/THIRD-PARTY-LICENSES.md)
+- 答辩演示文稿单独提供，文件保存在 `docs/submission/`。
+
+代码仓库（内部项目名 AgentBank）：[github.com/Weichenleeeee123/AgentBank](https://github.com/Weichenleeeee123/AgentBank)
+
+## 系统概览
+
+系统覆盖 33 项业务能力，横跨转账、账单分析、理财、卡片管理、订阅管理和跨场景联动。Agent 支持口语化输入、多轮补充信息、计划展示和中断恢复；关键业务状态由服务端事实和账本记录决定。
+
+查询类操作可直接执行；普通风险写操作需用户确认；高风险操作需要独立模拟设备验证码。模型没有直接写账本、发放授权或确认交易成功的权限。授权凭证绑定对象、金额、任务版本和确认卡哈希，修订即失效；提交时复核当前权限和风险。系统以幂等键、事务、审计链和恢复流程约束重复请求与部分失败，未知结果不重复付款。
 
 ## 本地运行
 
-需要 Python 3.12+ 和 Node.js。已在 Windows / Python 3.13 的独立环境验证锁定安装；每次复核使用新的目录名，保留旧环境和证据：
+需要 Python 3.12 或更新版本和 Node.js。获取仓库或解压源码包后，在项目根目录的 PowerShell 中运行：
 
 ```powershell
-python -m venv .tmp/m4-review-001
-.tmp/m4-review-001/Scripts/python.exe -m pip install -r requirements-dev.lock
-.tmp/m4-review-001/Scripts/python.exe -m pip install --no-deps -e .
-.tmp/m4-review-001/Scripts/python.exe -m pip check
-./scripts/Start-Local.ps1 -Python .tmp/m4-review-001/Scripts/python.exe
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.lock
+.venv\Scripts\python.exe -m pip install --no-deps -e .
+.venv\Scripts\python.exe -m pip check
+./scripts/Start-Local.ps1 -Python .venv\Scripts\python.exe
 ```
 
-启动器仅监听 `127.0.0.1`，默认评测实例端口为 8001。可选的模型配置从 `.env` 按字面值读取，不执行内容；独立生成的会话、审计、管理员和坐席凭证持久保存在忽略跟踪的 `.tmp/local-demo/eval.env`，数据库在 `.tmp/local-demo/eval.db`。这些文件和审计锚点应一起保留，不提交、不截图。空 provider 配置仍支持确定性查询、表单和本地评测。
+默认评测服务只监听本机，端口为 8001。打开 [银行 App](http://127.0.0.1:8001/app/) 后选择演示账户即可开始。其他入口如下：
 
-| 本地入口 | 使用方式 |
-|---|---|
-| 银行 App：[http://127.0.0.1:8001/app/](http://127.0.0.1:8001/app/) | 选择演示账户 `user_001` 等，查询、办理业务、确认与验证 |
-| 模拟 IM：[http://127.0.0.1:8001/app/webim.html](http://127.0.0.1:8001/app/webim.html) | 先在 App 选择账户，再连接独立 IM 身份并明确绑定当前账户；高风险操作回到 App 验证 |
-| 模拟手机：[http://127.0.0.1:8001/app/device.html](http://127.0.0.1:8001/app/device.html) | 输入管理员一次性配对码后读取 OTP；设备令牌独立于银行会话 |
-| 评测面板：[http://127.0.0.1:8001/app/eval.html](http://127.0.0.1:8001/app/eval.html) | 输入本地 `AGENTBANK_ADMIN_TOKEN` |
-| 坐席台：[http://127.0.0.1:8001/app/staff.html](http://127.0.0.1:8001/app/staff.html) | 输入独立 `AGENTBANK_STAFF_TOKEN`；处理待办和重试申请，付款仍需用户重新授权 |
+| 入口 | 地址 | 用途 |
+|---|---|---|
+| 银行 App | `/app/` | 查询账户、办理业务和用户确认 |
+| 模拟 IM | `/app/webim.html` | 独立 IM 身份绑定、私聊与群聊场景 |
+| 模拟手机 | `/app/device.html` | 设备配对和接收模拟 OTP |
+| 评测面板 | `/app/eval.html` | 运行固定本地评测 |
+| 坐席台 | `/app/staff.html` | 查看待办和提交重试申请；不能代用户付款 |
 
-另开终端，为默认用户 `user_001` 生成一次性配对码：
+无模型服务配置时，确定性查询、表单和安全门禁仍可运行。接入模型时，按 `.env.example` 配置服务商凭证。请使用合成数据，不要输入真实账号、密码、验证码或个人金融信息。
+
+## 测试与部署
+
+完整测试入口会运行依赖检查、静态检查、Python 与前端测试、固定评测和 HTTP 自测：
 
 ```powershell
-./scripts/New-DevicePairing.ps1
+.venv\Scripts\python.exe scripts/release.py
 ```
 
-页面需要的本地令牌由操作者从 `.tmp/local-demo/eval.env` 读取并直接输入密码框，避免粘贴到聊天、URL 或提交物。公共模式使用 `./scripts/Start-Local.ps1 -Mode public -Python .tmp/m4-review-001/Scripts/python.exe`，端口 8000、数据与凭证独立，管理员与坐席令牌关闭。
+固定评测由 99 条能力旅程、80 条安全用例、27 条误拦用例、10 条额外欺诈用例和 11 条恢复用例组成，共 227 条合成测试。评测通过只说明这些固定样例通过，不代表真实用户任务完成率或线上安全效果。
 
-API 包括 `POST /v1/sessions`、`/v1/conversations/{id}/messages`、签名 Web IM `/v1/im/webim/events` 和飞书适配器 `/v1/im/feishu/events`。模拟 IM 页面不需要把网关签名密钥暴露给浏览器。飞书适配器测试不等于真实飞书租户联调；实际租户凭证、回调和权限须另行验证。
-
-所有能力也可以通过统一入口调用：
-
-```json
-POST /v1/capabilities/Q01
-{"capability_id":"Q01","idempotency_key":"demo-q01-1","payload":{}}
-```
-
-命令结果会写入 `capability_records`，并返回可追溯的审计事件。需要用户确认的 T01/T02/T03 先返回 `record_id`、`plan_id`、`receipt_id` 和 `display_hash`，再调用 `/v1/capability-records/{record_id}/confirm`。
-
-本地最终验收与源码候选包由同一脚本生成；完整命令、证据文件和排除规则见 [LOCAL-RELEASE.md](docs/LOCAL-RELEASE.md)：
-
-```powershell
-.tmp/m4-review-001/Scripts/python.exe scripts/release.py
-.tmp/m4-review-001/Scripts/python.exe scripts/release.py --package
-```
-
-脚本检查依赖、Ruff、Mypy、所有 Python/前端测试、前端语法、227 条确定性评测和 HTTP 自测。全部通过且源码在检查期间未变化，才写入通过清单并允许打包；每次输出到唯一 `.tmp/releases/` 子目录。源码包包含锁文件、静态资源、提示词、测试、文档与 CI，不包含 `.env`、数据库、日志或本地审计密钥。当前冻结状态以 [本地候选说明](docs/M4-LOCAL-CANDIDATE.md) 和最终清单为准。
-
-## 双实例 Compose（单独验收）
-
-Compose 配置保留为可选部署路径，当前本地候选不以 Docker 或公网可用为完成依据。为 `PUBLIC_SESSION_SECRET`、`PUBLIC_AUDIT_SECRET`、`EVAL_SESSION_SECRET`、`EVAL_AUDIT_SECRET`、`EVAL_ADMIN_TOKEN`、`EVAL_STAFF_TOKEN` 分别生成独立随机值，并通过环境变量或私有环境文件提供；`.env.example` 只列变量名，不提供可用于运行的默认密钥。
-
-在准备验证 Docker 时，先运行 `docker compose --env-file .env -f deploy/docker-compose.yml config --quiet`，避免输出展开后的凭证；Docker daemon 可用后再单独执行 build/start/health 验证。公共实例 8000、评测实例 8001，使用独立数据卷和审计密钥；公共实例禁用管理员与坐席令牌，评测自测要求 `X-Admin-Token`，坐席要求独立的 `X-Staff-Token`。目前未执行本轮容器构建、公网 HTTPS、真实飞书或真实银行验收。
-
-升级兼容说明：本轮将通用业务确认页内容绑定到确认哈希。升级前尚未确认的旧凭证可能校验失败，需要重新发起并核对确认；已执行业务不受影响。
-
-最新审查修复：[说明与证据](docs/REVIEW-FIXES-20261101.md) · [独立安全设计](docs/security-design.md) · [第三方许可](docs/THIRD-PARTY-LICENSES.md)。历史候选数值不代表本轮修复后的冻结结果；以最新通过的 release manifest 为准。
+项目包含双实例 Docker Compose 配置。Compose 构建和本地/CI 检查不等于真实生产部署验证；公网 HTTPS、真实飞书租户、短信/人脸/U 盾和真实银行或商户接口需要分别配置和验收。详细部署步骤与约束见 [部署说明](docs/LOCAL-RELEASE.md)。

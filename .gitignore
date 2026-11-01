@@ -25,3 +25,10 @@ dist/
 # independent local audit anchors and local HMAC keys
 *.checkpoints.jsonl
 *.checkpoints.key
+
+# Generated local tools and review artifacts (keep files on disk)
+.playwright-cli/
+*.egg-info/
+.ruff_cache/
+.mypy_cache/
+output/

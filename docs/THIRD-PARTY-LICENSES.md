@@ -1,6 +1,6 @@
 # 第三方依赖许可清单
 
-2026-11-01 从锁文件与已安装发行包元数据生成，范围含运行时与开发依赖。许可名不是法律意见；完整 LICENSE/NOTICE 以各版本上游发行包为准。源码 ZIP 不内嵌 Python 第三方发行包，安装时由锁文件下载；分发镜像或二进制前需保留相应许可证及 NOTICE。本项不把未核实许可标为已审核。
+清单依据锁文件与发行包元数据整理，包含运行时与开发依赖。许可名称仅供信息参考；完整 LICENSE/NOTICE 以各版本上游发行包为准。源码包不内嵌 Python 第三方发行包，安装时由锁文件下载；分发镜像或二进制前需保留相应许可证及 NOTICE。未核实的许可不标记为已审核。
 
 前端为项目原生 HTML/CSS/JS，无 vendored 前端库；系统字体由运行设备提供。演示数据为项目合成数据。答辩文件修改工具不是应用运行依赖，不随源码包分发。
 
@@ -44,6 +44,6 @@
 | typing_extensions | 4.16.0 | PSF-2.0 | [来源](https://github.com/python/typing_extensions/issues) |
 | tzdata | 2025.3 | Apache-2.0 | [来源](https://github.com/python/tzdata) |
 | uvicorn | 0.54.0 | BSD-3-Clause | [来源](https://uvicorn.dev/release-notes) |
-| uvloop | 0.22.1 | MIT License（PyPI 0.22.1 元数据，2026-11-01 查阅；非 Windows 依赖） | [来源](https://pypi.org/project/uvloop/0.22.1/) |
+| uvloop | 0.22.1 | MIT License（PyPI 元数据；非 Windows 依赖） | [来源](https://pypi.org/project/uvloop/0.22.1/) |
 | watchfiles | 1.3.0 | MIT | [来源](https://github.com/samuelcolvin/watchfiles) |
 | websockets | 17.4 | BSD-3-Clause | [来源](https://github.com/python-websockets/websockets) |
