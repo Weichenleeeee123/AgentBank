@@ -76,6 +76,18 @@ class RiskProfile(Base):
     expires_on: Mapped[str] = mapped_column(String(10))
 
 
+class RiskAssessment(Base):
+    __tablename__ = 'risk_assessments'
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    questionnaire_version: Mapped[str] = mapped_column(String(32))
+    answers_json: Mapped[str] = mapped_column(Text)
+    score: Mapped[int] = mapped_column(Integer)
+    level: Mapped[str] = mapped_column(String(2))
+    assessed_on: Mapped[str] = mapped_column(String(10))
+    expires_on: Mapped[str] = mapped_column(String(10))
+
+
 class Card(Base):
     __tablename__ = "cards"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

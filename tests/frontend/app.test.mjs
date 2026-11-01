@@ -61,3 +61,21 @@ test('new payee placeholder never masquerades as selected payee ID',async()=>{
  const h=harness();h.get('recipientName').value='房东';h.context.fetch=async()=>({ok:true,json:async()=>({payees:[{id:'payee-landlord',masked_name:'房东',phone_tail:null}]})});await h.run('lookupPayees()');assert.equal(h.get('recipientCandidate').children[0].value,'');assert.doesNotMatch(h.get('recipientCandidate').text,/null/);
 });
 test('server display fields explicitly marked fen render yuan with uppercase',()=>{const h=harness();h.run(`addBubble('plan_confirmation','核对',[],{display:[{label:'资金预留（分）',value:'1000'}]})`);assert.match(h.get('messages').text,/¥10\.00（壹拾元整）/);});
+
+test('risk questionnaire requires ten answers and submits actual selected values with version', async()=>{
+ const h=harness();h.run(`addBubble('clarification','请填写',[],{questionnaire:{version:'v1',title:'风险测评',questions:Array.from({length:10},(_,i)=>({id:'q'+i,text:'问题'+i,options:Array.from({length:6},(_,j)=>({value:j,text:'选项'+j}))}))}})`);
+ const card=h.get('messages').children.at(-1), form=card.children.find(c=>c.tagName==='form');
+ assert.ok(form);assert.match(form.text,/问题9/);const before=h.calls.length;
+ await form.onsubmit({preventDefault(){}});assert.equal(h.calls.length,before);
+ const selects=form.children.filter(c=>c.tagName==='label').map(c=>c.children.find(x=>x.tagName==='select'));
+ assert.equal(selects.length,10);selects.forEach((s,i)=>s.value=String(i%6));
+ await form.onsubmit({preventDefault(){}});
+ const request=h.calls.at(-1);assert.equal(request.path,'/v1/risk/submit');
+ assert.deepEqual(JSON.parse(request.options.body),{questionnaire_version:'v1',answers:[0,1,2,3,4,5,0,1,2,3]});
+});
+
+test('semantic revision disables the superseded confirmation control',()=>{
+ const h=harness();h.run(`addBubble('confirmation','旧确认',[],{},'old');addBubble('confirmation','新确认',[],{invalidated_record_ids:['old']},'new')`);
+ const old=h.get('messages').children[0];assert.equal(old.children.find(c=>c.className==='card-actions').children[0].disabled,true);
+ assert.match(old.text,/已作废/);
+});

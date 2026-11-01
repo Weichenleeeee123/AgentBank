@@ -32,7 +32,7 @@ Transport = Callable[[ProviderConfig, str, dict[str, Any]], dict[str, Any]]
 
 class LLMGateway:
     PROMPT_VERSION = "agent-intent-v1"
-    PLAN_PROMPT_VERSION = "agent-plan-v1"
+    PLAN_PROMPT_VERSION = "agent-plan-v2"
     REPLY_PROMPT_VERSION = "agent-reply-v1"
     EXPLORER_PROMPT_VERSION = "agent-explore-v1"
     FRAUD_PROMPT_VERSION = "agent-fraud-v1"
@@ -182,6 +182,8 @@ class LLMGateway:
                                                                    "slots": {}, "required_slots": []}},
                                   "response_schema": {"intent": "string", "capability_id": "string|null",
                                                        "plan_template": "string|null",
+                                                       "task_action": "auto|new|revise|cancel|keep",
+                                                       "task_reference": "current user text supporting task_action",
                                                        "slots": "object", "missing": "array", "ambiguities": "array",
                                                        "references": "array", "proposed_dag": "array",
                                                        "suggested_next_action": self.PLANNER_ACTIONS}},
@@ -288,6 +290,8 @@ class LLMGateway:
             missing = [field for field in missing if field != "dsl"]
         return {"intent": result["intent"], "capability_id": capability_id,
                 "plan_template": plan_template,
+                "task_action": result.get('task_action', 'auto') if isinstance(result.get('task_reference'), str)
+                    and result['task_reference'].strip() and result['task_reference'] in user_text else 'auto',
                 "slots": slots, "missing": missing,
                 "ambiguities": [str(item) for item in result.get("ambiguities", [])],
                 "references": references,
@@ -435,6 +439,10 @@ class LLMGateway:
     def _validate_plan(cls, result: dict[str, Any]) -> None:
         if not isinstance(result.get("intent"), str) or not isinstance(result.get("slots"), dict):
             raise ValueError("planner schema invalid")
+        if result.get('task_action', 'auto') not in {'auto', 'new', 'revise', 'cancel', 'keep'}:
+            raise ValueError('invalid task action')
+        if result.get('task_action') in {'cancel', 'keep'} and (result.get('capability_id') is not None or result.get('plan_template') or result.get('proposed_dag')):
+            raise ValueError('task control cannot dispatch a business operation')
         capability_id = result.get("capability_id")
         plan_template = result.get("plan_template")
         template_slots = {

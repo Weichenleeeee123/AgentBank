@@ -67,6 +67,6 @@ def test_free_dag_can_wire_a_server_generated_reservation_id_to_order(tmp_path: 
         receipt_id, display_hash = receipt.id, plan_record.display_hash
 
     result = service.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
-    assert result["status"] == "succeeded"
+    assert result["status"] == "waiting_trigger"
     assert [item["node_id"] for item in result["nodes"]] == ["reserve", "order"]
     assert result["nodes"][1]["data"]["order_id"]

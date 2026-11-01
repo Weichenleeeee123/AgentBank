@@ -14,8 +14,11 @@ def explain_denial(reason_code: str) -> dict[str, str]:
                "HASH_MISMATCH": "U09", "ACTION_CHANGED": "U09", "RECEIPT_REPLAYED": "U09",
                "MESSAGE_PROCESSING_FAILED": "U20", "MESSAGE_OUTCOME_UNKNOWN": "U20",
                "CONVERSATION_BUSY": "U21",
+               "PAYMENT_SNAPSHOT_CHANGED": "U09", "MFA_REQUIRED": "P06",
                "COOLING_PERIOD_ACTIVE": "U08", "COOLING_RECONFIRMATION_REQUIRED": "U08"}
     additions = {
+        'P06': {'category': '需要重新强验证', 'message': '当前状态或当日累计金额需要更强的授权，本次未执行。',
+                'next_step': '请重新发起操作，核对最新金额及对象后在 App 完成设备验证。'},
         "U08": {"category": "冷静期", "message": "付款尚未执行，需等待并重新验证。", "next_step": "等待期满后在 App 强验证，或取消并释放资金。"},
         "U09": {"category": "授权不匹配", "message": "确认内容已变更或凭证已使用。", "next_step": "重新核对操作并发起新的确认。"},
         "U16": {"category": "设备验证", "message": "设备验证未通过或已锁定。", "next_step": "在模拟手机查看新验证码，锁定时等待或联系人工。"},

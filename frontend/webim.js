@@ -1,5 +1,6 @@
 import {displayValue, money, uppercaseMoney} from './presentation.js';
 const $ = id => document.getElementById(id);
+const authorizationControls = new Map();
 const state = {token:null, bound:null, conversation:crypto.randomUUID(), generation:0, busy:false};
 const el = (tag,text='') => {const n=document.createElement(tag);n.textContent=String(text);return n;};
 const secret = /pin|otp|password|secret|token|nonce|receipt|hash|密码|验证码/i;
@@ -29,6 +30,10 @@ async function api(path,body,bank=false) {
 }
 function bubble(kind,text) {const card=el('article');card.className=`bubble ${kind}`;card.append(el('h3',kind==='user'?'你':'AgentBank IM'),el('p',text));$('messages').append(card);return card;}
 function render(response, group) {
+  for (const id of response.data?.invalidated_record_ids || []) {
+    const button = authorizationControls.get(id);
+    if (button) {button.disabled = true; button.textContent = '已作废'; button.onclick = null;}
+  }
   const card=bubble(response.kind,response.message || '请求已处理');
   // Group responses are server-redacted. Do not render any structured facts in group mode.
   if (!group) {
@@ -49,18 +54,19 @@ function render(response, group) {
   if(!group && nonce && ['confirmation','plan_confirmation'].includes(response.kind) && response.data?.assurance !== 'mfa') {
     const button=el('button','确认以上操作'); const eventId=crypto.randomUUID(), generation=state.generation;
     button.onclick=async()=>{if(generation!==state.generation)return;button.disabled=true;try{const response=await api('callbacks',{event_id:eventId,nonce,action:'confirm',group:false});if(generation!==state.generation)return;render(response,false);}catch(error){if(error.name==='StaleSessionError')return;status(error.message);button.disabled=false;}};
+    if (response.record_id) authorizationControls.set(response.record_id, button);
     card.append(button);
   }
 }
 $('connect').onclick=async()=>{
-  const generation=++state.generation;state.busy=false;state.token=null;state.bound=null;state.conversation=crypto.randomUUID();$('messages').replaceChildren();controls();
+  const generation=++state.generation;state.busy=false;state.token=null;state.bound=null;state.conversation=crypto.randomUUID();$('messages').replaceChildren();authorizationControls.clear();controls();
   try { const response=await api('sessions',{identity:$('identity').value});if(generation!==state.generation)return;
     state.token=response.access_token;state.bound=response.bound_user_id;status('模拟 IM 身份已连接。');controls();
   } catch(error){if(error.name==='StaleSessionError')return;status(error.message);}
 };
-$('identity').onchange=()=>{state.generation++;state.busy=false;state.token=null;state.bound=null;$('messages').replaceChildren();status('身份已更换，请重新连接。');controls();};
+$('identity').onchange=()=>{state.generation++;state.busy=false;state.token=null;state.bound=null;$('messages').replaceChildren();authorizationControls.clear();status('身份已更换，请重新连接。');controls();};
 $('bind').onclick=async()=>{const generation=state.generation;state.busy=true;controls();try{const response=await api('bind',{im_token:state.token},true);if(generation!==state.generation)return;state.bound=response.bound_user_id;status('绑定完成。');}catch(error){if(error.name==='StaleSessionError')return;status(error.message);}finally{if(generation===state.generation){state.busy=false;controls();}}};
-$('newChat').onclick=()=>{state.generation++;state.busy=false;state.conversation=crypto.randomUUID();$('messages').replaceChildren();status('已新建对话。');controls();};
+$('newChat').onclick=()=>{state.generation++;state.busy=false;state.conversation=crypto.randomUUID();$('messages').replaceChildren();authorizationControls.clear();status('已新建对话。');controls();};
 $('group').onchange=()=>{$('newChat').click();status($('group').checked?'群聊模式：敏感详情隐藏，高风险操作请返回 App。':'私聊模式。');};
 $('composer').onsubmit=event=>{
   event.preventDefault();const text=$('message').value.trim();if(!text || $('send').disabled)return;

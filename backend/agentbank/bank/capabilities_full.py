@@ -19,6 +19,11 @@ from agentbank.clock import BusinessClock, business_date, utc_now_naive, next_sc
 from agentbank.contracts import CapabilityResult
 from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
 from agentbank.db import MerchantCatalog, MerchantQuote
+from agentbank.db import RiskContextRecord
+from agentbank.db import PlanNodeRecord, PlanRecord
+from agentbank.contracts import Assurance
+from agentbank.policy.engine import PolicyContext, decide
+from agentbank.bank.questionnaire import VERSION, answer_display
 from agentbank.errors import DomainError
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.tools import CAPABILITIES, validate_capability_payload
@@ -64,6 +69,13 @@ class CapabilityService:
                     raise DomainError("IDEMPOTENCY_CONFLICT")
                 return self._result(existing)
         payload = dict(payload)
+        if capability_id == 'W03':
+            if payload.get('questionnaire_version', VERSION) != VERSION:
+                raise DomainError('QUESTIONNAIRE_VERSION_INVALID')
+            payload['questionnaire_version'] = VERSION
+        if capability_id == 'T05' and payload.get('action') == 'pay_share':
+            with self.database.atomic() as session:
+                payload.update(self._aa_snapshot(session, user_id, str(payload['bill_id'])))
         if capability_id == 'C08':
             with self.database.sessions() as session:
                 owned_card = session.get(Card, str(payload.get('card_id', 'card_001')))
@@ -107,6 +119,9 @@ class CapabilityService:
                         red = card is not None and int(payload.get("limit_minor", card.limit_minor)) > card.limit_minor
                 if capability_id == "C07" and payload.get("action") == "unfreeze":
                     red = True
+                if capability_id == 'T05' and payload.get('action') == 'pay_share':
+                    with self.database.sessions() as session:
+                        red = self._requires_mfa(session, user_id, capability_id, payload)
                 assurance = "mfa" if red else "confirm"
             record_id = f"cap_{uuid.uuid4().hex}"
             record_status = "awaiting_confirmation"
@@ -313,6 +328,8 @@ class CapabilityService:
             if receipt.action_hash != action_hash_value or receipt.display_hash != display_hash_value:
                 raise DomainError("HASH_MISMATCH")
             assurance = data.get("assurance", "confirm")
+            if self._requires_mfa(session, user_id, record.capability_id, data.get('payload', {})) and assurance != 'mfa':
+                raise DomainError('MFA_REQUIRED')
             self.breaker.require_write(session, user_id,
                                        protective=self._is_protective(session, record.capability_id, data.get("payload", {})))
             capability_id = record.capability_id
@@ -349,7 +366,8 @@ class CapabilityService:
                 otp_receipt_id = receipt_id if user_id in self.device_tokens else None
                 result = self._result(record)
             else:
-                payload = dict(data.get("payload", {})) | {"_confirmed": True}
+                payload = dict(data.get("payload", {})) | {"_confirmed": True,
+                    "_mfa_verified": assurance == 'mfa' and not self.require_device_mfa}
                 if data.get("flow") == "merchant_price_reconfirmation":
                     result_data, status = self._commit_merchant_reconfirmation(
                         session, user_id, record, data
@@ -676,15 +694,21 @@ class CapabilityService:
                  'S01': '查询订阅', 'S02': '设置续费提醒', 'S03': '取消订阅', 'X02': '预留资金',
                  'X03': '预订鲜花', 'X04': '预订蛋糕'}
         labels = {'recipient_name': '收款人', 'card_id': '卡片', 'amount_minor': '金额', 'total_minor': '总金额',
+                  'recipient_user_id': '收款人', 'recipient_account_id': '收款账户',
                   'limit_minor': '新额度', 'next_due': '首次执行日期', 'period': '执行周期', 'max_uses': '执行次数',
                   'product_id': '理财产品', 'order_id': '赎回订单', 'subscription_id': '订阅', 'days': '提前提醒天数',
                   'delivery_date': '送达日期', 'dispatch_on': '下单日期', 'restriction': '限制类型', 'action': '操作'}
         values = {'monthly': '每月', 'weekly': '每周', 'daily': '每天', 'yearly': '每年', 'once': '单次',
                   'online': '网购', 'freeze': '冻结', 'unfreeze': '解冻'}
         rows = [{'label': '业务', 'value': names.get(capability_id, '银行业务')}]
+        if capability_id == 'W03' and 'answers' in payload:
+            rows.append({'label': '问卷版本', 'value': str(payload.get('questionnaire_version', VERSION))})
+            rows.extend(answer_display(payload['answers']))
         for field, label in labels.items():
             if field in payload:
-                value = f"¥{int(payload[field]) / 100:.2f}" if field.endswith('_minor') else values.get(str(payload[field]), str(payload[field]))
+                value = f"¥{int(payload[field]) // 100}.{int(payload[field]) % 100:02d}" if field.endswith('_minor') else values.get(str(payload[field]), str(payload[field]))
+                if field == 'recipient_account_id':
+                    value = f'尾号 {str(payload[field])[-4:]}'
                 rows.append({'label': label, 'value': value})
         rows.extend([{'label': '费用', 'value': '本地模拟免费'},
                      {'label': '生效条件', 'value': '确认且所需强验证通过后执行'},
@@ -760,9 +784,55 @@ class CapabilityService:
 
     def _dispatch(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         from agentbank.security.tool_breaker import guarded_call
+        def commit() -> tuple[dict[str, Any], str]:
+            with self.database.atomic() as session:
+                if self._requires_mfa(session, user_id, capability_id, payload):
+                    verified = payload.get('_mfa_verified') or (not self.require_device_mfa and payload.get('assurance') == 'mfa')
+                    if not verified:
+                        raise DomainError('MFA_REQUIRED')
+                return self._dispatch_handler(user_id, capability_id, payload, idempotency_key)
         return guarded_call(self.database, capability_id,
-                            lambda: self._dispatch_handler(user_id, capability_id, payload, idempotency_key),
+                            commit,
                             read_only=capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"})
+
+    @staticmethod
+    def _aa_snapshot(session: Any, user_id: str, bill_id: str) -> dict[str, Any]:
+        bill = session.get(AABill, bill_id)
+        if bill is None:
+            raise DomainError('BILL_NOT_FOUND')
+        share = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id, AAShare.participant_id == user_id))
+        if share is None:
+            raise DomainError('SHARE_NOT_FOUND')
+        recipient = session.scalar(select(Account).where(Account.user_id == bill.user_id).order_by(Account.id))
+        source = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+        if recipient is None or source is None:
+            raise DomainError('ACCOUNT_NOT_FOUND')
+        return {'amount_minor': share.amount_minor, 'recipient_user_id': bill.user_id,
+                'recipient_account_id': recipient.id, 'source_account_id': source.id}
+
+    def _requires_mfa(self, session: Any, user_id: str, capability_id: str, payload: dict[str, Any]) -> bool:
+        if capability_id == 'C02':
+            card = session.get(Card, str(payload.get('card_id', 'card_001')))
+            if card is None or card.user_id != user_id:
+                raise DomainError('NOT_OWNER')
+            self.breaker.require_write(session, user_id, protective=self._is_protective(session, capability_id, payload))
+            return bool(int(payload.get('limit_minor', card.limit_minor)) > card.limit_minor)
+        if capability_id == 'T05' and payload.get('action') == 'pay_share':
+            snapshot = self._aa_snapshot(session, user_id, str(payload['bill_id']))
+            if any(payload.get(key) != value for key, value in snapshot.items()):
+                raise DomainError('PAYMENT_SNAPSHOT_CHANGED')
+            self.breaker.require_write(session, user_id)
+            risk = session.get(RiskContextRecord, user_id)
+            if risk is not None and risk.expires_at > utc_now_naive():
+                if risk.level == 'high':
+                    raise DomainError('FRAUD_REVIEW_REQUIRED')
+                if risk.level in {'medium', 'unknown'}:
+                    raise DomainError('RISK_REVIEW_REQUIRED')
+            bucket = TransferService._bucket(session, user_id)
+            decision = decide('transfer.create', PolicyContext(projected_today_minor=
+                bucket.completed_minor + bucket.pending_minor + int(snapshot['amount_minor'])))
+            return decision.assurance is Assurance.mfa
+        return False
 
     def _dispatch_handler(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         if capability_id == "Q01":
@@ -875,15 +945,21 @@ class CapabilityService:
                                 "amount_minor": share.amount_minor, "operation_id": operation_id}, "succeeded"
                     aa_account.available_minor -= share.amount_minor
                     aa_account.ledger_balance_minor -= share.amount_minor
+                    recipient_account = session.get(Account, str(payload['recipient_account_id']))
+                    if recipient_account is None or recipient_account.status != 'active' or aa_account.status != 'active':
+                        raise DomainError('ACCOUNT_NOT_ACTIVE')
+                    recipient_account.available_minor += share.amount_minor
+                    recipient_account.ledger_balance_minor += share.amount_minor
+                    TransferService._bucket(session, user_id).completed_minor += share.amount_minor
                     share.status = "paid"
                     session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=f"aa-pay-{bill_id}-{user_id}",
                                           plan_id=bill_id, node_id=share.id, status="succeeded",
-                                          amount_minor=share.amount_minor, recipient_id=f"aa_bill:{bill_id}"))
+                                          amount_minor=share.amount_minor, recipient_id=recipient_account.id))
                     session.add_all([
                         LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
                                     account_id=aa_account.id, amount_minor=-share.amount_minor, direction="debit"),
                         LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                    account_id=f"aa_bill:{bill_id}", amount_minor=share.amount_minor, direction="credit"),
+                                    account_id=recipient_account.id, amount_minor=share.amount_minor, direction="credit"),
                     ])
                     unpaid = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id, AAShare.status != "paid"))
                     if unpaid is None:
@@ -948,8 +1024,10 @@ class CapabilityService:
                 products = list(session.scalars(product_query).all())
                 return {"products": [self._product_data(product) for product in products]}, "succeeded"
         if capability_id == "W03":
-            profile = RiskService(self.database).submit(user_id, [int(value) for value in payload.get("answers", [1] * 10)])
-            return {"level": profile.level, "score": profile.score, "expires_on": profile.expires_on}, "succeeded"
+            answers = payload.get('answers', [])
+            profile = RiskService(self.database, self.clock).submit(user_id, answers, payload.get('questionnaire_version', VERSION))
+            return {"level": profile.level, "score": profile.score, "expires_on": profile.expires_on,
+                    'questionnaire_version': VERSION, 'answers': answers}, "succeeded"
         if capability_id == "W04":
             product_id = str(payload.get("product_id", "product_R1"))
             with self.database.sessions() as session:
@@ -1445,6 +1523,12 @@ class CapabilityService:
                 query = query.where(CapabilityRecord.user_id == user_id)
             records = list(session.scalars(query).all())
         for record in records:
+            parent_session = self.database.sessions()
+            parent_node = parent_session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.idempotency_key == record.idempotency_key))
+            if parent_node is not None:
+                parent = parent_session.get(PlanRecord, parent_node.plan_id)
+                if parent is not None and parent.status not in {'waiting_trigger', 'partially_completed'}:
+                    continue
             data = json.loads(record.data_json)
             due = str(data.get("next_due") or data.get("dispatch_on") or data.get("delivery_date") or "9999-12-31")
             if due > today:
@@ -1618,6 +1702,8 @@ class CapabilityService:
                                               "merchant.order.settled",
                                               {"order_id": order_id, "status": merchant.status,
                                                "reservation_id": reservation.id})
+            if record.capability_id in {'X03', 'X04'} and data.get('status') in {'failed', 'paused'}:
+                status = str(data['status'])
             with self.database.sessions.begin() as session:
                 current = session.get(CapabilityRecord, record.id)
                 if current is None:
@@ -1628,6 +1714,8 @@ class CapabilityService:
                                   {"record_id": record.id, "status": status, "data": data})
                 session.flush()
                 changed.append(current)
+        from agentbank.workflow.planner import BusinessPlanService
+        BusinessPlanService.refresh_waiting_plans(self.database.sessions())
         return [self._result(record) for record in changed]
 
     def advance_business_state(self, user_id: str | None = None) -> list[CapabilityResult]:

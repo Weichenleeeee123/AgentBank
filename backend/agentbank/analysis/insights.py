@@ -110,6 +110,9 @@ def detect_subscriptions(database: Database, user_id: str) -> list[dict[str, Any
         dates = [datetime.fromisoformat(item.posted_at).date() for item in records]
         intervals = [(right - left).days for left, right in zip(dates, dates[1:], strict=False)]
         amounts = [item.amount_minor for item in records]
+        # A single purchase or same-day duplicate is not subscription evidence.
+        if len(records) < 2 or not any(6 <= gap <= 8 or 26 <= gap <= 35 or 360 <= gap <= 370 for gap in intervals):
+            continue
         regular = len(records) >= 3 and bool(intervals)
         if regular:
             interval_median = median(intervals)

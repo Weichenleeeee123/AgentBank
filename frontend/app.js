@@ -1,5 +1,6 @@
 import {uppercaseMoney, displayValue, money, resultKind} from './presentation.js';
 const state = {token: null, userId: null, conversationId: crypto.randomUUID(), cards: [], generation: 0};
+const authorizationControls = new Map();
 const $ = id => document.getElementById(id);
 const secretKey = /pin|otp|password|secret|token|验证码|密码/i;
 const internalFields = new Set(['plan_id','capability_id','ledger_entry_ids','query_hash','operation_template',
@@ -13,6 +14,14 @@ function node(tag, text = "", className = "") {
 }
 
 function addBubble(kind, text, fragments = [], data = {}, recordId = null, displayHash = "") {
+  for (const invalidated of data?.invalidated_record_ids || []) {
+    for (const control of authorizationControls.get(invalidated) || []) {
+      control.disabled = true;
+      control.onclick = null;
+      control.textContent = '已作废';
+    }
+    authorizationControls.delete(invalidated);
+  }
   const bubble = node("article", "", `bubble ${kind}`);
   const title = kind === "user" ? "你" : ["confirmation", "plan_confirmation"].includes(kind) ? "待确认" :
     kind === "mfa" ? "需要强验证" : kind === "error" ? "处理失败" : "AgentBank";
@@ -49,10 +58,11 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     }
   }
   for (const [key, value] of Object.entries(data || {})) {
-    if (internalFields.has(key) || ["payload", "display", "transactions", "direct_form", "rows"].includes(key)) continue;
+    if (internalFields.has(key) || ["payload", "display", "transactions", "direct_form", "rows", "questionnaire", "invalidated_record_ids", "answers", "questionnaire_version"].includes(key)) continue;
     appendFact(factLabels[key] || key, value, "", key.endsWith("_minor"));
   }
   if (Array.isArray(data?.transactions)) appendTransactions(bubble, data.transactions);
+  if (data?.questionnaire) bubble.append(questionnaireForm(data.questionnaire));
 
   if (recordId && ["confirmation", "plan_confirmation", "mfa"].includes(kind)) {
     const actions = node("div", "", "card-actions");
@@ -62,6 +72,9 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
       ? kind === "mfa" ? verifyDirect(recordId) : confirmDirect(recordId, displayHash, data?.receipt_id || "")
       : kind === "mfa" ? verify(recordId) : confirm(recordId, displayHash, data?.receipt_id || "");
     actions.append(button);
+    const controls = authorizationControls.get(recordId) || [];
+    controls.push(button);
+    authorizationControls.set(recordId, controls);
     if (data?.direct_form) {
       const cancel = node("button", "取消操作", "ghost");
       cancel.onclick = async () => {
@@ -111,8 +124,57 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   bubble.scrollIntoView?.({behavior: "smooth"});
 }
 
+function questionnaireForm(questionnaire) {
+  const generation = state.generation;
+  const form = node('form', '', 'risk-questionnaire');
+  form.append(node('h4', questionnaire.title), node('p', questionnaire.description || '请逐题选择。'));
+  const selects = [];
+  for (const question of questionnaire.questions) {
+    const label = node('label', question.text);
+    const select = node('select');
+    select.required = true;
+    const placeholder = node('option', '请选择');
+    placeholder.value = '';
+    select.append(placeholder);
+    for (const answer of question.options) {
+      const option = node('option', answer.text);
+      option.value = String(answer.value);
+      select.append(option);
+    }
+    select.value = '';
+    selects.push(select);
+    label.append(select);
+    form.append(label);
+  }
+  const error = node('p', '', 'form-error');
+  const submit = node('button', '提交答案并核对');
+  submit.type = 'submit';
+  form.append(error, submit);
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (generation !== state.generation) return;
+    if (selects.length !== 10 || selects.some(select => !/^[0-5]$/.test(select.value))) {
+      error.textContent = '请完成全部10题后提交。';
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const response = await api('/v1/risk/submit', {method: 'POST', body: JSON.stringify({
+        questionnaire_version: questionnaire.version, answers: selects.map(select => Number(select.value))})});
+      if (generation !== state.generation) return;
+      for (const select of selects) select.disabled = true;
+      showDirectResult(response, '风险测评已保存。');
+    } catch (failure) {
+      if (generation !== state.generation) return;
+      error.textContent = failure.message;
+      submit.disabled = false;
+    }
+  };
+  return form;
+}
+
 const transactionLabels = {posted_at: "日期", merchant: "商户", category: "类别", direction: "类型", amount_minor: "金额"};
-const factLabels = {available_minor: "可用余额", ledger_balance_minor: "账面余额", currency: "币种",
+const factLabels = {level: "风险等级", score: "测评分数", expires_on: "有效期至", plan_type: "计划类型", revision: "修订版本", available_minor: "可用余额", ledger_balance_minor: "账面余额", currency: "币种",
   capability_id: "服务", account_id: "账户", record_id: "记录", status: "状态", masked_name: "收款人",
   phone_tail: "手机号尾号", is_new: "新收款人", tier_display: "风险级别", assurance: "验证方式",
   card: "卡片", cards: "卡片", limit_minor: "限额", transfer_result: "转账结果", amount_minor: "金额", total_minor: "总额",

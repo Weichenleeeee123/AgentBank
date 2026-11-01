@@ -119,26 +119,55 @@ class AgentOrchestrator:
 
     def _handle_message(self, user_id: str, conversation_id: str, text: str, channel: str,
                         key: str) -> AgentResponse:
+        previous = self._latest_prepared(user_id, conversation_id)
+        response = self._interpret_message(user_id, conversation_id, text, channel, key)
+        if previous:
+            with self.database.sessions() as session:
+                from agentbank.db import CapabilityRecord, PlanRecord
+                old = session.get(CapabilityRecord, previous) or session.get(PlanRecord, previous)
+                if old is not None and old.status in {'invalidated', 'cancelled'}:
+                    response.data['invalidated_record_ids'] = [previous]
+        return response
+
+    def _cancel_current(self, user_id: str, conversation_id: str, record_id: str) -> AgentResponse:
+        with self.database.atomic() as session:
+            from agentbank.db import PlanRecord
+            plan = session.get(PlanRecord, record_id)
+            if plan is not None and plan.user_id == user_id:
+                from agentbank.workflow.planner import BusinessPlanService
+                data = BusinessPlanService(self.database).cancel(user_id, record_id)
+            else:
+                result = self.capabilities.invalidate_prepared(user_id, record_id, cancelled=True)
+                data = {'status': result.status}
+            self._set_latest_prepared(user_id, conversation_id, None)
+            self._save_pending(user_id, conversation_id, None)
+        return AgentResponse(kind='result', intent='cancel', record_id=record_id, data=data,
+                             message='已取消，原确认凭证已作废。')
+
+    def _supersede_current(self, user_id: str, conversation_id: str, record_id: str,
+                           capability_id: str | None, action: str) -> None:
+        if action in {'new', 'keep'}:
+            return
+        with self.database.atomic() as session:
+            from agentbank.db import CapabilityRecord, PlanRecord
+            old = session.get(CapabilityRecord, record_id)
+            same_family = old is not None and (old.capability_id == capability_id or
+                old.capability_id in {'T01', 'T02', 'T03'} and capability_id in {'T01', 'T02', 'T03'})
+            if old is not None and old.status in {'awaiting_confirmation', 'awaiting_mfa'} and (action == 'revise' or same_family):
+                self.capabilities.invalidate_prepared(user_id, record_id)
+                self._set_latest_prepared(user_id, conversation_id, None)
+            elif action == 'revise' and session.get(PlanRecord, record_id) is not None:
+                from agentbank.workflow.planner import BusinessPlanService
+                BusinessPlanService(self.database).cancel(user_id, record_id)
+                self._set_latest_prepared(user_id, conversation_id, None)
+
+    def _interpret_message(self, user_id: str, conversation_id: str, text: str, channel: str,
+                           key: str) -> AgentResponse:
         recent_messages = self._store_user_message(user_id, conversation_id, text)
         if re.search(r"(?i)(?:otp|验证码)\s*[:：]?\s*\d{6}", text) or re.fullmatch(r"\s*\d{6}\s*", text):
             return AgentResponse(kind="clarification", intent="security",
                                  message="验证码已脱敏。请只在 App 专用验证表单中输入，不要发送到聊天。")
         latest_prepared = self._latest_prepared(user_id, conversation_id)
-        if latest_prepared is not None and any(token in text for token in ("别转", "取消", "算了", "不要转")):
-            with self.database.sessions() as session:
-                from agentbank.db import PlanRecord
-                active_plan = session.get(PlanRecord, latest_prepared)
-            if active_plan is not None and active_plan.user_id == user_id:
-                from agentbank.workflow.planner import BusinessPlanService
-                result_data = BusinessPlanService(self.database).cancel(user_id, latest_prepared)
-                self._set_latest_prepared(user_id, conversation_id, None)
-                self._save_pending(user_id, conversation_id, None)
-                return AgentResponse(kind="result", intent="cancel", record_id=latest_prepared,
-                                     data=result_data, message="已取消计划，原确认凭证已作废。")
-            result = self.capabilities.invalidate_prepared(user_id, latest_prepared, cancelled=True)
-            self._save_pending(user_id, conversation_id, None)
-            return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
-                                 record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
         # With a provider, semantic parsing belongs to the planner. The legacy
         # parser is an explicit offline fallback, never an override of the LLM.
         using_planner = self.llm.primary is not None
@@ -168,22 +197,20 @@ class AgentOrchestrator:
             prepared = self._prepared_context(user_id, latest_prepared)
             if prepared:
                 safe_context["prepared"] = prepared
-        if latest_prepared is not None and any(token in text for token in ("不对", "改成", "改为", "重新")):
-            with self.database.sessions() as session:
-                from agentbank.db import CapabilityRecord
-                old_record = session.get(CapabilityRecord, latest_prepared)
-                old_data = json.loads(old_record.data_json) if old_record is not None else {}
-            old_payload = old_data.get("payload", {})
-            if parsed.capability_id is None and old_record is not None:
-                amount = self.parser.find_amount(text) if not using_planner else None
-                if old_record.capability_id in {"T01", "T02", "T03"} and amount:
-                    slots = dict(old_payload)
-                    slots["amount_minor"] = self.parser.parse(f"转账 {amount.group('amount')}").slots["amount_minor"]
-                    parsed = ParsedIntent("transfer", old_record.capability_id, slots, [], [])
-            if parsed.capability_id is not None:
-                self.capabilities.invalidate_prepared(user_id, latest_prepared)
-        if parsed.capability_id is not None:
-            self._set_latest_prepared(user_id, conversation_id, None)
+        if not using_planner and latest_prepared is not None:
+            if re.search(r'(?:不要|别|不必|不用)取消', text):
+                return AgentResponse(kind='clarification', intent='keep', message='已保留当前操作，仍需你核对并确认。')
+            if re.fullmatch(r"(?:算了[，,\s]*)?(?:取消(?:这笔(?:转账|操作)?|当前(?:计划|操作)?)?|别转了?|不要转了?|算了)[。！!\s]*", text.strip()):
+                return self._cancel_current(user_id, conversation_id, latest_prepared)
+            prepared_context = safe_context.get('prepared', {})
+            if parsed.capability_id is None and prepared_context.get('capability_id') in {'T01', 'T02', 'T03'}:
+                amount = self.parser.find_amount(text)
+                if amount:
+                    slots = dict(prepared_context['slots'])
+                    slots['amount_minor'] = self.parser.parse(f"转账 {amount.group('amount')}").slots['amount_minor']
+                    parsed = ParsedIntent('transfer', prepared_context['capability_id'], slots, [], [])
+            self._supersede_current(user_id, conversation_id, latest_prepared, parsed.capability_id,
+                                    'new' if re.search(r'(?:再|另|新)(?:转|给|一笔)', text) else 'auto')
         if (parsed.capability_id == "C08" and parsed.slots.get("new_pin")) or (
                 re.search(r"(?:PIN|密码|口令)", text, re.IGNORECASE) and re.search(r"(?<!\d)\d{4}(?!\d)", text)):
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
@@ -199,6 +226,14 @@ class AgentOrchestrator:
                 )
                 planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
                                                context={**safe_context, "exploration": exploration})
+            if latest_prepared is not None:
+                task_action = planned.get('task_action', 'auto')
+                if task_action == 'cancel':
+                    return self._cancel_current(user_id, conversation_id, latest_prepared)
+                if task_action == 'keep' and planned.get('capability_id') is None:
+                    return AgentResponse(kind='clarification', intent='keep', message='已保留当前操作，仍需你核对并确认。')
+                self._supersede_current(user_id, conversation_id, latest_prepared,
+                                        planned.get('capability_id'), str(task_action))
             planned_parsed = self._from_planner(planned)
             if planned.get("source") == "deterministic_fallback":
                 using_planner = False
@@ -220,12 +255,6 @@ class AgentOrchestrator:
             if planned.get("plan_template") in {"query_analysis_report", "investment_review"}:
                 return self._prepare_composite_plan(user_id, conversation_id, planned)
             if planned_parsed is not None:
-                if latest_prepared is not None and any(token in text for token in ("不对", "改成", "改为", "重新")):
-                    with self.database.sessions() as session:
-                        from agentbank.db import CapabilityRecord
-                        old = session.get(CapabilityRecord, latest_prepared)
-                    if old is not None:
-                        self.capabilities.invalidate_prepared(user_id, latest_prepared)
                 parsed = self._merge_model_continuation(pending, planned_parsed, text)
                 self._persist_references(user_id, conversation_id, parsed)
             elif pending is not None and continued.capability_id is not None:
@@ -250,6 +279,10 @@ class AgentOrchestrator:
                                  message=message)
         if parsed.missing:
             self._save_pending(user_id, conversation_id, parsed)
+            if parsed.capability_id == 'W03' and 'answers' in parsed.missing:
+                from agentbank.bank.questionnaire import questionnaire
+                return AgentResponse(kind='clarification', intent=parsed.intent, capability_id='W03',
+                    message='请完成以下10题风险测评，提交后仍需核对答案并确认。', data={'questionnaire': questionnaire()})
             labels = {"amount": "金额", "amount_minor": "金额", "reserve_minor": "预留金额", "total_minor": "总金额",
                       "recipient": "收款人", "recipient_name": "收款人", "answers": "风险测评答案", "product_id": "产品",
                       "order_id": "订单", "subscription_id": "订阅", "card_id": "卡片", "next_due": "首次执行日期",

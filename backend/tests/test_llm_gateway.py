@@ -50,7 +50,7 @@ def test_gateway_planner_returns_structured_capability_frame(tmp_path: Path) -> 
 
     def transport(config: ProviderConfig, role: str, payload: dict[str, object]) -> dict[str, object]:
         roles.append(role)
-        assert payload["prompt_version"] == "agent-plan-v1"
+        assert payload["prompt_version"] == "agent-plan-v2"
         return {"intent": "subscription_reminder", "capability_id": "S02",
                 "slots": {"subscription_id": "sub_video", "days": 3},
                 "missing": [], "ambiguities": [], "suggested_next_action": "execute"}

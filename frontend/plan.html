@@ -1,4 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/app/styles.css"><title>AgentBank 计划</title></head><body><main class="shell"><header><div><span class="eyebrow">PLAN GRAPH</span><h1>计划进度</h1></div><a class="ghost-link" href="/app/">返回对话</a></header><form id="load" class="composer"><select id="plan" aria-label="选择计划" required><option value="">正在读取计划…</option></select><button>查看</button></form><p id="error" class="form-error" role="alert"></p><section id="graph" class="messages" aria-live="polite"></section></main><script type="module">
+import {displayValue} from "/app/presentation.js";
 const $ = id => document.getElementById(id);
 const text = (tag, value) => { const el = document.createElement(tag); el.textContent = value ?? ""; return el; };
 const headers = () => ({Authorization: `Bearer ${localStorage.agentbank_token || ""}`});
@@ -7,10 +8,14 @@ function renderGraph(data) {
   $("graph").replaceChildren();
   const controls = document.createElement("article");
   controls.className = "bubble";
-  controls.append(text("h2", `计划状态：${data.status}`));
+  controls.append(text("h2", `计划状态：${displayValue(data.status)}`));
   for (const [label, suffix] of [["暂停", "/pause"], ["继续", "/resume"], ["取消计划", "/cancel"]]) {
     const button = text("button", label);
     button.type = "button";
+    const allowed = suffix === "/pause" ? ["awaiting_confirmation", "running", "waiting_trigger"]
+      : suffix === "/resume" ? ["paused", "partially_completed"]
+      : ["draft", "prepared", "awaiting_confirmation", "paused", "waiting_trigger", "partially_completed"];
+    button.disabled = !allowed.includes(data.status);
     button.onclick = async () => {
       button.disabled = true;
       try {
@@ -25,7 +30,7 @@ function renderGraph(data) {
   $("graph").append(controls);
   for (const item of data.nodes || []) {
     const card = document.createElement("article"); card.className = "bubble";
-    card.append(text("h3", `${item.logical_id} · ${item.status}`));
+    card.append(text("h3", `${item.logical_id} · ${displayValue(item.status)}`));
     for (const [label, value] of [["工具", item.tool], ["授权", item.authorization]]) {
       const row = document.createElement("div"); row.className = "fact";
       row.append(text("span", label), text("strong", value)); card.append(row);
@@ -71,7 +76,7 @@ async function loadPlans() {
     if (!response.ok) throw new Error(data.code || data.detail?.code || "读取失败");
     select.replaceChildren(new Option("选择计划", ""));
     for (const plan of data.plans || []) {
-      const option = new Option(`${plan.plan_id} · ${plan.status} · 修订 ${plan.revision}`, plan.plan_id);
+      const option = new Option(`${plan.plan_id} · ${displayValue(plan.status)} · 修订 ${plan.revision}`, plan.plan_id);
       select.append(option);
     }
     if (!data.plans?.length) select.replaceChildren(new Option("暂无计划", ""));

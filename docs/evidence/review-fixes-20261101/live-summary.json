@@ -1,0 +1,30 @@
+{
+  "provider": "configured primary, real network",
+  "scope": "six conversation control regressions, synthetic isolated databases; not six full financial settlement tasks",
+  "cases": [
+    {
+      "scenario": "revision",
+      "passed": true
+    },
+    {
+      "scenario": "negation",
+      "passed": true
+    },
+    {
+      "scenario": "subscription",
+      "passed": true
+    },
+    {
+      "scenario": "new_transfer",
+      "passed": true
+    },
+    {
+      "scenario": "risk",
+      "passed": true
+    },
+    {
+      "scenario": "birthday",
+      "passed": true
+    }
+  ]
+}

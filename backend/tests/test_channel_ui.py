@@ -47,7 +47,7 @@ def test_plan_page_discovers_plans_and_renders_graph_as_text() -> None:
     assert 'fetch("/v1/plans"' in source
     assert 'fetch(`/v1/plans/${encodeURIComponent(id)}/graph`' in source
     assert "innerHTML" not in source
-    assert 'new Option(`${plan.plan_id} · ${plan.status} · 修订 ${plan.revision}`, plan.plan_id)' in source
+    assert 'new Option(`${plan.plan_id} · ${displayValue(plan.status)} · 修订 ${plan.revision}`, plan.plan_id)' in source
 
 
 def test_plan_list_is_authenticated_and_scoped_to_the_selected_account(tmp_path: Path) -> None:

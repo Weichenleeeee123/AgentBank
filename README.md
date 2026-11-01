@@ -80,3 +80,5 @@ Compose 配置保留为可选部署路径，当前本地候选不以 Docker 或�
 在准备验证 Docker 时，先运行 `docker compose --env-file .env -f deploy/docker-compose.yml config --quiet`，避免输出展开后的凭证；Docker daemon 可用后再单独执行 build/start/health 验证。公共实例 8000、评测实例 8001，使用独立数据卷和审计密钥；公共实例禁用管理员与坐席令牌，评测自测要求 `X-Admin-Token`，坐席要求独立的 `X-Staff-Token`。目前未执行本轮容器构建、公网 HTTPS、真实飞书或真实银行验收。
 
 升级兼容说明：本轮将通用业务确认页内容绑定到确认哈希。升级前尚未确认的旧凭证可能校验失败，需要重新发起并核对确认；已执行业务不受影响。
+
+最新审查修复：[说明与证据](docs/REVIEW-FIXES-20261101.md) · [独立安全设计](docs/security-design.md) · [第三方许可](docs/THIRD-PARTY-LICENSES.md)。历史候选数值不代表本轮修复后的冻结结果；以最新通过的 release manifest 为准。

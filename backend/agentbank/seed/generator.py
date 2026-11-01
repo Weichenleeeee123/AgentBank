@@ -73,6 +73,22 @@ def generate_seed(seed: int = 20261028) -> dict[str, list[dict[str, object]]]:
         {"id": "txn_new_large", "user_id": "user_001", "posted_at": "2026-10-25", "amount_minor": 100_000,
          "merchant": "首次大额商户", "category": "购物", "direction": "debit", "memo": None},
     ])
+    # A rolling 24-month comparison window ends at the last complete demo month.
+    # These are synthetic history, independent of the opening balance snapshot.
+    for user_index, user in enumerate(users):
+        for offset in range(24):
+            year, month_index = divmod(2024 * 12 + 10 + offset, 12)
+            month = month_index + 1
+            prefix = f"txn_history_{user['id']}_{year}_{month:02d}"
+            transactions.extend([
+                {'id': prefix + '_income', 'user_id': user['id'], 'posted_at': f'{year}-{month:02d}-01',
+                 'amount_minor': 600000 + user_index * 50000, 'merchant': '历史演示雇主',
+                 'category': '工资', 'direction': 'credit', 'memo': '合成历史数据，非真实资金'},
+                {'id': prefix + '_expense', 'user_id': user['id'], 'posted_at': f'{year}-{month:02d}-10',
+                 'amount_minor': 3000 + month * 120 + user_index * 200,
+                 'merchant': f'历史日常商户{month:02d}', 'category': '生活', 'direction': 'debit',
+                 'memo': '合成历史数据，非真实资金'},
+            ])
     products: list[dict[str, object]] = [
         {"id": f"product_{risk}", "name": f"演示产品 {risk}", "risk_level": risk, "term_days": 30,
          "fee_bps": 10, "redemption_days": 1}

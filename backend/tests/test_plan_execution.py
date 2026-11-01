@@ -17,7 +17,7 @@ def test_birthday_plan_can_execute_nodes_and_update_graph(tmp_path: Path) -> Non
         receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == plan.plan_id).one()
         assert plan_record is not None
         executed = service.execute_plan("user_001", plan.plan_id, receipt.id, plan_record.display_hash)
-    assert executed["status"] in {"succeeded", "partially_completed"}
+    assert executed["status"] == "waiting_trigger"
     assert [node["node_id"] for node in executed["nodes"]] == [
         "event", "quote_flower", "quote_cake", "reserve", "flowers", "cake"
     ]

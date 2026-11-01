@@ -416,9 +416,16 @@ def create_app(database_url: str | None = None) -> FastAPI:
                                       f"subscription-cancel-{secrets.token_urlsafe(10)}")
         return result.model_dump(mode="json")
 
+    @app.get('/v1/risk/questionnaire')
+    def get_risk_questionnaire(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        from agentbank.bank.questionnaire import questionnaire
+        return questionnaire()
+
     @app.post("/v1/risk/submit")
     def submit_risk(payload: dict[str, Any], user_id: str = Depends(current_user)) -> dict[str, Any]:
-        result = capabilities.execute(user_id, "W03", {"answers": [int(value) for value in payload.get("answers", [])]},
+        from agentbank.bank.questionnaire import VERSION
+        result = capabilities.execute(user_id, "W03", {'answers': payload.get('answers', []),
+                                      'questionnaire_version': payload.get('questionnaire_version', VERSION)},
                                       f"risk-submit-{secrets.token_urlsafe(10)}")
         return result.model_dump(mode="json")
 

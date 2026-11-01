@@ -8,12 +8,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def run_direct_result(response: dict) -> dict:
-    source = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
     script = f"""
 const vm = require('node:vm');
 (async () => {{
 const {{resultKind}} = await import({json.dumps((ROOT / 'frontend' / 'presentation.js').as_uri())});
-const source = {json.dumps(source)};
+const source = require('node:fs').readFileSync({json.dumps(str(ROOT / 'frontend' / 'app.js'))}, 'utf8');
 const start = source.indexOf('function showDirectResult(');
 const end = source.indexOf('async function submitDirectForm(', start);
 const calls = [];

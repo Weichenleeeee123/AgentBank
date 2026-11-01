@@ -23,7 +23,7 @@ flowchart TD
 
 ## 一次对话
 
-1. `IntentParser` 只产生结构化槽位；金额、收款人和产品缺失时返回澄清。
+1. 在线结构化 LLM planner 产生能力、槽位和任务关系，服务端校验 schema、当前话语依据和参数来源；`IntentParser` 是无 provider 时的有限规则降级。关键槽位缺失时澄清。
 2. `CapabilityService.execute` 先查幂等键，再检查熔断和红色 MFA 要求。
 3. 写操作生成 `CapabilityRecord`；转账写操作还生成 M1 plan/receipt。
 4. 用户确认或模拟手机 OTP 后，才调用 `TransferService.confirm/verify`。
@@ -31,7 +31,7 @@ flowchart TD
 
 ## 计划
 
-生日计划由 `BusinessPlanService` 生成四节点 DAG：事件读取、资金预留、鲜花订单、蛋糕订单。`PlanValidator` 检查工具白名单、拓扑顺序、来源和补偿声明；`GET /v1/plans/{id}/graph` 返回节点状态、授权和补偿信息。
+生日计划由 `BusinessPlanService` 生成六节点 DAG：事件读取、鲜花报价、蛋糕报价、资金预留、鲜花订单、蛋糕订单。`PlanValidator` 检查工具白名单、拓扑顺序、来源和补偿声明；`GET /v1/plans/{id}/graph` 返回节点状态、授权和补偿信息。
 
 ## 渠道
 
@@ -49,3 +49,15 @@ flowchart TD
 会话执行期间持有操作系统文件锁，进程退出时自动释放。下一条请求取得锁后，将遗留 processing 消息持久标为 unknown 并写审计，同一对话可以接收新消息；重试旧消息仍返回 MESSAGE_OUTCOME_UNKNOWN，不自动重发可能已经提交的资金操作。锁文件位于 SQLite 文件旁的 `.message-locks` 目录，仅含哈希文件名与占位字节，不删除或替换。多个本地 worker 必须共享数据库及该目录，底层文件系统必须支持 OS 锁；滚动混用旧版未加锁 worker 不受支持，升级时先停止旧 worker。此机制不宣称支持分布式数据库部署。
 
 PWA 仅缓存静态壳，账户 API `no-store` 且不进入 service worker 缓存。坐席使用独立 token，其建议和重试申请只通知用户，不能代用户执行、确认或消耗旧授权。部署边界和本地复现见 [LOCAL-RELEASE.md](LOCAL-RELEASE.md)。
+
+## 2026-11-01 修复后的状态与资金边界
+
+前端实际采用静态 HTML / JavaScript 模块与 PWA，不依赖 React 构建；这是相对最初设计的实现调整。
+
+任务修订由结构化 task_action 与当前话语依据共同判断，原子作废旧授权。确认、设备验证和 DAG 派发共用提交前动态策略复核，不能依赖准备时的权限等级。AA 付款绑定应付份额及双方真实模拟账户，在同一事务内借记付款人、贷记发起人并累计日支付额。
+
+生日计划完成安排后是 waiting_trigger；暂停阻止到期派发，取消撤销未来授权并释放剩余预留；调度结果回填父节点，实际完成后才 succeeded。已执行部分不被取消操作伪装成退款，部分失败显示 partially_completed 并可查证/取消未执行部分。
+
+风险问卷使用版本化十题，保存答案、分数、等级、测评日及一年有效期。新种子包含截至 2026-10 的连续 24 月合成流水；不会重置已有数据库。
+
+可直接打开的静态架构图：[architecture.svg](architecture.svg)。

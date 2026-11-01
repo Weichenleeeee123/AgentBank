@@ -11,6 +11,7 @@ from sqlalchemy import select
 from agentbank.contracts import Plan, PlanNode
 from agentbank.db import (Account, AuditLog, CapabilityRecord, Database, DecisionRecord, Event, LedgerEntry,
                           Operation, PlanNodeRecord, PlanRecord, ReceiptConsumption, ReceiptRecord, Reservation)
+from agentbank.db import Mandate, MerchantOrder, ScheduledJob
 from agentbank.errors import DomainError
 from agentbank.planning.validator import PlanValidator
 from agentbank.bank.capabilities_full import CapabilityService
@@ -703,6 +704,7 @@ class BusinessPlanService:
             current_plan = session.get(PlanRecord, plan_id)
             interrupted_status = current_plan.status if current_plan and current_plan.status in {"paused", "cancelled"} else None
         final_status = interrupted_status or (
+            "waiting_trigger" if all(status in completed_statuses for status in node_statuses) and 'scheduled' in node_statuses else
             "succeeded" if all(status in completed_statuses for status in node_statuses)
             else "partially_completed"
         )
@@ -711,7 +713,7 @@ class BusinessPlanService:
             if plan is not None and plan.status == "running":
                 plan.status = final_status
             receipt = session.get(ReceiptRecord, receipt_id)
-            if receipt is not None and final_status == "succeeded":
+            if receipt is not None and final_status in {"succeeded", "waiting_trigger"}:
                 receipt.status = "consumed"
         return {"plan_id": plan_id, "status": final_status, "nodes": results}
 
@@ -740,15 +742,33 @@ class BusinessPlanService:
         return resolve(value)
 
     def pause(self, user_id: str, plan_id: str) -> dict[str, str]:
-        return self._set_status(user_id, plan_id, "paused", {"awaiting_confirmation", "running"})
+        with self.database.atomic():
+            return self._set_status(user_id, plan_id, "paused", {"awaiting_confirmation", "running", "waiting_trigger"})
 
     def cancel(self, user_id: str, plan_id: str) -> dict[str, str]:
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
-            if plan.status not in {"draft", "prepared", "awaiting_confirmation", "paused"}:
+            if plan.status not in {"draft", "prepared", "awaiting_confirmation", "paused", "waiting_trigger", "partially_completed"}:
                 raise DomainError("PLAN_STATE_INVALID")
+            nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
+            for node in nodes:
+                child = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == node.idempotency_key))
+                if child is None or child.status not in {'scheduled', 'paused', 'partially_completed'}:
+                    continue
+                data = json.loads(child.data_json)
+                mandate = session.get(Mandate, str(data.get('mandate_id', '')))
+                if mandate is not None:
+                    mandate.status = 'revoked'
+                order = session.get(MerchantOrder, str(data.get('order_id', '')))
+                if order is not None and order.status not in {'delivered', 'failed'}:
+                    order.status = 'cancelled'
+                for job in session.scalars(select(ScheduledJob).where(ScheduledJob.schedule_id == str(data.get('schedule_id', '')), ScheduledJob.status == 'scheduled')).all():
+                    job.status = 'cancelled'
+                child.status = node.status = 'cancelled'
+                data['status'] = 'cancelled'
+                child.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
             reservations = session.scalars(select(Reservation).where(Reservation.user_id == user_id,
                                                                        Reservation.plan_id == plan_id,
                                                                        Reservation.status == "active")).all()
@@ -764,7 +784,7 @@ class BusinessPlanService:
             return {"plan_id": plan_id, "status": "cancelled"}
 
     def resume(self, user_id: str, plan_id: str) -> dict[str, str]:
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             plan = session.get(PlanRecord, plan_id)
             if plan is None or plan.user_id != user_id:
                 raise DomainError("NOT_OWNER")
@@ -774,8 +794,26 @@ class BusinessPlanService:
                                                                        PlanNodeRecord.status == "failed")).all()
             for node in failed_nodes:
                 node.status = "pending"
-            plan.status = "awaiting_confirmation"
+            nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id)).all()
+            plan.status = 'waiting_trigger' if any(node.status == 'scheduled' for node in nodes) and all(
+                node.status in {'succeeded', 'scheduled', 'reserved', 'created'} for node in nodes) else 'awaiting_confirmation'
             return {"plan_id": plan_id, "status": plan.status}
+
+    @staticmethod
+    def refresh_waiting_plans(session: Any) -> None:
+        for plan in session.scalars(select(PlanRecord).where(PlanRecord.status.in_(['waiting_trigger', 'partially_completed']))).all():
+            nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan.id)).all()
+            for node in nodes:
+                if node.status not in {'scheduled', 'paused', 'partially_completed'}:
+                    continue
+                child = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == node.idempotency_key))
+                if child is not None:
+                    node.status = child.status
+            statuses = {node.status for node in nodes}
+            if statuses & {'failed', 'paused', 'partially_completed', 'cancelled'}:
+                plan.status = 'partially_completed'
+            elif statuses and statuses <= {'succeeded', 'reserved', 'created'}:
+                plan.status = 'succeeded'
 
     def _set_status(self, user_id: str, plan_id: str, target: str, allowed: set[str]) -> dict[str, str]:
         with self.database.sessions.begin() as session:

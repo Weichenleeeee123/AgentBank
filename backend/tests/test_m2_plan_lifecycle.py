@@ -72,7 +72,7 @@ def test_repeated_plan_revisions_keep_receipts_and_returned_revision_in_sync(tmp
     with database.sessions() as session:
         receipt = session.query(ReceiptRecord).filter(ReceiptRecord.plan_id == revised_again.plan_id).one()
         assert receipt.plan_revision == 3
-    assert execute(service, database, revised_again.plan_id)["status"] == "succeeded"
+    assert execute(service, database, revised_again.plan_id)["status"] == "waiting_trigger"
     with database.sessions() as session:
         assert {order.delivery_date for order in session.query(MerchantOrder).all()} == {"2027-03-01"}
 
@@ -106,7 +106,7 @@ def test_pause_after_reservation_stops_orders_and_resume_reuses_reservation(tmp_
         assert session.query(MerchantOrder).count() == 0
         assert session.query(Reservation).count() == 1
     service.resume("user_001", plan.plan_id)
-    assert execute(service, database, plan.plan_id)["status"] == "succeeded"
+    assert execute(service, database, plan.plan_id)["status"] == "waiting_trigger"
     with database.sessions() as session:
         reservation = session.query(Reservation).one()
         assert {order.reservation_id for order in session.query(MerchantOrder).all()} == {reservation.id}
@@ -142,7 +142,7 @@ def test_birthday_dispatch_posts_each_order_and_releases_unused_budget(tmp_path:
     with database.sessions.begin() as session:
         session.get(Event, "event_birthday").event_date = event_date
     plan = service.create_birthday_plan("user_001", "event_birthday", 100_000)
-    assert execute(service, database, plan.plan_id)["status"] == "succeeded"
+    assert execute(service, database, plan.plan_id)["status"] == "waiting_trigger"
 
     dispatched = CapabilityService(database).dispatch_due("user_001")
 
@@ -187,7 +187,7 @@ def test_restarted_service_pauses_running_plan_and_resume_recovers_committed_res
     assert restarted.resume("user_001", plan.plan_id)["status"] == "awaiting_confirmation"
     receipt_id, display_hash = _receipt_for(database, plan.plan_id)
     resumed = restarted.execute_plan("user_001", plan.plan_id, receipt_id, display_hash)
-    assert resumed["status"] == "succeeded"
+    assert resumed["status"] == "waiting_trigger"
     with database.sessions() as session:
         assert session.query(Reservation).filter(Reservation.plan_id == plan.plan_id).count() == 1
         assert session.query(MerchantOrder).filter(MerchantOrder.status == "scheduled").count() == 2

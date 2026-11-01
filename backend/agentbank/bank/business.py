@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+import json
 from dataclasses import dataclass
 from datetime import date
+from calendar import monthrange
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -10,6 +12,8 @@ from sqlalchemy.orm import Session
 from agentbank.clock import BusinessClock, business_date
 from agentbank.db import Account, Card, Database, Event, Mandate, Payee, Product, Reservation, RiskProfile, Subscription
 from agentbank.errors import AmbiguousRecipient, DomainError
+from agentbank.db import RiskAssessment
+from agentbank.bank.questionnaire import VERSION
 
 
 @dataclass(frozen=True)
@@ -55,16 +59,21 @@ class RiskProfileView:
 
 
 class RiskService:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, clock: BusinessClock | None = None) -> None:
         self.database = database
+        self.clock = clock or BusinessClock()
 
-    def submit(self, user_id: str, answers: list[int]) -> RiskProfileView:
-        if len(answers) != 10 or any(answer < 0 or answer > 5 for answer in answers):
+    def submit(self, user_id: str, answers: list[int], questionnaire_version: str = VERSION) -> RiskProfileView:
+        if questionnaire_version != VERSION or len(answers) != 10 or any(type(answer) is not int or answer < 0 or answer > 5 for answer in answers):
             raise DomainError("INVALID_RISK_QUESTIONNAIRE")
         score = sum(answers)
         level = "C1" if score <= 10 else "C2" if score <= 20 else "C3" if score <= 30 else "C4" if score <= 40 else "C5"
-        expires = "2027-10-28"
+        today = date.fromisoformat(self.clock.business_date())
+        expires = today.replace(year=today.year + 1, day=min(today.day, monthrange(today.year + 1, today.month)[1])).isoformat()
         with self.database.sessions.begin() as session:
+            session.add(RiskAssessment(id=f'risk_{uuid.uuid4().hex}', user_id=user_id,
+                questionnaire_version=questionnaire_version, answers_json=json.dumps(answers),
+                score=score, level=level, assessed_on=today.isoformat(), expires_on=expires))
             profile = session.get(RiskProfile, user_id)
             if profile is None:
                 profile = RiskProfile(user_id=user_id, level=level, score=score, expires_on=expires)
