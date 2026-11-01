@@ -11,7 +11,7 @@ from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, 
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from agentbank.clock import utc_now_naive
+from agentbank.clock import BusinessClock, utc_now_naive
 
 
 class Base(DeclarativeBase):
@@ -95,6 +95,17 @@ class Card(Base):
     status: Mapped[str] = mapped_column(String(32), default="active")
     limit_minor: Mapped[int] = mapped_column(Integer, default=100_000)
     restrictions_json: Mapped[str] = mapped_column(Text, default="[]")
+    pin_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PendingPinChange(Base):
+    __tablename__ = "pending_pin_changes"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    user_id: Mapped[str] = mapped_column(String(64))
+    card_id: Mapped[str] = mapped_column(String(64))
+    pin_hash: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
 
 
 class Subscription(Base):
@@ -320,6 +331,7 @@ class InvestmentOrder(Base):
     id: Mapped[str] = mapped_column(String(80), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     product_id: Mapped[str] = mapped_column(String(80))
+    position_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
     side: Mapped[str] = mapped_column(String(16))
     amount_minor: Mapped[int] = mapped_column(Integer)
     shares: Mapped[int] = mapped_column(Integer, default=0)
@@ -612,6 +624,7 @@ class _SessionFactory:
 
 class Database:
     def __init__(self, url: str = "sqlite:///agentbank.db") -> None:
+        self.business_clock = BusinessClock()
         connect_args: dict[str, Any] = {}
         kwargs: dict[str, Any] = {}
         if url in {"sqlite://", "sqlite:///:memory:"}:
@@ -653,6 +666,8 @@ class Database:
         Base.metadata.create_all(self.engine)
         if self.engine.dialect.name == "sqlite":
             migrations = {
+                "cards": {"pin_hash": "TEXT"},
+                "investment_orders": {"position_id": "VARCHAR(80)"},
                 "agent_messages": {"status": "VARCHAR(24) NOT NULL DEFAULT 'completed'",
                                    "error_code": "VARCHAR(120) NOT NULL DEFAULT ''"},
                 "webim_nonces": {"channel_session": "VARCHAR(64) NOT NULL DEFAULT ''"},

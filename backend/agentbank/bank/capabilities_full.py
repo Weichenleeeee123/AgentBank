@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import secrets
+import hmac
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import Session
 
 from agentbank.analysis.dsl import DslExecutor
 from agentbank.analysis.insights import birthday_history_clues, detect_anomalies, detect_subscriptions, monthly_report, yearly_report
@@ -15,11 +18,12 @@ from agentbank.auth.devices import DeviceService
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
-from agentbank.clock import BusinessClock, business_date, utc_now_naive, next_scheduled_date
+from agentbank.bank.ledger import post_payment, post_redemption, require_active, require_payment, require_safe_risk
+from agentbank.clock import BusinessClock, utc_now_naive, next_scheduled_date
 from agentbank.contracts import CapabilityResult
-from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
+from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
 from agentbank.db import MerchantCatalog, MerchantQuote
-from agentbank.db import RiskContextRecord
+from agentbank.db import RiskContextRecord, PendingPinChange
 from agentbank.db import PlanNodeRecord, PlanRecord
 from agentbank.contracts import Assurance
 from agentbank.policy.engine import PolicyContext, decide
@@ -38,7 +42,9 @@ class CapabilityService:
 
     def __init__(self, database: Database, clock: BusinessClock | None = None, *, require_device_mfa: bool = False, enforce_prepare: bool = False) -> None:
         self.database = database
-        self.clock = clock or BusinessClock()
+        if clock is not None:
+            database.business_clock = clock
+        self.clock = database.business_clock
         self.audit = PersistentAudit(database)
         self.breaker = CircuitBreaker(database)
         self.device_tokens: dict[str, str] = {}
@@ -58,7 +64,7 @@ class CapabilityService:
         public_payload = {key: value for key, value in payload.items()
                           if key not in internal_markers}
         validate_capability_payload(capability_id, public_payload)
-        request_hash = "sha256:" + hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+        request_hash = "sha256:" + hashlib.sha256(json.dumps(self._safe_payload(capability_id, payload), ensure_ascii=False, sort_keys=True,
                                                               separators=(",", ":")).encode("utf-8")).hexdigest()
         with self.database.sessions() as session:
             existing = session.scalar(select(CapabilityRecord).where(CapabilityRecord.idempotency_key == idempotency_key))
@@ -67,6 +73,10 @@ class CapabilityService:
                     raise DomainError("NOT_OWNER")
                 if existing.request_hash and existing.request_hash != request_hash:
                     raise DomainError("IDEMPOTENCY_CONFLICT")
+                if capability_id == 'C08':
+                    pending = session.get(PendingPinChange, idempotency_key)
+                    if pending is None or not self._pin_matches(str(payload.get('new_pin', '')), pending.pin_hash):
+                        raise DomainError('IDEMPOTENCY_CONFLICT')
                 return self._result(existing)
         payload = dict(payload)
         if capability_id == 'W03':
@@ -81,6 +91,18 @@ class CapabilityService:
                 owned_card = session.get(Card, str(payload.get('card_id', 'card_001')))
                 if owned_card is None or owned_card.user_id != user_id:
                     raise DomainError('NOT_OWNER')
+            pin = payload.get('new_pin')
+            if not isinstance(pin, str) or not pin.isascii() or not pin.isdigit() or not 4 <= len(pin) <= 6:
+                raise DomainError('PIN_POLICY_INVALID')
+            with self.database.atomic() as session:
+                pending_pin = session.get(PendingPinChange, idempotency_key)
+                if pending_pin is None:
+                    session.add(PendingPinChange(id=idempotency_key, user_id=user_id,
+                        card_id=str(payload.get('card_id', 'card_001')), pin_hash=self._hash_pin(pin),
+                        expires_at=utc_now_naive() + timedelta(minutes=5)))
+                elif (pending_pin.user_id != user_id or pending_pin.card_id != str(payload.get('card_id', 'card_001'))
+                      or not self._pin_matches(pin, pending_pin.pin_hash)):
+                    raise DomainError('IDEMPOTENCY_CONFLICT')
         if capability_id in {"X03", "X04"}:
             item = "flower" if capability_id == "X03" else "cake"
             delivery_date = str(payload.get("delivery_date", self.clock.business_date()))
@@ -538,20 +560,32 @@ class CapabilityService:
             self.audit.append(session, f"trace_{mandate_id}", user_id, "mandate.revoked", {"mandate_id": mandate_id})
 
     def simulate_subscription_charge(self, user_id: str, subscription_id: str) -> dict[str, Any]:
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             subscription = session.get(Subscription, subscription_id)
             if subscription is None or subscription.user_id != user_id:
                 raise DomainError("NOT_OWNER")
             if subscription.status != "active":
                 return {"subscription_id": subscription_id, "charged": False, "reason": "CANCELLED"}
+            operation_id = f'op_subscription_{subscription_id}_{subscription.next_charge_at[:10]}'
+            transaction_id = f'txn_{operation_id}_out'
+            if session.get(Operation, operation_id) is not None:
+                return {"subscription_id": subscription_id, "charged": True, "transaction_id": transaction_id,
+                        "amount_minor": subscription.amount_minor}
             subscription_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
-            if subscription_account is None or subscription_account.available_minor < subscription.amount_minor:
-                return {"subscription_id": subscription_id, "charged": False, "reason": "INSUFFICIENT_FUNDS"}
-            subscription_account.available_minor -= subscription.amount_minor
-            transaction_id = f"txn_sub_{uuid.uuid4().hex}"
-            session.add(Transaction(id=transaction_id, user_id=user_id, posted_at=self.clock.business_date(),
-                                    amount_minor=subscription.amount_minor, merchant=subscription.merchant,
-                                    category="订阅", direction="debit", memo="模拟续费"))
+            try:
+                bucket = require_payment(self.database, session, user_id, subscription_account,
+                                         subscription.amount_minor, self.clock.business_date())
+            except DomainError as error:
+                self.audit.append(session, f'trace_{operation_id}', user_id, 'subscription.charge.blocked', {'reason': error.code})
+                return {"subscription_id": subscription_id, "charged": False, "reason": error.code}
+            assert subscription_account is not None
+            session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=operation_id,
+                                  plan_id=subscription_id, node_id=subscription_id, status='succeeded',
+                                  amount_minor=subscription.amount_minor, recipient_id=f'subscription:{subscription_id}'))
+            post_payment(session, operation_id, subscription_account, f'subscription:{subscription_id}',
+                         subscription.amount_minor, self.clock.business_date(), category='订阅',
+                         merchant=subscription.merchant, direction='debit')
+            bucket.completed_minor += subscription.amount_minor
             self.audit.append(session, f"trace_{transaction_id}", user_id, "subscription.charge.simulated",
                               {"subscription_id": subscription_id, "transaction_id": transaction_id,
                                "amount_minor": subscription.amount_minor})
@@ -784,8 +818,15 @@ class CapabilityService:
 
     def _dispatch(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         from agentbank.security.tool_breaker import guarded_call
+        read_only = capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}
+        read_only = read_only or (capability_id == "T05" and payload.get("action") in {"preview", "status"})
         def commit() -> tuple[dict[str, Any], str]:
             with self.database.atomic() as session:
+                if not read_only:
+                    self.breaker.require_write(session, user_id,
+                        protective=self._is_protective(session, capability_id, payload))
+                if capability_id == 'W04':
+                    require_safe_risk(session, user_id)
                 if self._requires_mfa(session, user_id, capability_id, payload):
                     verified = payload.get('_mfa_verified') or (not self.require_device_mfa and payload.get('assurance') == 'mfa')
                     if not verified:
@@ -793,7 +834,7 @@ class CapabilityService:
                 return self._dispatch_handler(user_id, capability_id, payload, idempotency_key)
         return guarded_call(self.database, capability_id,
                             commit,
-                            read_only=capability_id in {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"})
+                            read_only=read_only)
 
     @staticmethod
     def _aa_snapshot(session: Any, user_id: str, bill_id: str) -> dict[str, Any]:
@@ -828,7 +869,7 @@ class CapabilityService:
                     raise DomainError('FRAUD_REVIEW_REQUIRED')
                 if risk.level in {'medium', 'unknown'}:
                     raise DomainError('RISK_REVIEW_REQUIRED')
-            bucket = TransferService._bucket(session, user_id)
+            bucket = TransferService._bucket(session, user_id, self.clock.business_date())
             decision = decide('transfer.create', PolicyContext(projected_today_minor=
                 bucket.completed_minor + bucket.pending_minor + int(snapshot['amount_minor'])))
             return decision.assurance is Assurance.mfa
@@ -943,24 +984,16 @@ class CapabilityService:
                     if existing_operation is not None:
                         return {"bill_id": bill_id, "share_status": "paid", "bill_status": bill.status,
                                 "amount_minor": share.amount_minor, "operation_id": operation_id}, "succeeded"
-                    aa_account.available_minor -= share.amount_minor
-                    aa_account.ledger_balance_minor -= share.amount_minor
                     recipient_account = session.get(Account, str(payload['recipient_account_id']))
                     if recipient_account is None or recipient_account.status != 'active' or aa_account.status != 'active':
                         raise DomainError('ACCOUNT_NOT_ACTIVE')
-                    recipient_account.available_minor += share.amount_minor
-                    recipient_account.ledger_balance_minor += share.amount_minor
-                    TransferService._bucket(session, user_id).completed_minor += share.amount_minor
+                    TransferService._bucket(session, user_id, self.clock.business_date()).completed_minor += share.amount_minor
                     share.status = "paid"
                     session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=f"aa-pay-{bill_id}-{user_id}",
                                           plan_id=bill_id, node_id=share.id, status="succeeded",
                                           amount_minor=share.amount_minor, recipient_id=recipient_account.id))
-                    session.add_all([
-                        LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                    account_id=aa_account.id, amount_minor=-share.amount_minor, direction="debit"),
-                        LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                    account_id=recipient_account.id, amount_minor=share.amount_minor, direction="credit"),
-                    ])
+                    post_payment(session, operation_id, aa_account, recipient_account.id,
+                                 share.amount_minor, self.clock.business_date(), category='AA转账', merchant='AA收款')
                     unpaid = session.scalar(select(AAShare).where(AAShare.bill_id == bill_id, AAShare.status != "paid"))
                     if unpaid is None:
                         bill.status = "settled"
@@ -1037,46 +1070,45 @@ class CapabilityService:
             if not self._suitable(user_id, product.risk_level):
                 raise DomainError("SUITABILITY_MISMATCH")
             amount_minor = int(payload.get("amount_minor", 10_000))
+            if amount_minor % 100:
+                raise DomainError('INVESTMENT_AMOUNT_INCREMENT')
             with self.database.sessions.begin() as session:
                 investment_account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
+                investment_account = require_active(investment_account, user_id)
                 if investment_account is None or investment_account.available_minor < amount_minor:
                     raise DomainError("INSUFFICIENT_FUNDS")
-                investment_account.available_minor -= amount_minor
-                investment_account.ledger_balance_minor -= amount_minor
                 order_id = f"order_{uuid.uuid4().hex}"
+                position_id = f'pos_{order_id}'
                 shares_count = amount_minor // 100
                 session.add(InvestmentOrder(id=order_id, user_id=user_id, product_id=product_id, side="subscribe",
-                                            amount_minor=amount_minor, shares=shares_count, status="subscribed"))
-                session.add(Position(id=f"pos_{uuid.uuid4().hex}", user_id=user_id, product_id=product_id,
+                                            amount_minor=amount_minor, shares=shares_count, status="subscribed", position_id=position_id))
+                session.add(Position(id=position_id, user_id=user_id, product_id=product_id,
                                      shares=shares_count, cost_minor=amount_minor, market_value_minor=amount_minor,
                                      as_of=self.clock.now().replace(tzinfo=None)))
                 operation_id = f"op_invest_sub_{order_id}"
                 session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=idempotency_key,
                                       plan_id=idempotency_key, node_id=order_id, status="succeeded",
                                       amount_minor=amount_minor, recipient_id=f"investment:{product_id}"))
-                session.add_all([
-                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                account_id=investment_account.id, amount_minor=-amount_minor, direction="debit"),
-                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                account_id=f"investment:{product_id}", amount_minor=amount_minor, direction="credit"),
-                ])
+                post_payment(session, operation_id, investment_account, f'investment:{product_id}',
+                             amount_minor, self.clock.business_date(), category='理财', merchant=product.name)
             return {"order_id": order_id, "product_id": product_id, "status": "subscribed",
                     "shares": shares_count, "amount_minor": amount_minor, "funds_status": "debited",
                     "operation_id": operation_id}, "succeeded"
         if capability_id == "W05":
             order_id = str(payload.get("order_id", f"order_{uuid.uuid4().hex}"))
-            expected = datetime.now(timezone.utc) + timedelta(days=2)
             with self.database.sessions.begin() as session:
                 order = session.get(InvestmentOrder, order_id)
                 if order is None or order.user_id != user_id:
                     raise DomainError("ORDER_NOT_REDEEMABLE")
                 if order.side != "subscribe" or order.status != "subscribed":
                     raise DomainError("ORDER_NOT_REDEEMABLE")
-                position = session.scalar(select(Position).where(Position.user_id == user_id,
-                                                                  Position.product_id == order.product_id,
-                                                                  Position.shares >= order.shares))
-                if position is None:
+                position = self._order_position(session, order)
+                if position is None or position.shares < order.shares:
                     raise DomainError("INSUFFICIENT_POSITION")
+                product = session.get(Product, order.product_id)
+                if product is None:
+                    raise DomainError('PRODUCT_NOT_FOUND')
+                expected = self.clock.now() + timedelta(days=product.redemption_days)
                 order.status = "processing"
                 order.side = "redeem"
                 order.expected_settlement_at = expected.replace(tzinfo=None)
@@ -1096,11 +1128,11 @@ class CapabilityService:
                                   if position.shares > 0 else 0),
                               "pnl_minor": ((max(0, position.cost_minor +
                                   position.cost_minor * max(0, (as_of.date() - position.as_of.date()).days) // 2000)
-                                  - position.cost_minor) if position.shares > 0 else -position.cost_minor),
+                                  - position.cost_minor) if position.shares > 0 else 0),
                               "order_ids": order_ids_by_product.get(position.product_id, [])} for position in positions]
             return {"positions": valuation, "source": "simulated_market", "as_of": as_of.isoformat()}, "succeeded"
         if capability_id.startswith("C"):
-            return self._card(user_id, capability_id, payload)
+            return self._card(user_id, capability_id, payload, idempotency_key)
         if capability_id == "S01":
             return {"subscriptions": detect_subscriptions(self.database, user_id)}, "succeeded"
         if capability_id == "S02":
@@ -1228,7 +1260,7 @@ class CapabilityService:
                     "next_step": "verify_loss_report"}, "partially_completed"
         raise DomainError("CAPABILITY_NOT_IMPLEMENTED")
 
-    def _card(self, user_id: str, capability_id: str, payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    def _card(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str) -> tuple[dict[str, Any], str]:
         if capability_id == "C07":
             if payload.get("action") == "unfreeze":
                 card_id = str(payload.get("card_id", "card_001"))
@@ -1304,12 +1336,38 @@ class CapabilityService:
                 card.restrictions_json = json.dumps([item for item in json.loads(card.restrictions_json) if item != restriction])
             return {"card_id": card_id, "restriction": restriction, "status": "active", "payment_blocked": False}, "succeeded"
         if capability_id == "C08":
-            with self.database.sessions() as session:
+            with self.database.sessions.begin() as session:
                 card = session.get(Card, str(payload.get('card_id', 'card_001')))
                 if card is None or card.user_id != user_id:
                     raise DomainError('NOT_OWNER')
-            return {"card_id": str(payload.get("card_id", "card_001")), "status": "pin_changed", "secret_persisted": False}, "succeeded"
+                pending = session.get(PendingPinChange, idempotency_key)
+                if (pending is None or pending.user_id != user_id or pending.card_id != card.id
+                        or pending.status != 'pending' or pending.expires_at <= utc_now_naive()):
+                    raise DomainError('PIN_CHANGE_EXPIRED')
+                card.pin_hash = pending.pin_hash
+                pending.status = 'consumed'
+            return {"card_id": card.id, "status": "pin_changed", "secret_persisted": False}, "succeeded"
         raise DomainError("CAPABILITY_NOT_IMPLEMENTED")
+
+    @staticmethod
+    def _hash_pin(pin: str) -> str:
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac('sha256', pin.encode(), salt, 600_000)
+        return f"pbkdf2_sha256$600000${salt.hex()}${digest.hex()}"
+
+    @staticmethod
+    def _pin_matches(pin: str, stored: str) -> bool:
+        _, rounds, salt, expected = stored.split('$')
+        actual = hashlib.pbkdf2_hmac('sha256', pin.encode(), bytes.fromhex(salt), int(rounds)).hex()
+        return hmac.compare_digest(actual, expected)
+
+    def verify_card_pin(self, user_id: str, card_id: str, pin: str) -> bool:
+        """Internal simulator verifier; deliberately not exposed as an online guessing API."""
+        with self.database.sessions() as session:
+            card = session.get(Card, card_id)
+            if card is None or card.user_id != user_id:
+                raise DomainError('NOT_OWNER')
+            return card.pin_hash is not None and self._pin_matches(pin, card.pin_hash)
 
     def card_payment(self, user_id: str, card_id: str, amount_minor: int) -> str:
         with self.database.sessions() as session:
@@ -1322,48 +1380,71 @@ class CapabilityService:
                 return "LIMIT_EXCEEDED"
             return "approved"
 
+    @staticmethod
+    def _order_position(session: Session, order: InvestmentOrder) -> Position | None:
+        if order.position_id:
+            position = session.get(Position, order.position_id)
+            if position is None or position.user_id != order.user_id or position.product_id != order.product_id:
+                raise DomainError("POSITION_LINK_INVALID")
+            return position
+        # Legacy orders can be linked only when the lot is unambiguous.
+        candidates = session.scalars(select(Position).where(
+            Position.user_id == order.user_id, Position.product_id == order.product_id,
+            Position.shares == order.shares, Position.cost_minor == order.amount_minor)).all()
+        linked = set(session.scalars(select(InvestmentOrder.position_id).where(
+            InvestmentOrder.id != order.id, InvestmentOrder.position_id.is_not(None))).all())
+        candidates = [position for position in candidates if position.id not in linked]
+        if len(candidates) != 1:
+            raise DomainError("POSITION_RECONCILIATION_REQUIRED")
+        order.position_id = candidates[0].id
+        return candidates[0]
+
     def progress_investments(self, user_id: str | None = None, *, due_only: bool = False) -> list[CapabilityResult]:
         changed: list[CapabilityRecord] = []
-        with self.database.sessions.begin() as session:
+        with self.database.atomic() as session:
             query = select(InvestmentOrder).where(InvestmentOrder.status == "processing", InvestmentOrder.side == "redeem")
             if due_only:
                 query = query.where(InvestmentOrder.expected_settlement_at <= self.clock.now().replace(tzinfo=None))
             if user_id:
                 query = query.where(InvestmentOrder.user_id == user_id)
-            orders = list(session.scalars(query).all())
-            for order in orders:
-                order.status = "settled"
-                redemption_account = session.scalar(select(Account).where(Account.user_id == order.user_id).order_by(Account.id))
+            for order in session.scalars(query).all():
+                account = session.scalar(select(Account).where(Account.user_id == order.user_id).order_by(Account.id))
+                if account is None or account.status != "active":
+                    continue
+                try:
+                    position = self._order_position(session, order)
+                    if position is None or position.shares < order.shares:
+                        raise DomainError("INSUFFICIENT_POSITION")
+                except DomainError as error:
+                    for record in session.scalars(select(CapabilityRecord).where(
+                            CapabilityRecord.user_id == order.user_id, CapabilityRecord.capability_id == "W05")).all():
+                        data = json.loads(record.data_json)
+                        if data.get('order_id') != order.id or data.get('error_code') == error.code:
+                            continue
+                        data.update(error_code=error.code, next_step='manual_position_reconciliation')
+                        record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                        self.audit.append(session, f'trace_{order.id}', order.user_id,
+                            'investment.settlement.reconciliation_required',
+                            {'order_id': order.id, 'error_code': error.code})
+                        changed.append(record)
+                    continue
                 operation_id = f"op_invest_redeem_{order.id}"
-                existing_operation = session.get(Operation, operation_id)
-                if redemption_account is not None:
-                    redemption_account.available_minor += order.amount_minor
-                    redemption_account.ledger_balance_minor += order.amount_minor
-                    if existing_operation is None:
-                        session.add(Operation(id=operation_id, user_id=order.user_id,
-                                              idempotency_key=operation_id, plan_id=order.id,
-                                              node_id=order.id, status="succeeded", amount_minor=order.amount_minor,
-                                              recipient_id=redemption_account.id))
-                        session.add_all([
-                            LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                        account_id=f"investment:{order.product_id}", amount_minor=-order.amount_minor,
-                                        direction="debit"),
-                            LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                        account_id=redemption_account.id, amount_minor=order.amount_minor,
-                                        direction="credit"),
-                        ])
-                position = session.scalar(select(Position).where(Position.user_id == order.user_id,
-                                                                  Position.product_id == order.product_id))
-                if position is not None:
-                    position.shares = 0
-                    position.market_value_minor = 0
-                record = session.scalar(select(CapabilityRecord).where(CapabilityRecord.user_id == order.user_id,
-                                                                        CapabilityRecord.capability_id == "W05",
-                                                                        CapabilityRecord.data_json.contains(order.id)))
-                if record is not None:
+                if session.get(Operation, operation_id) is None:
+                    session.add(Operation(id=operation_id, user_id=order.user_id,
+                        idempotency_key=operation_id, plan_id=order.id, node_id=order.id,
+                        status="succeeded", amount_minor=order.amount_minor, recipient_id=account.id))
+                    post_redemption(session, operation_id, account, f"investment:{order.product_id}",
+                                    order.amount_minor, self.clock.business_date())
+                    position.shares -= order.shares
+                    position.cost_minor = max(0, position.cost_minor - order.amount_minor)
+                    position.market_value_minor = position.cost_minor
+                order.status = "settled"
+                for record in session.scalars(select(CapabilityRecord).where(
+                        CapabilityRecord.user_id == order.user_id, CapabilityRecord.capability_id == "W05")).all():
                     data = json.loads(record.data_json)
-                    data["status"] = "settled"
-                    data["operation_id"] = operation_id
+                    if data.get("order_id") != order.id:
+                        continue
+                    data.update(status="settled", operation_id=operation_id)
                     record.status = "succeeded"
                     record.data_json = json.dumps(data, ensure_ascii=False, sort_keys=True)
                     changed.append(record)
@@ -1621,7 +1702,17 @@ class CapabilityService:
                             mandate_id = str(data.get("mandate_id", ""))
                             mandate = order_session.get(Mandate, mandate_id) if mandate_id else None
                             today_date = date.fromisoformat(today)
-                            if status == "paused":
+                            payment_bucket = None
+                            if status != "paused" and data.get("status") != "failed":
+                                try:
+                                    payment_bucket = require_payment(
+                                        self.database, order_session, record.user_id, account,
+                                        merchant.amount_minor, today,
+                                        held=merchant.amount_minor if reservation is not None else 0)
+                                except DomainError as error:
+                                    status = "paused"
+                                    data.update(status="paused", error_code=error.code, next_step="review_security_state")
+                            if status == "paused" or data.get("status") == "failed":
                                 pass
                             elif int(data.get("amount_minor", merchant.amount_minor)) != merchant.amount_minor:
                                 status = "paused"
@@ -1639,7 +1730,7 @@ class CapabilityService:
                                 merchant.status = "failed"
                                 data["status"] = "failed"
                                 data["error_code"] = "MANDATE_INVALID"
-                            elif reservation is not None and (reservation.status != "active"
+                            elif reservation is not None and (reservation.user_id != record.user_id or reservation.status != "active"
                                                             or reservation.amount_minor < merchant.amount_minor):
                                 merchant.status = "failed"
                                 data["status"] = "failed"
@@ -1654,11 +1745,14 @@ class CapabilityService:
                                 if catalog is not None:
                                     catalog.stock -= 1
                                 mandate.used_count += 1
-                                if reservation is None:
-                                    account.available_minor -= merchant.amount_minor
-                                else:
+                                post_payment(order_session, operation_id, account,
+                                    f"merchant_settlement:{merchant.item}", merchant.amount_minor, today,
+                                    category="礼品", merchant="鲜花商户" if merchant.item == "flower" else "蛋糕商户",
+                                    direction="debit", held=merchant.amount_minor if reservation else 0)
+                                if reservation is not None:
                                     reservation.amount_minor -= merchant.amount_minor
-                                account.ledger_balance_minor -= merchant.amount_minor
+                                if payment_bucket is not None:
+                                    payment_bucket.completed_minor += merchant.amount_minor
                                 merchant.status = "delivered"
                                 order_session.add(Operation(
                                     id=operation_id, user_id=record.user_id,
@@ -1666,21 +1760,6 @@ class CapabilityService:
                                     plan_id=reservation.plan_id if reservation else order_id,
                                     node_id=record.id, status="succeeded", amount_minor=merchant.amount_minor,
                                     recipient_id=f"merchant:{merchant.item}",
-                                ))
-                                order_session.add_all([
-                                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                                account_id=account.id, amount_minor=-merchant.amount_minor,
-                                                direction="debit"),
-                                    LedgerEntry(id=f"le_{uuid.uuid4().hex}", operation_id=operation_id,
-                                                account_id=f"merchant_settlement:{merchant.item}",
-                                                amount_minor=merchant.amount_minor, direction="credit"),
-                                ])
-                                order_session.add(Transaction(
-                                    id=f"txn_{uuid.uuid4().hex}", user_id=record.user_id,
-                                    posted_at=self.clock.business_date(), amount_minor=merchant.amount_minor,
-                                    merchant="鲜花商户" if merchant.item == "flower" else "蛋糕商户",
-                                    category="礼品", direction="debit", memo=f"生日计划{merchant.item}订单",
-                                    account_id=account.id,
                                 ))
                                 data["status"] = "delivered"
                         else:
@@ -1767,7 +1846,7 @@ class CapabilityService:
         from agentbank.db import RiskProfile
         with self.database.sessions() as session:
             profile = session.get(RiskProfile, user_id)
-            return profile is not None and profile.expires_on >= business_date() and int(product_risk[1:]) <= int(profile.level[1:])
+            return profile is not None and profile.expires_on >= self.clock.business_date() and int(product_risk[1:]) <= int(profile.level[1:])
 
     @staticmethod
     def _product_data(product: Product) -> dict[str, Any]:

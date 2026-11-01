@@ -7,3 +7,4 @@
 .account-bar input[type=checkbox] { width: auto; }
 [hidden] { display: none !important; }
 .risk-questionnaire{display:grid;gap:14px;margin-top:14px}.risk-questionnaire label{display:grid;gap:6px}.risk-questionnaire select{width:100%;padding:10px;border:1px solid #475569;border-radius:7px;background:#0f172a;color:#f8fafc;font:inherit}.risk-questionnaire button:disabled,.card-actions button:disabled{opacity:.55;cursor:default}
+.messages{padding-bottom:128px}

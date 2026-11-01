@@ -131,7 +131,7 @@ def test_month_and_year_reports_cover_calendar_periods_and_missing_bases(databas
 
     assert [row["month"] for row in months] == ["2025-01", "2025-02"]
     assert months[0]["missing"] is True
-    assert months[0]["mom_change"] == -1.0
+    assert months[0]["mom_change"] is None
     assert months[0]["yoy_change"] is None
     assert months[1]["expense_minor"] == 150
     assert months[1]["mom_change"] is None
@@ -141,9 +141,10 @@ def test_month_and_year_reports_cover_calendar_periods_and_missing_bases(databas
     assert years[1]["expense_minor"] == 100
     assert years[1]["yoy_change"] is None
     assert years[2]["expense_minor"] == 150
-    assert years[2]["yoy_change"] == 0.5
+    assert years[2]["yoy_change"] is None
+    assert years[2]["missing_months"] == [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     assert years[3]["missing"] is True
-    assert years[3]["yoy_change"] == -1.0
+    assert years[3]["yoy_change"] is None
 
 
 def test_b04_uses_annual_aggregates_and_evidence_with_legacy_date_payload(database: Database) -> None:
@@ -164,7 +165,8 @@ def test_b04_uses_annual_aggregates_and_evidence_with_legacy_date_payload(databa
     assert annual["year"] == 2026
     assert annual["expense_minor"] == 300
     assert annual["transfer_minor"] == 900
-    assert annual["yoy_change"] == 2.0
+    assert annual["yoy_change"] is None
+    assert annual["complete"] is False
     assert set(annual["txn_ids"]) == {"current-jan", "current-dec", "transfer"}
 
 
@@ -202,3 +204,12 @@ def test_report_http_capabilities_return_exact_month_changes_and_yearly_totals(t
     assert len(data["months"]) == 12
     assert data["years"][0]["expense_minor"] == 300
     assert data["years"][0]["txn_ids"] == ["current"]
+
+
+def test_complete_years_keep_meaningful_yoy(database: Database) -> None:
+    for month in range(1, 13):
+        _add(database, f"base-{month}", f"2024-{month:02d}-01", 100)
+        _add(database, f"next-{month}", f"2025-{month:02d}-01", 150)
+    row = yearly_report(database, "u1", 2025, 2025)[0]
+    assert row["complete"] and row["missing_months"] == []
+    assert row["yoy_change"] == 0.5

@@ -40,6 +40,10 @@ class BusinessPlanService:
     def create_proposed_plan(self, user_id: str, intent: str, proposed_nodes: list[PlanNode]) -> Plan:
         if not proposed_nodes:
             raise DomainError("PLAN_TOO_LARGE")
+        if any(node.tool in {"T01", "T02", "T03"} for node in proposed_nodes):
+            # Transfers have their own dynamic risk, cooling and device receipt flow.
+            # Do not accept a parent receipt that cannot authorize the child transfer.
+            raise DomainError("PLAN_TRANSFER_REQUIRES_SINGLE_FLOW")
         raw_nodes = [node.model_dump(mode="json") for node in proposed_nodes]
         proposal_order = PlanValidator.validate_proposal(raw_nodes)
         plan_id = f"plan_{uuid.uuid4().hex}"
@@ -140,9 +144,8 @@ class BusinessPlanService:
                                                 require_resolved=require_resolved) for child in value]
         return value
 
-    @staticmethod
-    def _business_date() -> str:
-        return date.today().isoformat()
+    def _business_date(self) -> str:
+        return self.database.business_clock.business_date()
 
     @staticmethod
     def _assurance(capability_id: str, args: dict[str, Any]) -> str:
@@ -166,6 +169,9 @@ class BusinessPlanService:
             display.append({"label": labels.get(node.tool, node.tool), "value": node.id})
             for key, label in (("amount_minor", "金额"), ("total_minor", "总金额"),
                                ("limit_minor", "额度"), ("recipient_name", "收款人"),
+                               ("recipient_id", "收款人编号"), ("phone", "收款手机号"),
+                               ("alias", "收款人备注"), ("order_id", "订单编号"),
+                               ("participant_ids", "参与者"), ("bill_id", "账单编号"),
                                ("event_id", "事件"), ("event_date", "日期"),
                                ("delivery_date", "送达日期"), ("dispatch_on", "配送日期"),
                                ("product_id", "理财产品"), ("subscription_id", "订阅"),
@@ -417,11 +423,20 @@ class BusinessPlanService:
         return recovered
 
     def revise_birthday_plan(self, user_id: str, plan_id: str, changes: dict[str, Any]) -> Plan:
+        with self.database.atomic():
+            return self._revise_birthday_plan(user_id, plan_id, changes)
+
+    def _revise_birthday_plan(self, user_id: str, plan_id: str, changes: dict[str, Any]) -> Plan:
         with self.database.sessions() as session:
             current = session.get(PlanRecord, plan_id)
             if current is None or current.user_id != user_id:
                 raise DomainError("NOT_OWNER")
-            if current.status in {"succeeded", "cancelled"}:
+            if current.status not in {"draft", "prepared", "awaiting_confirmation", "paused", "waiting_trigger"}:
+                raise DomainError("PLAN_NOT_EDITABLE")
+            if session.scalar(select(MerchantOrder.id).join(
+                    Reservation, MerchantOrder.reservation_id == Reservation.id).where(
+                    Reservation.plan_id == plan_id, MerchantOrder.status == "delivered")):
+
                 raise DomainError("PLAN_NOT_EDITABLE")
             event_node = session.scalar(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id,
                                                                        PlanNodeRecord.tool == "events.lookup"))
@@ -440,6 +455,7 @@ class BusinessPlanService:
             event_date = date.fromisoformat(event_date).isoformat()
         except ValueError as error:
             raise DomainError("EVENT_DATE_INVALID") from error
+        self.cancel(user_id, plan_id)
         with self.database.sessions.begin() as session:
             current = session.get(PlanRecord, plan_id)
             if current is None:
@@ -593,6 +609,13 @@ class BusinessPlanService:
             data = json.loads(record.args_json)
             logical_id = data["id"]
             if logical_id in consumed:
+                with self.database.sessions() as session:
+                    persisted = session.scalar(select(CapabilityRecord).where(
+                        CapabilityRecord.user_id == user_id,
+                        CapabilityRecord.idempotency_key == record.idempotency_key))
+                    if persisted is not None:
+                        results.append({"node_id": logical_id, "status": persisted.status,
+                                        "data": json.loads(persisted.data_json)})
                 continue
             if any(dependency not in consumed and dependency not in {item["node_id"] for item in results}
                    for dependency in data.get("depends_on", [])):
@@ -623,10 +646,10 @@ class BusinessPlanService:
                 results.append({"node_id": logical_id, "status": status, "data": result_data})
                 continue
             try:
-                if data["id"] == "event":
+                if not generic and data["id"] == "event":
                     status = "succeeded"
                     result_data = {"event_id": data["args"]["event_id"]}
-                elif data["id"] in {"quote_flower", "quote_cake"}:
+                elif not generic and data["id"] in {"quote_flower", "quote_cake"}:
                     quote = capabilities.get_merchant_quote(user_id, str(data["args"]["quote_id"]))
                     if (quote["status"] != "active" or quote["item"] != data["args"]["item"]
                             or quote["delivery_date"] != data["args"]["delivery_date"]

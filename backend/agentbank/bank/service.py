@@ -24,7 +24,6 @@ from agentbank.db import (
     Challenge,
     DailyRiskBucket,
     DecisionRecord,
-    LedgerEntry,
     Operation,
     Payee,
     PlanNodeRecord,
@@ -37,6 +36,7 @@ from agentbank.db import (
 )
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
+from agentbank.bank.ledger import post_payment, recent_transfers, require_payment
 
 
 def _display_hash(display: list[dict[str, str]]) -> str:
@@ -89,6 +89,7 @@ class TransferResult:
 class TransferService:
     def __init__(self, database: Database) -> None:
         self.database = database
+        self.business_clock = database.business_clock
         self.audit = PersistentAudit(database)
         self.devices = DeviceService(database)
         self.fraud = FraudDetector()
@@ -129,7 +130,7 @@ class TransferService:
             account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
             if account is None:
                 raise DomainError("NOT_OWNER")
-            bucket = session.get(DailyRiskBucket, (user_id, business_date()))
+            bucket = session.get(DailyRiskBucket, (user_id, self.database.business_clock.business_date()))
             completed = bucket.completed_minor if bucket else 0
             pending = bucket.pending_minor if bucket else 0
             operation_id = f"op_{uuid.uuid4().hex}"
@@ -138,7 +139,8 @@ class TransferService:
                     "recipient_account_id": payee.account_id, "amount_minor": amount_minor,
                     "currency": "CNY", "memo": memo}
             decision = decide("transfer.create", PolicyContext(projected_today_minor=completed + pending + amount_minor,
-                                                                new_recipient=payee.is_new), operation_id=operation_id)
+                                                                new_recipient=payee.is_new,
+                                                                recent_transfer_count=recent_transfers(session, user_id, payee.id)), operation_id=operation_id)
             if decision.executability != "allow":
                 raise DomainError(decision.reason_codes[0])
             plan_id = f"plan_{uuid.uuid4().hex}"
@@ -242,9 +244,9 @@ class TransferService:
             cooling = session.get(CoolingPeriod, view.id)
             assert cooling is not None
             cooling.held = True
-            cooling.business_day = business_date()
+            cooling.business_day = self.database.business_clock.business_date()
             account.available_minor -= amount
-            self._bucket(session, user_id).pending_minor += amount
+            self._bucket(session, user_id, self.database.business_clock.business_date()).pending_minor += amount
             plan.status = "paused"
             node.status = "cooling"
             self.audit.append(session, f"trace_{plan.id}", user_id, "security.cooling.started",
@@ -265,9 +267,10 @@ class TransferService:
             args = self._validate(session, user_id, plan, receipt, node)
             result = self._risk_gate(session, user_id, plan, receipt, node, args)
             if result is None:
-                bucket = self._bucket(session, user_id)
+                bucket = self._bucket(session, user_id, self.database.business_clock.business_date())
                 payee = session.get(Payee, str(args["recipient_id"]))
-                needs_mfa = receipt.assurance == "mfa" or (payee is not None and payee.is_new) or (
+                needs_mfa = receipt.assurance == "mfa" or (payee is not None and (
+                    payee.is_new or recent_transfers(session, user_id, payee.id) >= 2)) or (
                     bucket.completed_minor + bucket.pending_minor + int(str(args["amount_minor"])) > 100_000)
                 if needs_mfa:
                     receipt.assurance = "mfa"
@@ -403,28 +406,16 @@ class TransferService:
                 raise DomainError("NOT_OWNER")
             if recipient.is_new:
                 raise DomainError("RECIPIENT_RISK_UPGRADE")
-            current_date = scheduled_business_date or business_date()
-            bucket = session.get(DailyRiskBucket, (user_id, current_date))
-            if bucket is None:
-                bucket = DailyRiskBucket(user_id=user_id, business_date=current_date,
-                                         completed_minor=0, pending_minor=0)
-                session.add(bucket)
-            if account.status != "active" or account.available_minor < amount_minor:
-                raise DomainError("INSUFFICIENT_FUNDS")
-            projected = bucket.completed_minor + bucket.pending_minor + amount_minor
-            if projected > 100_000:
-                raise DomainError("DAILY_TOTAL_OVER_1000")
+            current_date = scheduled_business_date or self.database.business_clock.business_date()
+            bucket = require_payment(self.database, session, user_id, account, amount_minor,
+                                     current_date, recipient_id=recipient_id)
             operation_id = f"op_{uuid.uuid4().hex}"
-            account.available_minor -= amount_minor
             bucket.completed_minor += amount_minor
             session.add(Operation(id=operation_id, user_id=user_id, idempotency_key=idempotency_key,
                                   plan_id=plan_id, node_id=node_id, status="succeeded", amount_minor=amount_minor,
                                   recipient_id=recipient_id))
-            debit_id, credit_id = f"le_{uuid.uuid4().hex}", f"le_{uuid.uuid4().hex}"
-            session.add_all([LedgerEntry(id=debit_id, operation_id=operation_id, account_id=account.id,
-                                         amount_minor=-amount_minor, direction="debit"),
-                             LedgerEntry(id=credit_id, operation_id=operation_id, account_id=recipient.account_id,
-                                         amount_minor=amount_minor, direction="credit")])
+            debit_id, credit_id = post_payment(session, operation_id, account, recipient.account_id,
+                                               amount_minor, current_date, category='转账', merchant=recipient.masked_name)
             self.audit.append(session, f"trace_{plan_id}", user_id, "bank.scheduled.committed",
                               {"operation_id": operation_id, "ledger_entry_ids": [debit_id, credit_id]})
             return TransferResult(operation_id, "succeeded", amount_minor, [debit_id, credit_id])
@@ -448,24 +439,20 @@ class TransferService:
         recipient = session.get(Payee, str(args["recipient_id"]))
         if recipient is None:
             raise DomainError("RECIPIENT_NOT_FOUND")
-        bucket = self._bucket(session, user_id)
+        bucket = self._bucket(session, user_id, self.database.business_clock.business_date())
         projected = bucket.completed_minor + bucket.pending_minor + amount
         if projected > 100_000 and receipt.assurance != Assurance.mfa.value:
             raise DomainError("DAILY_TOTAL_OVER_1000")
+        if recent_transfers(session, user_id, recipient.id) >= 2 and receipt.assurance != Assurance.mfa.value:
+            raise DomainError('MFA_REQUIRED')
         operation_id = f"op_{uuid.uuid4().hex}"
         operation = Operation(id=operation_id, user_id=user_id, idempotency_key=node.idempotency_key,
                               plan_id=plan.id, node_id=node.id, status="succeeded", amount_minor=amount,
                               recipient_id=str(args["recipient_id"]))
-        account.available_minor -= amount
-        account.ledger_balance_minor -= amount
         bucket.completed_minor += amount
         session.add(operation)
-        debit_id = f"le_{uuid.uuid4().hex}"
-        credit_id = f"le_{uuid.uuid4().hex}"
-        session.add_all([LedgerEntry(id=debit_id, operation_id=operation_id, account_id=account.id,
-                                     amount_minor=-amount, direction="debit"),
-                         LedgerEntry(id=credit_id, operation_id=operation_id, account_id=recipient.account_id,
-                                     amount_minor=amount, direction="credit")])
+        debit_id, credit_id = post_payment(session, operation_id, account, recipient.account_id,
+                                           amount, self.database.business_clock.business_date(), category='转账', merchant=recipient.masked_name)
         node.status = "succeeded"
         plan.status = "succeeded"
         receipt.status = "consumed"
@@ -478,8 +465,8 @@ class TransferService:
         return TransferResult(operation_id, "succeeded", amount, [debit_id, credit_id])
 
     @staticmethod
-    def _bucket(session: Session, user_id: str) -> DailyRiskBucket:
-        current_date = business_date()
+    def _bucket(session: Session, user_id: str, day: str | None = None) -> DailyRiskBucket:
+        current_date = day or business_date()
         bucket = session.get(DailyRiskBucket, (user_id, current_date))
         if bucket is None:
             bucket = DailyRiskBucket(user_id=user_id, business_date=current_date)

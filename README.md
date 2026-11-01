@@ -15,13 +15,16 @@
 | [docs/architecture.md](docs/architecture.md) | 当前系统边界、Agent、执行内核、DAG 和渠道 |
 | [docs/algorithms.md](docs/algorithms.md) | 已实现算法和验证口径 |
 | [docs/security-self-eval.md](docs/security-self-eval.md) | 已验证安全行为、已知边界和禁止的过度结论 |
+| [docs/LOCAL-REVIEW-GUIDE.md](docs/LOCAL-REVIEW-GUIDE.md) | 评委本地复现与演示顺序 |
 | [docs/M4-LOCAL-CANDIDATE.md](docs/M4-LOCAL-CANDIDATE.md)、[docs/LOCAL-RELEASE.md](docs/LOCAL-RELEASE.md) | 本地候选范围、锁定安装、验收和打包 |
 | [docs/submission-checklist.md](docs/submission-checklist.md) | M4 提交门禁清单（当前未冻结） |
 | [docs/M3-COVERAGE.md](docs/M3-COVERAGE.md) | M3 安全闭环逐项证据 |
 | [docs/plan-claude.md](docs/plan-claude.md)、[docs/plan-codex.md](docs/plan-codex.md) | 两份独立写成的初稿 |
 | [docs/debate/](docs/debate/) | 对抗评审记录：第 1 轮互评，第 2 轮反驳，第 3 轮终审，第 4 轮复核 |
 
-AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、真实环境红队与M4发布材料分别验收；当前优先收口可复现的本地候选，不要求立即公网发布。逐项证据见 docs/M2-M3-STATUS.md。M3 本地安全门禁已通过，验证与原始报告见 [M3 本地验收证据](docs/M3-LOCAL-EVIDENCE.md)。
+AgentBank 的 M2 本地模拟业务闭环已实现：33项能力、planner/explorer/reply/fraud角色、有限只读组合计划、原子授权、报价型生日DAG、PWA直达表单、持久Web IM防重放和可执行CAP追溯。无provider时，模型不能为转账背书，系统保留确定性查询/表单路径。真实银行、模型/商户/推送/飞书租户、真实环境红队与M4发布材料分别验收；当前优先收口可复现的本地候选，不要求立即公网发布。逐项证据见 docs/M2-M3-STATUS.md。历史 M3 本地安全门禁曾通过，当前候选请以最新 `.tmp/releases/*/manifest.json` 为准。
+
+代码仓库：[github.com/Weichenleeeee123/AgentBank](https://github.com/Weichenleeeee123/AgentBank)（提交前确认评委可访问）。
 
 ## 本地运行
 

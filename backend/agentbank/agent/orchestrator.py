@@ -645,6 +645,9 @@ class AgentOrchestrator:
                 user_id, str(planned.get("intent", "business plan")), nodes)
         except (DomainError, ValueError, TypeError) as error:
             code = error.code if isinstance(error, DomainError) else "PLAN_INVALID"
+            if code == "PLAN_TRANSFER_REQUIRES_SINGLE_FLOW":
+                return AgentResponse(kind="clarification", intent=str(planned.get("intent", "transfer")),
+                    message="转账需要单独核对收款人并完成安全验证，请单独发送转账指令（例如：给房东转账100元）。其他步骤可另行组成计划。")
             return AgentResponse(kind="error", intent=str(planned.get("intent", "unknown")), message=code)
         with self.database.sessions() as session:
             from agentbank.db import PlanRecord, ReceiptRecord

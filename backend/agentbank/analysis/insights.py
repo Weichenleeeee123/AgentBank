@@ -51,8 +51,8 @@ def monthly_report(database: Database, user_id: str, start_month: str, end_month
         current_total = row["expense_minor"]
         previous_total = previous["expense_minor"] if previous else None
         yoy_total = previous_year["expense_minor"] if previous_year else None
-        row["mom_change"] = None if previous_total in (None, 0) else round((current_total - previous_total) / previous_total, 4)
-        row["yoy_change"] = None if yoy_total in (None, 0) else round((current_total - yoy_total) / yoy_total, 4)
+        row["mom_change"] = None if row['missing'] or previous_total in (None, 0) else round((current_total - previous_total) / previous_total, 4)
+        row["yoy_change"] = None if row['missing'] or yoy_total in (None, 0) else round((current_total - yoy_total) / yoy_total, 4)
     return rows
 
 
@@ -60,18 +60,23 @@ def yearly_report(database: Database, user_id: str, start_year: int, end_year: i
     if start_year > end_year or end_year - start_year >= 20:
         raise ValueError("INVALID_YEAR_RANGE")
     buckets: dict[int, dict[str, Any]] = defaultdict(_empty_report_bucket)
+    months: dict[int, set[int]] = defaultdict(set)
     for transaction in _transactions(database, user_id):
-        year = int(_business_month(transaction.posted_at)[:4])
+        month = _business_month(transaction.posted_at)
+        year = int(month[:4])
+        months[year].add(int(month[5:]))
         _add_report_transaction(buckets[year], transaction)
     rows: list[dict[str, Any]] = []
     for year in range(start_year, end_year + 1):
         bucket = buckets.get(year, _empty_report_bucket())
-        rows.append({"year": year, **bucket, "missing": year not in buckets})
+        rows.append({"year": year, **bucket, "missing": year not in buckets,
+                     "missing_months": sorted(set(range(1, 13)) - months[year]),
+                     "complete": len(months[year]) == 12})
     for row in rows:
         previous = buckets.get(int(row["year"]) - 1)
         previous_total = previous["expense_minor"] if previous else None
         current_total = row["expense_minor"]
-        row["yoy_change"] = (None if previous_total in (None, 0) else
+        row["yoy_change"] = (None if not row['complete'] or len(months[int(row['year']) - 1]) != 12 or previous_total in (None, 0) else
                               round((current_total - previous_total) / previous_total, 4))
     return rows
 

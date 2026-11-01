@@ -84,6 +84,22 @@ def test_aa_cumulative_upgrade_at_commit(tmp_path):
         confirm(s, 'user_002', old)
 
 
+@pytest.mark.parametrize('action', ['preview', 'status'])
+def test_locked_user_can_read_aa_state(tmp_path, action):
+    s = service(tmp_path, device=False)
+    bill_id = bill(s, 10000) if action == 'status' else None
+    from agentbank.security.breaker import CircuitBreaker
+    for _ in range(3):
+        CircuitBreaker(s.database).record_block('user_001', 'injection')
+    payload = {'action': action}
+    if action == 'preview':
+        payload.update(total_minor=10000, participant_ids=['user_001', 'user_002'])
+    else:
+        payload['bill_id'] = bill_id
+    result = s.execute('user_001', 'T05', payload, 'locked-aa-' + action)
+    assert result.status == 'succeeded'
+
+
 def test_aa_high_value_completes_only_after_actual_device_otp(tmp_path):
     from agentbank.auth.devices import DeviceService
     s = service(tmp_path)

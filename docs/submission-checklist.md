@@ -10,6 +10,7 @@
 - [x] 10 页 PPT 和讲稿（讲稿预算 8 分 35 秒，队伍仍需实际排练）
 - [x] 200 字以内作品简介
 - [x] README 锁定依赖安装和独立本地运行环境复现
+- [x] README 提供 GitHub 仓库入口：[github.com/Weichenleeeee123/AgentBank](https://github.com/Weichenleeeee123/AgentBank)
 - [ ] 正式提交：核对仓库地址、访问权限、队伍信息、平台实际截止时刻，归档提交回执
 
 演示视频可选，本轮未录制；如制作需不超过 5 分钟。用户要求先本地，公网部署暂缓。

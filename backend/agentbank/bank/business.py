@@ -14,6 +14,7 @@ from agentbank.db import Account, Card, Database, Event, Mandate, Payee, Product
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.db import RiskAssessment
 from agentbank.bank.questionnaire import VERSION
+from agentbank.bank.ledger import require_active
 
 
 @dataclass(frozen=True)
@@ -206,7 +207,8 @@ class BirthdayPlanner:
             raise DomainError("INVALID_AMOUNT")
         with self.database.sessions.begin() as session:
             account = session.scalar(select(Account).where(Account.user_id == user_id).order_by(Account.id))
-            if account is None or account.available_minor < amount_minor:
+            account = require_active(account, user_id)
+            if account.available_minor < amount_minor:
                 raise DomainError("INSUFFICIENT_FUNDS")
             account.available_minor -= amount_minor
             reservation = Reservation(id=f"rsv_{uuid.uuid4().hex}", user_id=user_id, account_id=account.id,

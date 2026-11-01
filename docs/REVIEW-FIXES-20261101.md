@@ -20,7 +20,7 @@
 
 真实主模型六场景：语义改金额、否定取消、切换取消订阅、显式另建转账、风险问卷、生日确认/暂停/取消均通过。[脱敏摘要](evidence/review-fixes-20261101/live-summary.json)；本机原始结果保留在 .tmp/review-fixes-20261101/live-regressions.json。这是小样本网络联调，不等于所有能力的线上成功率。
 
-Playwright 实际页面已验证：20元改30元后旧按钮禁用；十题均选3分、核对确认后返回C3/30分/2027-11-01；生日确认后显示等待到期执行，页面暂停、取消成功且取消后继续按钮禁用。截图保留在 output/playwright/review-fix-*.png。浏览器仅观察到 favicon 404，无业务页面脚本错误。
+Playwright 实际页面已验证：20元改30元后旧按钮禁用；十题均选3分、核对确认后返回C3/30分/2027-11-01；生日确认后显示等待到期执行，页面暂停、取消成功且取消后继续按钮禁用。截图保留在 output/playwright/review-fix-*.png。2026-11-01 复查补充 375×812 移动视口，十题问卷末题与提交按钮滚动到底部后不被 sticky 输入框遮挡；App 主入口补充 PWA favicon，页面无业务脚本错误。
 
 ## 统一验收与复现
 
@@ -29,6 +29,16 @@ Playwright 实际页面已验证：20元改30元后旧按钮禁用；十题均�
 通过证据写入唯一 `.tmp/releases/<UTC时间-随机值>/`：manifest.json（逐文件 SHA-256、总摘要和门禁）、gates.json、各门禁原始日志、eval-cases.json、http-self-test.json、agentbank-m4-source.zip。只有全部检查通过且检查期间源码未变化才生成通过 manifest 与源码 ZIP；本说明不预填尚未完成的最终测试数字。
 
 本轮先行固定评测为227/227，HTTP自测4/4、样例内未授权分录0、审计通过；最终以新 manifest 同目录结果为准。固定样例只证明样例范围，27 FP通过不是生产误拦率。未取得真实线上总体任务成功率、四类误拦率或端到端P95，不用目标数字填充。
+
+## 全项目跨路径闭环（2026-11-01）
+
+针对重复审查后仍漏出的交叉路径问题，新增长期回归：`test_financial_integrity_closure.py`、`test_plan_integrity_closure.py`、`test_pin_integrity_closure.py`。共同记账模块现把付款、赎回、流水和本地对手方入账放在同一原子事务；延期转账、商户派发、订阅续费在执行当天检查账户状态、用户锁、风险和日累计。实时转账、AA 与延期转账采用同一个可推进业务日。投资申购和赎回按订单关联独立 lot；旧版无法唯一归属的订单进入待人工对账并单独跳过。缺失月份/不完整年度不生成误导性百分比。
+
+生日计划修改原子取消旧计划并释放预留、撤销未执行授权；暂停恢复会恢复已消费 DAG 节点的持久化输出。任意通用节点名不再触发模板分支，通用转账 DAG 提前拒绝并要求使用带有专属收款人核对及安全验证的单笔流程。PIN 在 MFA 前只暂存带盐哈希，MFA 成功后才写入卡状态，明文不存业务记录；此实现仍是本地模拟，不是银行密码处理系统。
+
+全量结果、Ruff/Mypy、真实 provider 冒烟、浏览器页面与资金查询证据以本轮新产物为准；不沿用前一轮的发布结论。
+
+本轮追加 P2 回归：生日计划资金预留在确认事务内复核资金账户状态；准备后账户被冻结时返回 `ACCOUNT_NOT_ACTIVE`，不扣可用余额、不创建 active reservation。长期回归见 `test_financial_integrity_closure.py::test_frozen_account_cannot_reserve_birthday_funds_after_confirmation`。
 
 ## 材料同步与范围
 

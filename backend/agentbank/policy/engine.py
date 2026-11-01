@@ -17,6 +17,7 @@ class PolicyContext:
     channel: str = "app"
     owner_ok: bool = True
     locked: bool = False
+    recent_transfer_count: int = 0
     facts: dict[str, Any] = field(default_factory=dict)
 
 
@@ -42,6 +43,9 @@ def decide(operation: str, context: PolicyContext, *, operation_id: str = "op_pe
         if context.new_recipient:
             tier, assurance = "R", Assurance.mfa
             reasons.append("U05")
+        if context.recent_transfer_count >= 2:
+            tier, assurance = "R", Assurance.mfa
+            reasons.append("U04")
         executability = "allow"
     else:
         tier, assurance, executability, reasons = "D", Assurance.none, "deny", ["U21"]
