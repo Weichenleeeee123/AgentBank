@@ -3,16 +3,18 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#0f172a" />
+  <meta name="theme-color" content="#2563d9" />
   <link rel="icon" type="image/png" href="/app/icon-192.png" />
   <link rel="manifest" href="/app/manifest.json" />
   <link rel="stylesheet" href="/app/styles.css" />
   <title>AgentBank</title>
 </head>
-<body>
+<body class="app-page">
   <main class="shell">
     <header><div><span class="eyebrow">AGENTBANK</span><h1>你的银行智能体</h1></div><div class="header-actions"><a class="ghost-link" href="/app/webim.html">模拟 IM</a><a class="ghost-link" href="/app/plan.html">计划</a><button id="balanceBtn" class="ghost">查余额</button><button id="pinButton" class="ghost">修改 PIN</button></div></header>
     <section class="account-bar" aria-label="演示账户"><label for="userSelect">演示账户</label><select id="userSelect"><option value="user_001">user_001 · 主账户</option><option value="user_002">user_002 · 备用账户</option></select><button id="switchUser" class="ghost">切换</button></section>
+    <div class="app-layout">
+    <aside id="services" class="operations-column" aria-label="业务操作">
     <section class="direct-forms" aria-label="银行服务表单">
       <fieldset id="queryMode" class="segmented">
         <legend>查询</legend>
@@ -49,9 +51,14 @@
     <p id="offlineNotice" class="form-error" role="status" hidden>当前离线。仅显示静态页面，银行数据不缓存，所有操作需联网。</p>
     <section id="status" class="status">连接模拟银行中…</section>
     <section class="inbox"><div class="section-heading"><h2>通知</h2><button id="refreshNotifications" class="ghost" aria-label="刷新通知">刷新</button></div><div id="notificationList" class="notification-list" aria-live="polite"></div></section>
+    </aside>
+    <section class="conversation-column" aria-label="银行智能体对话">
+    <div class="conversation-heading"><div><span class="eyebrow">BANKING ASSISTANT</span><h2>对话办理</h2></div><a class="mobile-services" href="#services">快捷办理</a><span class="session-mark">本地模拟</span></div>
     <section id="messages" class="messages" aria-live="polite"></section>
-    <form id="composer" class="composer"><input id="message" autocomplete="off" placeholder="例如：给房东转 20 元，备注房租" /><button>发送</button></form>
+    <form id="composer" class="composer"><input id="message" aria-label="发送给银行智能体的消息" autocomplete="off" placeholder="例如：给房东转 20 元，备注房租" /><button>发送</button></form>
     <section class="quick"><button data-text="帮我查一下余额">余额</button><button data-text="帮我查一下订阅">订阅</button><button data-text="推荐理财产品">理财</button><button data-text="先把我的卡冻结">保护卡片</button></section>
+    </section>
+    </div>
   </main>
   <dialog id="otpDialog" class="otp-dialog" aria-labelledby="otpTitle">
     <form id="otpForm" method="dialog">

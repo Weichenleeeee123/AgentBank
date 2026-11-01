@@ -3,8 +3,8 @@
   "short_name": "AgentBank",
   "start_url": "/app/",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#0f172a",
+  "background_color": "#f4f7fb",
+  "theme_color": "#2563d9",
   "icons": [
     {
       "src": "/app/icon-192.png",
