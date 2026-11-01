@@ -33,7 +33,7 @@
 
 已新增 App/IM 多轮交互、设备强验证、计划深链、群聊隐私和断网静态壳的真实浏览器验收记录：[m4-browser-20261031.md](evidence/m4-browser-20261031.md)。余额查询使用新消息读取新状态，网络重试沿用旧消息结果；同会话处理中的新消息明确拒绝交错；签名 IM 与浏览器投递分别持久防重放。转账绑定收款账户快照和完整确认展示，PIN 确认/MFA 提交再次核对归属和展示哈希。坐席草稿、重试申请与指标已走真实 HTTP 路由验证。
 
-提交材料包括 [简介](submission-intro.md)、[架构](architecture.md)、[算法](algorithms.md)、[安全自评](security-self-eval.md)、[本地评审说明](LOCAL-REVIEW-GUIDE.md) 和正式答辩 PPT。历史 10 页 PPT 与后续评审版均保留；正式提交只使用最终发布索引中指定的唯一版本，讲稿仍需队伍按实际语速排练。视频为可选，本轮未录制。
+提交材料包括 [简介](submission-intro.md)、[架构](architecture.md)、[算法](algorithms.md)、[安全自评](security-self-eval.md)、[本地评审说明](LOCAL-REVIEW-GUIDE.md) 和 [正式答辩 PPT](submission/行止（ActSure）-答辩提交版-v3.pptx)。历史 PPT 均保留，正式提交只使用此唯一版本。视频为可选，本轮未录制。
 
 ## 单独验收的外部条件
 

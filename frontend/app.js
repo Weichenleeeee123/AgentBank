@@ -4,7 +4,7 @@ const authorizationControls = new Map();
 const $ = id => document.getElementById(id);
 const secretKey = /pin|otp|password|secret|token|验证码|密码/i;
 const internalFields = new Set(['plan_id','capability_id','ledger_entry_ids','query_hash','operation_template',
-  'mandate_id','receipt_id','display_hash','action_hash','idempotency_key','trace_id']);
+  'mandate_id','receipt_id','display_hash','action_hash','idempotency_key','trace_id','pre_action_review']);
 
 function node(tag, text = "", className = "") {
   const element = document.createElement(tag);
@@ -24,7 +24,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
   }
   const bubble = node("article", "", `bubble ${kind}`);
   const title = kind === "user" ? "你" : ["confirmation", "plan_confirmation"].includes(kind) ? "待确认" :
-    kind === "mfa" ? "需要强验证" : kind === "error" ? "处理失败" : "AgentBank";
+    kind === "mfa" ? "需要强验证" : kind === "error" ? "处理失败" : kind === "review" ? "行动前审查" : "AgentBank";
   bubble.append(node("h3", title), node("p", text || ""));
 
   const seen = new Set();
@@ -46,6 +46,50 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     row.append(node("span", label || "事实"), node("strong", rendered));
     bubble.append(row);
   };
+  if (data?.pre_action_review) {
+    const review = data.pre_action_review;
+    const panel = node("section", "", `pre-action-review ${review.decision === "block" ? "blocked" : "cleared"}`);
+    panel.append(node("h4", "行动前审查"));
+    const subject = node("p", "", "review-subject");
+    subject.append(node("strong", review.subject?.name || review.subject?.query || "未确认主体"));
+    subject.append(node("span", review.decision === "pass" ? "可继续授权" : "暂不办理"));
+    panel.append(subject);
+    if (review.registration) {
+      const registration = node("div", "", "review-line");
+      registration.append(node("strong", "登记信息"), node("span", review.registration.detail || "未覆盖"));
+      panel.append(registration);
+    }
+    const qualification = node("div", "", "review-line");
+    qualification.append(node("strong", "资质核验"), node("span", review.qualification?.detail || "未覆盖"));
+    panel.append(qualification);
+    const signals = node("div", "", "review-signals");
+    for (const signal of review.signals || []) {
+      const item = node("div", "", "review-signal");
+      item.append(node("strong", signal.label), node("span", signal.value));
+      signals.append(item);
+    }
+    panel.append(signals);
+    const addList = (title, items, className) => {
+      if (!items?.length) return;
+      const group = node("div", "", `review-list ${className}`);
+      group.append(node("strong", title));
+      const list = node("ul");
+      for (const value of items) list.append(node("li", value));
+      group.append(list);
+      panel.append(group);
+    };
+    addList("待核实信息", review.gaps, "review-gaps");
+    addList("建议确认", review.questions, "review-questions");
+    addList("本地样本来源", review.evidence_sources, "review-sources");
+    if (review.product) {
+      const product = node("div", "", "review-product");
+      product.append(node("strong", review.product.name || "产品信息"));
+      product.append(node("span", `${review.product.issuer || "发行主体未确认"} · 风险 ${review.product.risk_level || "未知"} · 期限 ${review.product.term_days ?? "未知"} 天 · 赎回 ${review.product.redemption_days ?? "未知"} 天`));
+      panel.append(product);
+    }
+    panel.append(node("p", review.notice || "", "review-notice"));
+    bubble.append(panel);
+  }
   for (const fact of fragments || []) {
     appendFact(fact.label || "事实", fact.status ?? fact.text ?? fact.value_minor, fact.currency, fact.status == null && fact.text == null && fact.value_minor != null);
   }
@@ -304,7 +348,7 @@ async function verify(recordId) {
 
 function showDirectResult(response, label) {
   const status = response.status;
-  const data = {...(response.data || {}), capability_id: response.capability_id || response.data?.capability_id,
+  const data = {...(response.data || {}), ...(response.pre_action_review ? {pre_action_review: response.pre_action_review} : {}), capability_id: response.capability_id || response.data?.capability_id,
     direct_form: true};
   const isTransfer = ["T01", "T02", "T03"].includes(data.capability_id);
   const succeeded = status === "succeeded" && (!isTransfer || data.transfer_result);

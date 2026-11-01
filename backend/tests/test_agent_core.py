@@ -120,6 +120,15 @@ def test_agent_continues_missing_slots_and_risk_questionnaire(tmp_path: Path) ->
     assert confirmed.data["level"] == "C1"
 
 
+def test_product_recommendation_prompts_for_missing_risk_profile(tmp_path: Path) -> None:
+    response = _agent(tmp_path).handle("user_001", "conv-recommendation", "推荐理财产品")
+
+    assert response.kind == "clarification"
+    assert response.capability_id == "W01"
+    assert "风险测评" in response.message
+    assert len(response.data["questionnaire"]["questions"]) == 10
+
+
 def test_agent_routes_subscription_and_card_commands(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     subscriptions = agent.handle("user_001", "conv-sub", "帮我查一下订阅")

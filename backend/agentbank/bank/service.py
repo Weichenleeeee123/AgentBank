@@ -37,6 +37,7 @@ from agentbank.db import (
 from agentbank.errors import AmbiguousRecipient, DomainError
 from agentbank.policy.engine import PolicyContext, action_hash, decide
 from agentbank.bank.ledger import post_payment, recent_transfers, require_payment
+from agentbank.review.pre_action import PreActionReviewService, looks_like_organization
 
 
 def _display_hash(display: list[dict[str, str]]) -> str:
@@ -75,6 +76,7 @@ class PreparedTransfer:
     tier_display: str
     assurance: Assurance
     display: list[dict[str, str]]
+    pre_action_review: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class TransferService:
         self.audit = PersistentAudit(database)
         self.devices = DeviceService(database)
         self.fraud = FraudDetector()
+        self.pre_action_review = PreActionReviewService()
 
     def balance(self, user_id: str) -> Account:
         with self.database.sessions.begin() as session:
@@ -107,6 +110,16 @@ class TransferService:
     def prepare(self, user_id: str, recipient_name: str, amount_minor: int, memo: str | None = None) -> PreparedTransfer:
         if amount_minor <= 0:
             raise DomainError("INVALID_AMOUNT")
+        with self.database.sessions() as session:
+            payees = session.scalars(select(Payee).where(Payee.owner_user_id == user_id,
+                                                         Payee.display_name == recipient_name)).all()
+            if not payees:
+                raise DomainError("RECIPIENT_NOT_FOUND")
+            if len(payees) > 1:
+                raise AmbiguousRecipient()
+            review = self._review_payee(user_id, payees[0])
+        if review is not None and review["decision"] != "pass":
+            raise DomainError("ACTION_REVIEW_BLOCKED")
         with self.database.sessions.begin() as session:
             payees = session.scalars(select(Payee).where(Payee.owner_user_id == user_id,
                                                          Payee.display_name == recipient_name)).all()
@@ -119,11 +132,29 @@ class TransferService:
     def prepare_for_payee(self, user_id: str, payee_id: str, amount_minor: int, memo: str | None = None) -> PreparedTransfer:
         if amount_minor <= 0:
             raise DomainError("INVALID_AMOUNT")
+        with self.database.sessions() as session:
+            payee = session.get(Payee, payee_id)
+            if payee is None or payee.owner_user_id != user_id:
+                raise DomainError("NOT_OWNER")
+            review = self._review_payee(user_id, payee)
+        if review is not None and review["decision"] != "pass":
+            raise DomainError("ACTION_REVIEW_BLOCKED")
         with self.database.sessions.begin() as session:
             payee = session.get(Payee, payee_id)
             if payee is None or payee.owner_user_id != user_id:
                 raise DomainError("NOT_OWNER")
             return self._prepare_selected(session, user_id, payee, amount_minor, memo)
+
+    def _review_payee(self, user_id: str, payee: Payee) -> dict[str, object] | None:
+        if not looks_like_organization(payee.display_name):
+            return None
+        review = self.pre_action_review.review(payee.display_name, action="transfer")
+        if review["decision"] != "pass":
+            with self.database.sessions.begin() as session:
+                self.audit.append(session, f"trace_review_{uuid.uuid4().hex}", user_id,
+                                  "pre_action_review.blocked", {"action": "transfer",
+                                  "subject": review["subject"], "source_mode": review["source_mode"]})
+        return review
 
     def _prepare_selected(self, session: Session, user_id: str, payee: Payee, amount_minor: int,
                           memo: str | None) -> PreparedTransfer:
@@ -133,6 +164,10 @@ class TransferService:
             bucket = session.get(DailyRiskBucket, (user_id, self.database.business_clock.business_date()))
             completed = bucket.completed_minor if bucket else 0
             pending = bucket.pending_minor if bucket else 0
+            review = (self.pre_action_review.review(payee.display_name, action="transfer")
+                      if looks_like_organization(payee.display_name) else None)
+            if review is not None and review["decision"] != "pass":
+                raise DomainError("ACTION_REVIEW_BLOCKED")
             operation_id = f"op_{uuid.uuid4().hex}"
             memo = redact_text(memo) if memo is not None else None
             args = {"source_account_id": account.id, "recipient_id": payee.id,
@@ -146,6 +181,11 @@ class TransferService:
             plan_id = f"plan_{uuid.uuid4().hex}"
             node_id = f"transfer_{uuid.uuid4().hex}"
             display = _transfer_display(account, payee, amount_minor, memo)
+            if review is not None:
+                display.extend([{"label": f"审查 · {item['label']}", "value": str(item["value"])}
+                                for item in review["signals"]])
+                display.append({"label": "行动前审查 · 核验缺口", "value": "；".join(review["gaps"])})
+                display.append({"label": "行动前审查 · 建议核对", "value": "；".join(review["questions"])})
             display_digest = _display_hash(display)
             digest = action_hash("transfer.create", args)
             session.add(PlanRecord(id=plan_id, user_id=user_id, revision=1, status="awaiting_confirmation" if decision.assurance is Assurance.confirm else "awaiting_mfa",
@@ -167,7 +207,12 @@ class TransferService:
                 self._create_challenge(session, user_id, receipt_id, digest)
             self.audit.append(session, f"trace_{plan_id}", user_id, "policy.decided",
                               {"plan_id": plan_id, "tier": decision.tier_display, "reason_codes": decision.reason_codes})
-            return PreparedTransfer(plan_id, receipt_id, display_digest, digest, decision.tier_display, decision.assurance, display)
+            if review is not None:
+                self.audit.append(session, f"trace_{plan_id}", user_id, "pre_action_review.completed",
+                                  {"action": "transfer", "subject": review["subject"],
+                                   "source_mode": review["source_mode"]})
+            return PreparedTransfer(plan_id, receipt_id, display_digest, digest, decision.tier_display,
+                                    decision.assurance, display, review)
 
     def _validate(self, session: Session, user_id: str, plan: PlanRecord,
                   receipt: ReceiptRecord, node: PlanNodeRecord, *, check_expiry: bool = True) -> dict[str, object]:
@@ -193,12 +238,22 @@ class TransferService:
             raise DomainError("NOT_OWNER")
         if args.get("recipient_account_id") != payee.account_id:
             raise DomainError("ACTION_CHANGED")
+        if looks_like_organization(payee.display_name):
+            review = self.pre_action_review.review(payee.display_name, action="transfer")
+            if review["decision"] != "pass":
+                raise DomainError("ACTION_REVIEW_BLOCKED")
         account = session.get(Account, str(args.get("source_account_id", "")))
         if account is None or account.user_id != user_id:
             raise DomainError("NOT_OWNER")
         memo = args.get("memo")
         display = _transfer_display(account, payee, int(str(args["amount_minor"])),
                                     str(memo) if memo is not None else None)
+        if looks_like_organization(payee.display_name):
+            review = self.pre_action_review.review(payee.display_name, action="transfer")
+            display.extend([{"label": f"审查 · {item['label']}", "value": str(item["value"])}
+                            for item in review["signals"]])
+            display.append({"label": "行动前审查 · 核验缺口", "value": "；".join(review["gaps"])})
+            display.append({"label": "行动前审查 · 建议核对", "value": "；".join(review["questions"])})
         if (_display_hash(display) != receipt.display_hash or receipt.display_hash != plan.display_hash
                 or json.loads(plan.display_json) != display):
             raise DomainError("HASH_MISMATCH")

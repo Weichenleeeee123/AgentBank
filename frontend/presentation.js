@@ -22,7 +22,7 @@ export function uppercaseMoney(minor) {
   const jiao = Math.floor(minor / 10) % 10, fen = minor % 10;
   return sign + (text || '零') + '元' + (jiao ? digits[jiao] + '角' : fen ? '零' : '') + (fen ? digits[fen] + '分' : !jiao ? '整' : '');
 }
-const statuses = {frozen:'已冻结',active:'正常',succeeded:'已完成',failed:'失败',rejected:'已拒绝',cancelled:'已取消',invalidated:'已作废',waiting_trigger:'等待到期执行',paused:'已暂停',partially_completed:'部分完成，需处理',awaiting_confirmation:'待确认',awaiting_mfa:'待验证',mfa_required:'待验证',cooling_required:'安全冷静期',pending:'处理中',true:'是',false:'否'};
+const statuses = {frozen:'已冻结',active:'正常',succeeded:'已完成',failed:'失败',rejected:'已拒绝',cancelled:'已取消',invalidated:'已作废',waiting_trigger:'等待到期执行',paused:'已暂停',partially_completed:'部分完成，需处理',awaiting_confirmation:'待确认',awaiting_mfa:'待验证',mfa_required:'待验证',cooling_required:'安全冷静期',pending:'处理中',true:'是',false:'否',pass:'审查通过',block:'暂不办理',found:'已命中',not_found:'未命中',simulated:'模拟样本',not_covered:'未覆盖'};
 const businessValues = {confirm:'用户确认',mfa:'设备验证码强验证',none:'无需额外验证',
   birthday:'生日安排',monthly:'每月',weekly:'每周',daily:'每天',yearly:'每年',once:'单次',scheduled:'已安排',processing:'处理中'};
 export function displayValue(value) { return statuses[String(value)] || businessValues[String(value)] || String(value); }

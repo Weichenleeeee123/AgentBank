@@ -499,14 +499,15 @@ def create_app(database_url: str | None = None) -> FastAPI:
         return {"plan_id": prepared.plan_id, "receipt_id": prepared.receipt_id,
                 "display_hash": prepared.display_hash, "action_hash": prepared.action_hash,
                 "tier_display": prepared.tier_display, "assurance": prepared.assurance.value,
-                "display": prepared.display}
+                "display": prepared.display, "pre_action_review": prepared.pre_action_review}
 
     @app.post("/v1/forms/transfer")
     def direct_transfer_form(payload: PrepareRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         prepared = transfer.prepare(user_id, payload.recipient_name, payload.amount_minor, payload.memo)
         return {"mode": "form_direct", "plan_id": prepared.plan_id, "receipt_id": prepared.receipt_id,
                 "tier_display": prepared.tier_display, "assurance": prepared.assurance.value,
-                "display_hash": prepared.display_hash, "display": prepared.display}
+                "display_hash": prepared.display_hash, "display": prepared.display,
+                "pre_action_review": prepared.pre_action_review}
 
     @app.post("/v1/security/fraud/evaluate")
     def evaluate_fraud(payload: dict[str, Any], _user_id: str = Depends(current_user)) -> dict[str, Any]:

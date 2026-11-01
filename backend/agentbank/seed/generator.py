@@ -91,11 +91,14 @@ def generate_seed(seed: int = 20261028) -> dict[str, list[dict[str, object]]]:
             ])
     products: list[dict[str, object]] = [
         {"id": f"product_{risk}", "name": f"演示产品 {risk}", "risk_level": risk, "term_days": 30,
-         "fee_bps": 10, "redemption_days": 1}
+         "fee_bps": 10, "redemption_days": 1, "issuer_name": "星河模拟理财有限公司"}
         for risk in ("R1", "R2", "R3", "R4", "R5")
     ]
     products.append({"id": "product_balanced", "name": "稳健组合", "risk_level": "R3", "term_days": 90,
-                     "fee_bps": 5, "redemption_days": 2})
+                     "fee_bps": 5, "redemption_days": 2, "issuer_name": "星河模拟理财有限公司"})
+    payees.append({"id": "payee_simulated_corporate", "owner_user_id": "user_001",
+                   "display_name": "星河模拟理财有限公司", "masked_name": "星河模拟理财有限公司",
+                   "phone": None, "account_id": "acc_demo_corporate", "is_new": True})
     cards: list[dict[str, object]] = [{"id": "card_001", "user_id": "user_001", "status": "active"},
              {"id": "card_002", "user_id": "user_002", "status": "lost"},
              {"id": "card_003", "user_id": "user_003", "status": "restricted"}]

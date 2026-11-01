@@ -16,6 +16,16 @@ def load_seed(database: Database) -> None:
                                             stock=int(cast(int, item["stock"])),
                                             price_version=int(cast(int, item["price_version"]))))
         if session.get(User, "user_001") is not None:
+            for item in fixture["products"]:
+                product = session.get(Product, str(item["id"]))
+                if product is not None and not product.issuer_name:
+                    product.issuer_name = str(item.get("issuer_name", ""))
+            for item in fixture["payees"]:
+                if str(item["id"]) == "payee_simulated_corporate" and session.get(Payee, str(item["id"])) is None:
+                    session.add(Payee(id=str(item["id"]), owner_user_id=str(item["owner_user_id"]),
+                                      display_name=str(item["display_name"]), masked_name=str(item["masked_name"]),
+                                      phone=item["phone"], account_id=str(item["account_id"]),
+                                      is_new=bool(item["is_new"])))
             return
         session.add_all(User(id=str(user["id"]), display_name=str(user["display_name"])) for user in fixture["users"])
         session.add_all(Account(id=str(item["id"]), user_id=str(item["user_id"]),
@@ -31,7 +41,8 @@ def load_seed(database: Database) -> None:
                                     memo=item.get("memo")) for item in fixture["transactions"])
         session.add_all(Product(id=str(item["id"]), name=str(item["name"]), risk_level=str(item["risk_level"]),
                                 term_days=int(cast(int, item.get("term_days", 0))), fee_bps=int(cast(int, item.get("fee_bps", 0))),
-                                redemption_days=int(cast(int, item.get("redemption_days", 1)))) for item in fixture["products"])
+                                redemption_days=int(cast(int, item.get("redemption_days", 1))),
+                                issuer_name=str(item.get("issuer_name", ""))) for item in fixture["products"])
         session.add_all(Card(id=str(item["id"]), user_id=str(item["user_id"]), status=str(item["status"]))
                          for item in fixture["cards"])
         session.add_all(Subscription(id=str(item["id"]), user_id=str(item["user_id"]), merchant=str(item["merchant"]),

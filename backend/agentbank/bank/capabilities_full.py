@@ -29,6 +29,7 @@ from agentbank.contracts import Assurance
 from agentbank.policy.engine import PolicyContext, decide
 from agentbank.bank.questionnaire import VERSION, answer_display
 from agentbank.errors import DomainError
+from agentbank.review.pre_action import PreActionReviewService
 from agentbank.security.breaker import CircuitBreaker
 from agentbank.tools import CAPABILITIES, validate_capability_payload
 
@@ -50,6 +51,7 @@ class CapabilityService:
         self.device_tokens: dict[str, str] = {}
         self.require_device_mfa = require_device_mfa
         self.enforce_prepare = enforce_prepare
+        self.pre_action_review = PreActionReviewService()
 
     def execute(self, user_id: str, capability_id: str, payload: dict[str, Any], idempotency_key: str,
                 *, trusted_execution: bool = False) -> CapabilityResult:
@@ -79,6 +81,13 @@ class CapabilityService:
                         raise DomainError('IDEMPOTENCY_CONFLICT')
                 return self._result(existing)
         payload = dict(payload)
+        if capability_id == "W04":
+            review = self._investment_review(payload, user_id)
+            with self.database.sessions.begin() as session:
+                self.audit.append(session, f"trace_review_{uuid.uuid4().hex}", user_id,
+                                  "pre_action_review.completed",
+                                  {"action": "investment", "subject": review["subject"],
+                                   "source_mode": review["source_mode"]})
         if capability_id == 'W03':
             if payload.get('questionnaire_version', VERSION) != VERSION:
                 raise DomainError('QUESTIONNAIRE_VERSION_INVALID')
@@ -122,6 +131,8 @@ class CapabilityService:
                 payload["quote_id"] = quote["quote_id"]
                 payload["amount_minor"] = quote["amount_minor"]
         validate_capability_payload(capability_id, public_payload)
+        if capability_id == "W04":
+            self._investment_review(payload, user_id)
         read_only_capabilities = {"Q01", "Q02", "B01", "B02", "B03", "B04", "W01", "W02", "W06", "X01"}
         write_capability = capability_id not in read_only_capabilities
         if capability_id == "T05" and payload.get("action") in {"preview", "status"}:
@@ -133,7 +144,7 @@ class CapabilityService:
                 display_digest = str(prepared["display_hash"])
                 assurance = str(prepared["assurance"])
             else:
-                action_digest, display_digest = self._payload_hashes(capability_id, payload)
+                action_digest, display_digest = self._payload_hashes(capability_id, payload, user_id)
                 red = capability_id in {"W04", "W05", "C04", "C05", "C06", "C08"} or (capability_id == "C01" and not bool(payload.get("virtual", True))) or (capability_id == "C07" and payload.get("action") == "unfreeze")
                 if capability_id == "C02":
                     with self.database.sessions() as session:
@@ -152,7 +163,9 @@ class CapabilityService:
             if capability_id == 'C08':
                 data['display'] = self._pin_display(payload)
             elif capability_id not in {'T01', 'T02', 'T03'}:
-                data['display'] = self._capability_display(capability_id, payload)
+                data['display'], prepared_review = self._capability_action_display(capability_id, payload, user_id)
+                if prepared_review is not None:
+                    data['pre_action_review'] = prepared_review
             if capability_id in {"T01", "T02", "T03"}:
                 data.update(prepared)
                 data["capability_id"] = capability_id
@@ -198,7 +211,7 @@ class CapabilityService:
                     capability_id, str(idempotency_key), str(security_payload.get("card_id", "card_001"))
                 )
             else:
-                expected_action, expected_display = self._payload_hashes(capability_id, security_payload)
+                expected_action, expected_display = self._payload_hashes(capability_id, security_payload, user_id)
             if self.require_device_mfa and not payload.get("_mfa_verified") and not (isinstance(device_token, str) and isinstance(otp, str)):
                 record_id = f"cap_{uuid.uuid4().hex}"
                 pending_data: dict[str, Any] = {"payload": self._safe_payload(capability_id, security_payload), "assurance": "mfa",
@@ -263,8 +276,8 @@ class CapabilityService:
                     capability_id, record_id, str(payload.get("card_id", "card_001"))
                 )
             else:
-                expected_action, expected_display = self._payload_hashes(capability_id, payload)
-            if capability_id != 'X05' and 'display' in data:
+                expected_action, expected_display = self._payload_hashes(capability_id, payload, user_id)
+            if capability_id not in {'X05', 'W04'} and 'display' in data:
                 expected_display = self._payload_display_hash(expected_action, data.get('display', []))
             if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                 raise DomainError("HASH_MISMATCH")
@@ -301,8 +314,8 @@ class CapabilityService:
                         capability_id, record_id, str(safe_payload.get("card_id", "card_001"))
                     )
                 else:
-                    expected_action, expected_display = self._payload_hashes(capability_id, safe_payload)
-                if capability_id != 'X05' and 'display' in data:
+                    expected_action, expected_display = self._payload_hashes(capability_id, safe_payload, user_id)
+                if capability_id not in {'X05', 'W04'} and 'display' in data:
                     expected_display = self._payload_display_hash(expected_action, data.get('display', []))
                 if (data.get("action_hash") != expected_action
                         or data.get("display_hash") != expected_display):
@@ -358,9 +371,9 @@ class CapabilityService:
             idempotency_key = record.idempotency_key
             if capability_id not in {"T01", "T02", "T03"}:
                 expected_action, expected_display = self._payload_hashes(
-                    capability_id, dict(data.get("payload", {}))
+                    capability_id, dict(data.get("payload", {})), user_id
                 )
-                if data.get("flow") == "merchant_price_reconfirmation" or 'display' in data:
+                if data.get("flow") == "merchant_price_reconfirmation" or ('display' in data and capability_id != 'W04'):
                     expected_display = self._payload_display_hash(expected_action, data.get("display", []))
                 if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                     raise DomainError("HASH_MISMATCH")
@@ -711,14 +724,50 @@ class CapabilityService:
             safe["new_pin"] = "[REDACTED]"
         return safe
 
-    def _payload_hashes(self, capability_id: str, payload: dict[str, Any]) -> tuple[str, str]:
+    def _payload_hashes(self, capability_id: str, payload: dict[str, Any],
+                        user_id: str | None = None) -> tuple[str, str]:
         canonical = json.dumps({"capability_id": capability_id,
                                 "payload": self._safe_payload(capability_id, payload)},
                                ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if capability_id == 'C08':
             return digest, self._payload_display_hash(digest, self._pin_display(payload))
-        return digest, self._payload_display_hash(digest, self._capability_display(capability_id, payload))
+        display, _ = self._capability_action_display(capability_id, payload, user_id)
+        return digest, self._payload_display_hash(digest, display)
+
+    def _investment_review(self, payload: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
+        product_id = str(payload.get("product_id", ""))
+        with self.database.sessions() as session:
+            product = session.get(Product, product_id)
+            if product is None:
+                raise DomainError("PRODUCT_NOT_FOUND")
+            product_data = {"id": product.id, "name": product.name, "risk_level": product.risk_level,
+                            "term_days": product.term_days, "fee_bps": product.fee_bps,
+                            "redemption_days": product.redemption_days, "issuer_name": product.issuer_name}
+        review = self.pre_action_review.review(product.issuer_name, action="investment",
+                                               product_id=product_id, product=product_data)
+        if review["decision"] != "pass":
+            with self.database.sessions.begin() as session:
+                self.audit.append(session, f"trace_review_{uuid.uuid4().hex}", user_id or "unknown",
+                                  "pre_action_review.blocked", {"action": "investment",
+                                  "subject": review["subject"], "product_id": product_id})
+            raise DomainError("ACTION_REVIEW_BLOCKED")
+        return review
+
+    def _capability_action_display(self, capability_id: str, payload: dict[str, Any],
+                                   user_id: str | None = None) -> tuple[list[dict[str, str]], dict[str, Any] | None]:
+        display = self._capability_display(capability_id, payload)
+        if capability_id != "W04":
+            return display, None
+        review = self._investment_review(payload, user_id)
+        display.extend({"label": f"审查 · {item['label']}", "value": str(item["value"])}
+                       for item in review["signals"])
+        display.extend([{"label": "行动前审查 · 主体", "value": str(review["subject"]["name"])},
+                        {"label": "行动前审查 · 资质", "value": str(review["qualification"]["detail"])},
+                        {"label": "行动前审查 · 核验缺口", "value": "；".join(review["gaps"])},
+                        {"label": "行动前审查 · 建议核对", "value": "；".join(review["questions"])},
+                        {"label": "行动前审查 · 数据范围", "value": str(review["notice"]) }])
+        return display, review
 
     @staticmethod
     def _capability_display(capability_id: str, payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -908,7 +957,8 @@ class CapabilityService:
                     "is_new": candidate.is_new, "next": "transfer.create", "plan_id": prepared.plan_id,
                     "receipt_id": prepared.receipt_id, "display_hash": prepared.display_hash,
                     "action_hash": prepared.action_hash, "assurance": prepared.assurance.value,
-                    "tier_display": prepared.tier_display, "display": prepared.display}, "prepared"
+                    "tier_display": prepared.tier_display, "display": prepared.display,
+                    "pre_action_review": prepared.pre_action_review}, "prepared"
         if capability_id == "T01":
             if payload.get("recipient_id"):
                 prepared = TransferService(self.database).prepare_for_payee(
@@ -918,7 +968,8 @@ class CapabilityService:
                                                                   int(payload.get("amount_minor", 0)), payload.get("memo"))
             return {"plan_id": prepared.plan_id, "receipt_id": prepared.receipt_id, "display_hash": prepared.display_hash,
                     "action_hash": prepared.action_hash, "tier_display": prepared.tier_display,
-                    "assurance": prepared.assurance.value, "display": prepared.display}, "prepared"
+                    "assurance": prepared.assurance.value, "display": prepared.display,
+                    "pre_action_review": prepared.pre_action_review}, "prepared"
         if capability_id == "T04":
             period = str(payload.get("period", "monthly"))
             recipient_id_value = payload.get("recipient_id")
@@ -1062,6 +1113,7 @@ class CapabilityService:
             return {"level": profile.level, "score": profile.score, "expires_on": profile.expires_on,
                     'questionnaire_version': VERSION, 'answers': answers}, "succeeded"
         if capability_id == "W04":
+            self._investment_review(payload, user_id)
             product_id = str(payload.get("product_id", "product_R1"))
             with self.database.sessions() as session:
                 product = session.get(Product, product_id)

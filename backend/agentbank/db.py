@@ -66,6 +66,7 @@ class Product(Base):
     term_days: Mapped[int] = mapped_column(Integer, default=0)
     fee_bps: Mapped[int] = mapped_column(Integer, default=0)
     redemption_days: Mapped[int] = mapped_column(Integer, default=1)
+    issuer_name: Mapped[str] = mapped_column(String(160), default="")
 
 
 class RiskProfile(Base):
@@ -676,6 +677,7 @@ class Database:
                 "capability_records": {
                     "request_hash": "VARCHAR(128) NOT NULL DEFAULT ''",
                 },
+                "products": {"issuer_name": "VARCHAR(160) NOT NULL DEFAULT ''"},
                 "cooling_periods": {
                     "plan_revision": "INTEGER NOT NULL DEFAULT 1",
                     "action_hash": "VARCHAR(128) NOT NULL DEFAULT ''",

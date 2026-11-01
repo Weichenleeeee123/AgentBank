@@ -1,4 +1,4 @@
-const CACHE = 'agentbank-static-m4-light-v3';
+const CACHE = 'agentbank-static-m4-light-v4';
 const SHELL = ['/app/', '/app/index.html', '/app/styles.css', '/app/app.js', '/app/presentation.js', '/app/manifest.json', '/app/icon-192.png', '/app/icon-512.png', '/app/webim.html', '/app/webim.js', '/app/plan.html'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', event => { event.waitUntil(self.clients.claim()); });

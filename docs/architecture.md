@@ -19,7 +19,8 @@ flowchart TD
     MSG --> AGENT[Agent 编排：补槽、消歧、计划]
     AGENT <--> LLM[Planner / Explorer / Reply / Fraud]
     AGENT --> GATE[确定性权限与 DAG 校验]
-    GATE --> CONFIRM[用户确认 / 独立设备 OTP]
+    GATE --> REVIEW[行动前尽调：主体、资质、风险/财务/信用/口碑]
+    REVIEW --> CONFIRM[用户确认 / 独立设备 OTP]
     CONFIRM --> KERNEL[CapabilityService / TransferService]
     KERNEL --> BANK[模拟账本、卡片、订阅、商户]
     KERNEL --> AUDIT[哈希审计链与库外 HMAC 检查点]
@@ -34,6 +35,8 @@ flowchart TD
 3. 写操作生成 `CapabilityRecord`；转账写操作还生成业务计划和授权凭证（receipt）。
 4. 用户完成所需确认或模拟设备验证码验证后，业务服务复核授权与当前状态，再提交操作。转账由 `TransferService.confirm/verify` 处理。
 5. 每个结果包含业务状态和审计事件名，事实回复用片段检查器校验。
+
+对公转账在 `TransferService` 准备及确认时检查收款主体；理财申购在 `CapabilityService` 的准备、确认和执行路径检查产品发行主体。报告包含模拟登记状态和编号、资质状态和编号、风险/财务/信用/口碑四类具体样例、各条证据的样本编号与更新时间、核验缺口及建议问题。主体无法匹配或模拟资质目录未命中时，不创建可执行授权；通过时，完整摘要加入确认展示并纳入展示哈希；拒绝和通过事件写入审计链。当前样本为源码中可复现的合成数据，不是外部实时调查服务或真实监管结果。
 
 ## 跨场景计划
 

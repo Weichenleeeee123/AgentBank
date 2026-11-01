@@ -19,6 +19,7 @@ from agentbank.llm.gateway import LLMGateway
 from agentbank.tools import INPUT_FIELDS
 from agentbank.workflow.recovery import HandoffService
 from agentbank.security.fraud import FraudDetector, FraudLevel, record_risk
+from agentbank.review.pre_action import PreActionReviewService, looks_like_organization
 
 
 class AgentResponse:
@@ -43,6 +44,7 @@ class AgentOrchestrator:
         self.capabilities = capabilities or CapabilityService(database, require_device_mfa=True, enforce_prepare=True)
         self.parser = IntentParser()
         self.llm = llm or LLMGateway.from_environment(database)
+        self.pre_action_review = PreActionReviewService()
 
     def handle(self, user_id: str, conversation_id: str, text: str, channel: str = "app",
                *, message_id: str | None = None) -> AgentResponse:
@@ -328,6 +330,16 @@ class AgentOrchestrator:
                 return AgentResponse(kind="error", intent=parsed.intent, capability_id=capability_id,
                                      data={"reason_code": "FRAUD_REVIEW_REQUIRED", "handoff_case_id": case.id},
                                      message="检测到需要人工核实的转账风险，本次没有准备或执行转账。请通过官方渠道核实后再发起操作。")
+        pre_action_review = self._pre_action_review(user_id, parsed)
+        if pre_action_review is not None and pre_action_review["decision"] == "block":
+            with self.database.sessions.begin() as session:
+                self.capabilities.audit.append(session, f"trace_review_{uuid.uuid4().hex}", user_id,
+                                               "pre_action_review.blocked",
+                                               {"action": parsed.intent, "subject": pre_action_review["subject"],
+                                                "source_mode": pre_action_review["source_mode"]})
+            return AgentResponse(kind="review", intent=parsed.intent, capability_id=parsed.capability_id,
+                                 data={"pre_action_review": pre_action_review},
+                                 message="行动前审查未通过，当前没有准备或执行资金操作。请先核实主体、资质和收款信息。")
         try:
             result = self.capabilities.execute(user_id, capability_id, parsed.slots, key)
         except AmbiguousRecipient:
@@ -337,11 +349,38 @@ class AgentOrchestrator:
             if error.code == "MFA_REQUIRED":
                 return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
                                      message="这项操作需要模拟手机验证码验证，请输入验证码。")
+            if parsed.capability_id == "W01" and error.code in {"RISK_PROFILE_REQUIRED", "RISK_PROFILE_EXPIRED"}:
+                from agentbank.bank.questionnaire import questionnaire
+                detail = "当前测评已过期" if error.code == "RISK_PROFILE_EXPIRED" else "尚无有效风险测评"
+                return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="W01",
+                                     data={"questionnaire": questionnaire()},
+                                     message=f"{detail}。为按适当性筛选产品，请先完成风险测评；提交后仍需核对并确认。")
             return AgentResponse(kind="error", intent=parsed.intent, capability_id=parsed.capability_id, message=error.code)
         self._save_pending(user_id, conversation_id, None)
         if result.status in {"awaiting_confirmation", "awaiting_mfa"}:
             self._set_latest_prepared(user_id, conversation_id, result.record_id)
-        return self._response(user_id, parsed, result)
+        return self._response(user_id, parsed, result, pre_action_review=pre_action_review)
+
+    def _pre_action_review(self, user_id: str, parsed: ParsedIntent) -> dict[str, Any] | None:
+        """Review organization-facing payments and investment subscriptions."""
+        if parsed.capability_id in {"T01", "T02", "T03"}:
+            query = str(parsed.slots.get("recipient_name") or parsed.slots.get("alias") or "")
+            if not looks_like_organization(query):
+                return None
+            return self.pre_action_review.review(query, action="transfer")
+        if parsed.capability_id == "W04":
+            product_id = str(parsed.slots.get("product_id") or "")
+            from agentbank.db import Product
+            with self.database.sessions() as session:
+                product = session.get(Product, product_id)
+                product_data = ({"id": product.id, "name": product.name, "risk_level": product.risk_level,
+                                 "term_days": product.term_days, "redemption_days": product.redemption_days,
+                                 "fee_bps": product.fee_bps, "issuer_name": product.issuer_name}
+                                if product is not None else None)
+            issuer = str((product_data or {}).get("issuer_name", ""))
+            return self.pre_action_review.review(issuer, action="investment", product_id=product_id,
+                                                 product=product_data)
+        return None
 
     def _merge_model_continuation(self, pending: ParsedIntent | None, proposed: ParsedIntent, text: str) -> ParsedIntent:
         family = {'T01', 'T02', 'T03'}
@@ -727,8 +766,11 @@ class AgentOrchestrator:
                              record_id=record_id, data=result.data, message="强验证完成，结果已从模拟银行确认。",
                              fragments=[{"type": "fact", "label": "操作状态", "value_minor": 0, "status": result.status}])
 
-    def _response(self, user_id: str, parsed: ParsedIntent, result: CapabilityResult) -> AgentResponse:
-        data = result.data
+    def _response(self, user_id: str, parsed: ParsedIntent, result: CapabilityResult,
+                  *, pre_action_review: dict[str, Any] | None = None) -> AgentResponse:
+        data = dict(result.data)
+        if pre_action_review is not None:
+            data["pre_action_review"] = pre_action_review
         if result.status == "awaiting_mfa":
             return AgentResponse(kind="mfa", intent=parsed.intent, capability_id=parsed.capability_id,
                                  record_id=result.record_id, data=data, message="请在模拟手机中完成强验证。")
