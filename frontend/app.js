@@ -121,7 +121,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     bubble.append(actions);
   }
   $("messages").append(bubble);
-  bubble.scrollIntoView?.({behavior: "smooth"});
+  bubble.scrollIntoView?.({behavior: "smooth", block: "nearest"});
 }
 
 function questionnaireForm(questionnaire) {
