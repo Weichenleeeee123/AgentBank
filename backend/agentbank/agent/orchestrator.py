@@ -139,7 +139,10 @@ class AgentOrchestrator:
             self._save_pending(user_id, conversation_id, None)
             return AgentResponse(kind="result", intent="cancel", capability_id=result.capability_id,
                                  record_id=result.record_id, data={"status": "cancelled"}, message="已取消，原确认凭证已作废。")
-        parsed = self.parser.parse(text)
+        # With a provider, semantic parsing belongs to the planner. The legacy
+        # parser is an explicit offline fallback, never an override of the LLM.
+        using_planner = self.llm.primary is not None
+        parsed = (ParsedIntent("unknown", None, {}, [], []) if using_planner else self.parser.parse(text))
         rules_risk = FraudDetector().evaluate(" ".join(recent_messages), relation={}, behavior={})
         record_risk(self.database, user_id, rules_risk.level.value)
         if rules_risk.level is FraudLevel.high:
@@ -149,13 +152,15 @@ class AgentOrchestrator:
         pending = self._load_pending(user_id, conversation_id)
         safe_context: dict[str, Any]
         if pending is not None:
-            continued = self._continue_pending(pending, text)
+            continued = pending if using_planner else self._continue_pending(pending, text)
             safe_context = {"parsed_intent": continued.intent, "slots": continued.slots,
-                            "pending_intent": {"capability_id": pending.capability_id,
+                            "pending_intent": {"intent": pending.intent, "capability_id": pending.capability_id,
                                                "slots": pending.slots, "missing": pending.missing}}
         else:
             continued = parsed
             safe_context = {"parsed_intent": parsed.intent, "slots": parsed.slots}
+        if using_planner:
+            safe_context.update(self._planner_context(user_id))
         references = self._load_references(user_id, conversation_id)
         if references:
             safe_context["references"] = references
@@ -170,7 +175,7 @@ class AgentOrchestrator:
                 old_data = json.loads(old_record.data_json) if old_record is not None else {}
             old_payload = old_data.get("payload", {})
             if parsed.capability_id is None and old_record is not None:
-                amount = self.parser._amount.search(text)
+                amount = self.parser.find_amount(text) if not using_planner else None
                 if old_record.capability_id in {"T01", "T02", "T03"} and amount:
                     slots = dict(old_payload)
                     slots["amount_minor"] = self.parser.parse(f"转账 {amount.group('amount')}").slots["amount_minor"]
@@ -179,7 +184,8 @@ class AgentOrchestrator:
                 self.capabilities.invalidate_prepared(user_id, latest_prepared)
         if parsed.capability_id is not None:
             self._set_latest_prepared(user_id, conversation_id, None)
-        if parsed.capability_id == "C08" and parsed.slots.get("new_pin"):
+        if (parsed.capability_id == "C08" and parsed.slots.get("new_pin")) or (
+                re.search(r"(?:PIN|密码|口令)", text, re.IGNORECASE) and re.search(r"(?<!\d)\d{4}(?!\d)", text)):
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id="C08",
                                  message="修改密码请在 App 的安全表单中输入，不要在聊天里发送密码。")
         if self.llm.primary is not None:
@@ -194,6 +200,19 @@ class AgentOrchestrator:
                 planned = self.llm.plan_intent(text, user_id=user_id, recent_user_messages=recent_messages,
                                                context={**safe_context, "exploration": exploration})
             planned_parsed = self._from_planner(planned)
+            if planned.get("source") == "deterministic_fallback":
+                using_planner = False
+                parsed = self.parser.parse(text)
+                if parsed.capability_id in {"T04", "X02", "X03", "X04"}:
+                    return AgentResponse(kind="clarification", intent=parsed.intent,
+                                         message="当前无法可靠理解这项复杂操作，请稍后重试；本次没有执行。")
+                continued = self._continue_pending(pending, text) if pending else parsed
+            if pending is not None and pending.intent == "birthday_plan" and planned.get("capability_id") == "X02":
+                # A budget answer fills the existing typed plan; it must not
+                # silently replace the user's entire birthday task with X02.
+                slots = dict(pending.slots)
+                slots.update({"reserve_minor": planned.get("slots", {}).get("amount_minor")})
+                return self._prepare_birthday_plan(user_id, conversation_id, text, {"slots": slots})
             if planned.get("proposed_dag"):
                 return self._prepare_proposed_dag(user_id, conversation_id, planned)
             if planned.get("plan_template") == "birthday":
@@ -201,24 +220,13 @@ class AgentOrchestrator:
             if planned.get("plan_template") in {"query_analysis_report", "investment_review"}:
                 return self._prepare_composite_plan(user_id, conversation_id, planned)
             if planned_parsed is not None:
-                transfer_family = {"T01", "T02", "T03"}
-                if (pending is not None and continued.capability_id in transfer_family
-                        and planned_parsed.capability_id in transfer_family
-                        and (parsed.capability_id is None or parsed.capability_id in transfer_family)
-                        and not any(parsed.slots.get(field) for field in ("recipient_name", "phone", "alias"))):
-                    # An amount-only reply fills the existing transfer. A model
-                    # route change must not discard or replace the recipient
-                    # already supplied by the user, or the amount just parsed.
-                    planned_parsed = continued
-                elif parsed.capability_id in transfer_family and planned_parsed.capability_id in transfer_family:
-                    planned_slots = {key: value for key, value in planned_parsed.slots.items()
-                                     if key not in {"recipient_name", "phone", "alias"}}
-                    planned_parsed = ParsedIntent(planned_parsed.intent, parsed.capability_id,
-                                                   planned_slots, planned_parsed.missing,
-                                                   planned_parsed.ambiguities, planned_parsed.references)
-                if parsed.capability_id == planned_parsed.capability_id:
-                    planned_parsed = self._merge_deterministic(planned_parsed, parsed)
-                parsed = planned_parsed
+                if latest_prepared is not None and any(token in text for token in ("不对", "改成", "改为", "重新")):
+                    with self.database.sessions() as session:
+                        from agentbank.db import CapabilityRecord
+                        old = session.get(CapabilityRecord, latest_prepared)
+                    if old is not None:
+                        self.capabilities.invalidate_prepared(user_id, latest_prepared)
+                parsed = self._merge_model_continuation(pending, planned_parsed, text)
                 self._persist_references(user_id, conversation_id, parsed)
             elif pending is not None and continued.capability_id is not None:
                 parsed = continued
@@ -228,18 +236,28 @@ class AgentOrchestrator:
                                                  str(suggestion.get("intent", "unknown")))
         elif pending is not None and (parsed.capability_id is None or parsed.capability_id == pending.capability_id):
             parsed = continued
-        if pending is not None and (parsed.capability_id is None or parsed.capability_id == pending.capability_id
+        if not using_planner and pending is not None and (parsed.capability_id is None or parsed.capability_id == pending.capability_id
                                     or (pending.capability_id == "S02" and parsed.capability_id == "S01")):
             parsed = continued if parsed.capability_id != continued.capability_id else self._merge_deterministic(parsed, continued)
         if parsed.capability_id is None:
             return AgentResponse(kind="clarification", intent=parsed.intent, message="我还不能确定要办理哪项银行业务，请说明查询、转账、账单、理财、卡片或订阅。")
         if parsed.ambiguities:
+            self._save_pending(user_id, conversation_id, parsed)
+            message = ("还不能唯一确定收款人，请提供姓名、手机号或联系人备注。" if parsed.capability_id in {"T01", "T02", "T03", "T04"}
+                       else "请明确要操作的卡片。" if (parsed.capability_id or "").startswith("C")
+                       else "还有信息需要确认，请说明具体的产品、事件或业务条件。")
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
-                                 message="请确认收款人：我找到多个同名联系人，请提供手机号或联系人备注。")
+                                 message=message)
         if parsed.missing:
             self._save_pending(user_id, conversation_id, parsed)
-            labels = {"amount": "金额", "recipient": "收款人", "answers": "风险测评答案", "product_id": "产品", "order_id": "订单", "subscription_id": "订阅", "card_id": "卡片"}
-            missing = "、".join(labels.get(item, item) for item in parsed.missing)
+            labels = {"amount": "金额", "amount_minor": "金额", "reserve_minor": "预留金额", "total_minor": "总金额",
+                      "recipient": "收款人", "recipient_name": "收款人", "answers": "风险测评答案", "product_id": "产品",
+                      "order_id": "订单", "subscription_id": "订阅", "card_id": "卡片", "next_due": "首次执行日期",
+                      "start_month": "开始月份", "end_month": "结束月份", "dsl": "统计条件", "event_id": "生日事件",
+                      "days": "提前提醒的天数", "limit_minor": "额度", "new_pin": "请在 App 安全表单中修改密码",
+                      "delivery_date": "送达日期", "dispatch_on": "下单日期", "restriction": "交易限制类型"}
+            labels.update({"max_uses": "执行次数", "period": "执行周期", "phone": "收款人手机号"})
+            missing = "、".join(dict.fromkeys(labels.get(item, "业务信息") for item in parsed.missing))
             return AgentResponse(kind="clarification", intent=parsed.intent, capability_id=parsed.capability_id,
                                  message=f"还需要补充：{missing}。")
         if parsed.capability_id == "W05" and not parsed.slots.get("order_id") and parsed.slots.get("product_id"):
@@ -291,6 +309,46 @@ class AgentOrchestrator:
         if result.status in {"awaiting_confirmation", "awaiting_mfa"}:
             self._set_latest_prepared(user_id, conversation_id, result.record_id)
         return self._response(user_id, parsed, result)
+
+    def _merge_model_continuation(self, pending: ParsedIntent | None, proposed: ParsedIntent, text: str) -> ParsedIntent:
+        family = {'T01', 'T02', 'T03'}
+        if pending is None or pending.capability_id not in family or proposed.capability_id not in family:
+            return proposed
+        payee_fields = {'recipient_name', 'phone', 'alias'}
+        supplied = {field: value for field, value in proposed.slots.items() if field in payee_fields}
+        # A changed recipient needs evidence in the current user message. The
+        # model still selects its meaning; this only checks the selected value.
+        if any(self.llm._value_is_grounded(value, [text]) for value in supplied.values()):
+            return proposed
+        previous_values = {value for field, value in pending.slots.items() if field in payee_fields}
+        if any(value not in previous_values for value in supplied.values()):
+            return ParsedIntent(pending.intent, pending.capability_id, dict(pending.slots), ['recipient'], [], [])
+        slots = {**pending.slots, **{field: value for field, value in proposed.slots.items() if field not in payee_fields}}
+        aliases = {'amount': 'amount_minor', 'recipient': 'recipient_name'}
+        missing = [field for field in proposed.missing
+                   if aliases.get(field, field) not in slots and field not in payee_fields]
+        if 'amount_minor' not in slots and 'amount_minor' not in missing:
+            missing.append('amount_minor')
+        return ParsedIntent(pending.intent, pending.capability_id, slots, missing, proposed.ambiguities, proposed.references)
+
+    def _planner_context(self, user_id: str) -> dict[str, Any]:
+        """Trusted entity IDs, scoped to this user; no merchant/memo instructions."""
+        from agentbank.db import Card, Event, Product, Subscription, Payee
+        with self.database.sessions() as session:
+            cards = session.scalars(select(Card).where(Card.user_id == user_id).order_by(Card.id)).all()
+            events = session.scalars(select(Event).where(Event.user_id == user_id).order_by(Event.id)).all()
+            products = session.scalars(select(Product).order_by(Product.id).limit(5)).all()
+            subscription_ids = session.scalars(select(Subscription.id).where(Subscription.user_id == user_id)
+                                               .order_by(Subscription.id).limit(5)).all()
+            contacts = session.scalars(select(Payee.display_name).where(Payee.owner_user_id == user_id)
+                                      .order_by(Payee.id).limit(5)).all()
+            return {"business_date": self.capabilities.clock.business_date(),
+                    "card_count": len(cards), "cards": [{"card_id": card.id, "status": card.status} for card in cards[:5]],
+                    "event_count": len(events), "events": [{"event_id": event.id, "event_type": event.event_type,
+                                                              "event_date": event.event_date} for event in events[:5]],
+                    "products": [{"product_id": product.id} for product in products],
+                    "subscriptions": [{"subscription_id": item} for item in subscription_ids],
+                    "payees": [{"recipient_name": name} for name in contacts]}
 
     def _latest_prepared(self, user_id: str, conversation_id: str) -> str | None:
         with self.database.sessions() as session:
@@ -435,13 +493,13 @@ class AgentOrchestrator:
                 slots["answers"] = answers
                 missing = []
         elif pending.capability_id in {"T01", "T02", "T03"}:
-            amount_match = self.parser._amount.search(text)
+            amount_match = self.parser.find_amount(text)
             if amount_match:
                 slots["amount_minor"] = self.parser.parse(text + " 转账").slots.get("amount_minor")
                 missing = [item for item in missing if item != "amount"]
         elif pending.capability_id == "W04":
             product = re.search(r"R[1-5]", text, re.IGNORECASE)
-            amount_match = self.parser._amount.search(text)
+            amount_match = self.parser.find_amount(text)
             if product:
                 slots["product_id"] = f"product_{product.group(0).upper()}"
                 missing = [item for item in missing if item != "product_id"]
@@ -455,7 +513,7 @@ class AgentOrchestrator:
                 slots["order_id"] = f"order_{token}" if token.isdigit() else token
                 missing = [item for item in missing if item != "order_id"]
         elif pending.capability_id == "T04":
-            amount_match = self.parser._amount.search(text)
+            amount_match = self.parser.find_amount(text)
             if amount_match:
                 slots["amount_minor"] = self.parser.parse(f"转账 {amount_match.group('amount')}").slots.get("amount_minor")
                 missing = [item for item in missing if item != "amount"]
@@ -478,19 +536,23 @@ class AgentOrchestrator:
 
     def _prepare_birthday_plan(self, user_id: str, conversation_id: str, text: str,
                                planned: dict[str, Any]) -> AgentResponse:
-        slots = planned.get("slots", {})
+        pending = self._load_pending(user_id, conversation_id)
+        slots = dict(pending.slots) if pending is not None and pending.intent == "birthday_plan" else {}
+        slots.update(planned.get("slots", {}))
         event_id = slots.get("event_id") if isinstance(slots, dict) else None
         reserve_minor = slots.get("reserve_minor") if isinstance(slots, dict) else None
         if (not isinstance(event_id, str) or not isinstance(reserve_minor, int) or isinstance(reserve_minor, bool)
-                or planned.get("missing")):
+                or reserve_minor <= 0):
+            missing = [field for field in ("event_id", "reserve_minor") if not slots.get(field)]
             self._save_pending(user_id, conversation_id, ParsedIntent("birthday_plan", None,
                                slots if isinstance(slots, dict) else {},
-                               list(planned.get("missing", ["event_id", "reserve_minor"])), [], []))
+                               missing, [], []))
             return AgentResponse(kind="clarification", intent="birthday_plan",
-                                 message="请提供生日事件和预留金额。")
+                                 message="请补充" + "和".join("生日事件" if field == "event_id" else "预留金额" for field in missing) + "。")
         from agentbank.workflow.planner import BusinessPlanService
         try:
-            plan = BusinessPlanService(self.database).create_birthday_plan(user_id, event_id, reserve_minor)
+            plan = BusinessPlanService(self.database).create_birthday_plan(user_id, event_id, reserve_minor,
+                                                                          items=slots.get("items"))
         except DomainError as error:
             return AgentResponse(kind="error", intent="birthday_plan", message=error.code)
         with self.database.sessions() as session:
@@ -657,6 +719,14 @@ class AgentOrchestrator:
         elif parsed.capability_id == "X01":
             fragments = [{"type": "fact", "label": "生日事件", "value_minor": 0, "text": event.get("event_date", "")}
                          for event in data.get("events", [])]
+        elif parsed.capability_id == "B01":
+            fragments = [{"type": "fact", "label": str(row.get("category", "消费合计")),
+                          "value_minor": int(row["sum_amount_minor"]), "currency": "CNY"}
+                         for row in data.get("rows", []) if "sum_amount_minor" in row]
+            return AgentResponse(kind="facts", intent=parsed.intent, capability_id="B01", record_id=result.record_id,
+                                 data=data, fragments=fragments,
+                                 message="已按类别统计支出，收入未计入消费；金额可追溯到交易明细。" if "dsl" not in parsed.slots
+                                 else "已按指定条件完成交易统计，金额可追溯到交易明细。")
         rendered = self.llm.render_reply(user_id, parsed.capability_id or "", result.status, result.data, fragments)
         return AgentResponse(kind="facts" if result.status == "succeeded" else "result", intent=parsed.intent,
                              capability_id=parsed.capability_id, record_id=result.record_id, data=data,

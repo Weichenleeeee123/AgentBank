@@ -261,7 +261,7 @@ class BusinessPlanService:
                     nodes=nodes, display=display, created_at=created)
 
     def create_birthday_plan(self, user_id: str, event_id: str, reserve_minor: int,
-                             planned_event_date: str | None = None) -> Plan:
+                             planned_event_date: str | None = None, *, items: list[str] | None = None) -> Plan:
         if reserve_minor <= 0:
             raise DomainError("PLAN_AMOUNT_INVALID")
         with self.database.sessions() as session:
@@ -276,42 +276,38 @@ class BusinessPlanService:
         dispatch_on = (datetime.fromisoformat(event_date).date() - timedelta(days=2)).isoformat()
         plan_id = f"plan_{uuid.uuid4().hex}"
         capabilities = CapabilityService(self.database, require_device_mfa=True, enforce_prepare=False)
-        flower_quote = capabilities.quote_merchant(user_id, "flower", event_date)
-        cake_quote = capabilities.quote_merchant(user_id, "cake", event_date)
-        nodes = [
-            PlanNode(id="event", tool="events.lookup", args={"event_id": event_id, "event_date": event_date},
-                     idempotency_key=f"{plan_id}-event"),
-            PlanNode(id="quote_flower", tool="merchant.quote", args={"quote_id": flower_quote["quote_id"],
-                     "item": "flower", "amount_minor": flower_quote["amount_minor"],
-                     "delivery_date": event_date, "price_version": flower_quote["price_version"]},
-                     depends_on=["event"], idempotency_key=f"{plan_id}-quote-flower"),
-            PlanNode(id="quote_cake", tool="merchant.quote", args={"quote_id": cake_quote["quote_id"],
-                     "item": "cake", "amount_minor": cake_quote["amount_minor"],
-                     "delivery_date": event_date, "price_version": cake_quote["price_version"]},
-                     depends_on=["event"], idempotency_key=f"{plan_id}-quote-cake"),
-            PlanNode(id="reserve", tool="funds.reserve", args={"amount_minor": reserve_minor, "event_id": event_id},
-                     depends_on=["quote_flower", "quote_cake"], compensation="funds.release",
-                     idempotency_key=f"{plan_id}-reserve"),
-            PlanNode(id="flowers", tool="merchant.order.create", args={"item": "flower", "event_id": event_id,
-                     "quote_id": flower_quote["quote_id"], "amount_minor": flower_quote["amount_minor"],
-                     "delivery_date": event_date, "dispatch_on": dispatch_on},
-                     depends_on=["reserve", "quote_flower"], compensation="funds.release",
-                     idempotency_key=f"{plan_id}-flowers"),
-            PlanNode(id="cake", tool="merchant.order.create", args={"item": "cake", "event_id": event_id,
-                     "quote_id": cake_quote["quote_id"], "amount_minor": cake_quote["amount_minor"],
-                     "delivery_date": event_date, "dispatch_on": dispatch_on},
-                     depends_on=["reserve", "quote_cake"], compensation="funds.release",
-                     idempotency_key=f"{plan_id}-cake"),
-        ]
+        selected = ["flower", "cake"] if items is None else items
+        if not selected or any(item not in {"flower", "cake"} for item in selected) or len(set(selected)) != len(selected):
+            raise DomainError("PLAN_ITEMS_INVALID")
+        quotes = {item: capabilities.quote_merchant(user_id, item, event_date) for item in selected}
+        nodes = [PlanNode(id="event", tool="events.lookup", args={"event_id": event_id, "event_date": event_date},
+                          idempotency_key=f"{plan_id}-event")]
+        for item, quote in quotes.items():
+            nodes.append(PlanNode(id=f"quote_{item}", tool="merchant.quote",
+                args={"quote_id": quote["quote_id"], "item": item, "amount_minor": quote["amount_minor"],
+                      "delivery_date": event_date, "price_version": quote["price_version"]},
+                depends_on=["event"], idempotency_key=f"{plan_id}-quote-{item}"))
+        nodes.append(PlanNode(id="reserve", tool="funds.reserve",
+            args={"amount_minor": reserve_minor, "event_id": event_id},
+            depends_on=[f"quote_{item}" for item in selected], compensation="funds.release",
+            idempotency_key=f"{plan_id}-reserve"))
+        for item, quote in quotes.items():
+            node_id = "flowers" if item == "flower" else "cake"
+            nodes.append(PlanNode(id=node_id, tool="merchant.order.create",
+                args={"item": item, "event_id": event_id, "quote_id": quote["quote_id"],
+                      "amount_minor": quote["amount_minor"], "delivery_date": event_date, "dispatch_on": dispatch_on},
+                depends_on=["reserve", f"quote_{item}"], compensation="funds.release",
+                idempotency_key=f"{plan_id}-{node_id}"))
         PlanValidator({**self.registry, "merchant.quote": {"kind": "query"}}).validate(
             [node.model_dump() for node in nodes])
         created = datetime.now(timezone.utc).replace(tzinfo=None)
+        item_labels = {"flower": "鲜花", "cake": "蛋糕"}
         display = [{"label": "活动", "value": event_id}, {"label": "活动日期", "value": event_date},
-                   {"label": "下单日期", "value": dispatch_on},
-                   {"label": "鲜花报价", "value": f"¥{flower_quote['amount_minor'] / 100:.2f}"},
-                   {"label": "蛋糕报价", "value": f"¥{cake_quote['amount_minor'] / 100:.2f}"},
-                   {"label": "资金预留（分）", "value": str(reserve_minor)},
-                   {"label": "计划订单", "value": "鲜花、蛋糕"}]
+                   {"label": "下单日期", "value": dispatch_on}]
+        display.extend({"label": f"{item_labels[item]}报价", "value": f"¥{quote['amount_minor'] / 100:.2f}"}
+                       for item, quote in quotes.items())
+        display.extend([{"label": "资金预留（分）", "value": str(reserve_minor)},
+                        {"label": "计划订单", "value": "、".join(item_labels[item] for item in selected)}])
         display_json = json.dumps(display, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         action_json = json.dumps([node.model_dump(mode="json") for node in sorted(nodes, key=lambda item: item.id)], ensure_ascii=False,
                                  sort_keys=True, separators=(",", ":"))
@@ -434,6 +430,9 @@ class BusinessPlanService:
             event_id = event_args["event_id"]
             event_date = str(changes.get("event_date", event_args.get("event_date", "")))
             reserve_minor = int(changes.get("reserve_minor", 100_000))
+            order_nodes = session.scalars(select(PlanNodeRecord).where(PlanNodeRecord.plan_id == plan_id,
+                                                                      PlanNodeRecord.tool == "merchant.order.create")).all()
+            items = [str(json.loads(node.args_json)["args"]["item"]) for node in order_nodes]
         if reserve_minor <= 0:
             raise DomainError("PLAN_AMOUNT_INVALID")
         try:
@@ -448,7 +447,7 @@ class BusinessPlanService:
             from agentbank.db import ReceiptRecord
             for receipt in session.scalars(select(ReceiptRecord).where(ReceiptRecord.plan_id == plan_id)).all():
                 receipt.status = "invalidated"
-        revised = self.create_birthday_plan(user_id, event_id, reserve_minor, event_date)
+        revised = self.create_birthday_plan(user_id, event_id, reserve_minor, event_date, items=items)
         with self.database.sessions.begin() as session:
             new_record = session.get(PlanRecord, revised.plan_id)
             new_revision = (current.revision + 1) if current else 2

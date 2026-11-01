@@ -91,7 +91,7 @@ def test_model_dag_confirmation_routes_mfa_plans_to_verification(tmp_path: Path)
     assert confirmed.data["status"] == "awaiting_mfa"
 
 
-def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Path) -> None:
+def test_model_amount_without_matching_monetary_source_requires_clarification(tmp_path: Path) -> None:
     def transport(config, role, payload):
         if role == "fraud":
             return {"category": "safe", "confidence": 0.99}
@@ -101,11 +101,12 @@ def test_deterministic_amount_normalization_overrides_model_amount(tmp_path: Pat
 
     agent = make_agent(tmp_path, transport)
     response = agent.handle("user_001", "planner-amount", "给房东转100元")
-    assert response.kind == "confirmation"
-    assert response.data["payload"]["amount_minor"] == 10000
+    assert response.kind == "clarification"
+    assert response.record_id is None
+    assert "金额" in response.message
 
 
-def test_transfer_family_uses_normalized_payee_resolution_mode(tmp_path: Path) -> None:
+def test_model_payee_ambiguity_is_not_overwritten_by_keyword_parser(tmp_path: Path) -> None:
     def transport(config, role, payload):
         if role == "fraud":
             return {"category": "safe", "confidence": 0.99}
@@ -115,10 +116,9 @@ def test_transfer_family_uses_normalized_payee_resolution_mode(tmp_path: Path) -
 
     agent = make_agent(tmp_path, transport)
     response = agent.handle("user_001", "planner-family", "给房东转100元")
-    assert response.kind == "confirmation"
-    assert response.capability_id == "T01"
-    assert response.data["payload"]["recipient_name"] == "房东"
-    assert response.data["payload"]["amount_minor"] == 10000
+    assert response.kind == "clarification"
+    assert response.capability_id == "T03"
+    assert response.record_id is None
 
 
 def test_llm_planner_references_are_persisted_and_sent_back(tmp_path: Path) -> None:

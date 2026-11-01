@@ -23,6 +23,8 @@ export function uppercaseMoney(minor) {
   return sign + (text || '零') + '元' + (jiao ? digits[jiao] + '角' : fen ? '零' : '') + (fen ? digits[fen] + '分' : !jiao ? '整' : '');
 }
 const statuses = {frozen:'已冻结',active:'正常',succeeded:'已完成',failed:'失败',rejected:'已拒绝',cancelled:'已取消',awaiting_confirmation:'待确认',awaiting_mfa:'待验证',mfa_required:'待验证',cooling_required:'安全冷静期',pending:'处理中',true:'是',false:'否'};
-export function displayValue(value) { return statuses[String(value)] || String(value); }
+const businessValues = {confirm:'用户确认',mfa:'设备验证码强验证',none:'无需额外验证',
+  monthly:'每月',weekly:'每周',daily:'每天',yearly:'每年',once:'单次',scheduled:'已安排',processing:'处理中'};
+export function displayValue(value) { return statuses[String(value)] || businessValues[String(value)] || String(value); }
 export function money(value, currency = 'CNY') { return `${currency === 'CNY' || !currency ? '¥' : currency + ' '}${(Number(value) / 100).toFixed(2)}`; }
 export function resultKind(status) { return ['awaiting_mfa','mfa_required'].includes(status) ? 'mfa' : status === 'awaiting_confirmation' ? 'confirmation' : ['failed','rejected','cancelled'].includes(status) ? 'error' : status === 'succeeded' ? 'result' : 'pending'; }

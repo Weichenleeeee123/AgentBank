@@ -85,7 +85,7 @@ _INPUT_FIELDS: dict[str, set[str]] = {
     "T02": {"phone", "amount_minor", "memo"}, "T03": {"alias", "recipient_name", "amount_minor", "memo"},
     "T04": {"recipient_id", "recipient_name", "amount_minor", "max_uses", "period", "next_due"},
     "T05": {"action", "total_minor", "participant_ids", "bill_id"},
-    "B01": {"dsl"}, "B02": set(), "B03": {"start_month", "end_month"},
+    "B01": {"dsl", "start_month", "end_month"}, "B02": set(), "B03": {"start_month", "end_month"},
     "B04": {"year", "start_month", "end_month"}, "W01": set(), "W02": {"product_ids"},
     "W03": {"answers"}, "W04": {"product_id", "amount_minor", "assurance"},
     "W05": {"order_id", "product_id", "assurance"}, "W06": set(),

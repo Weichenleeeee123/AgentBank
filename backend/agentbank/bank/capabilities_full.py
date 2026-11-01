@@ -15,7 +15,7 @@ from agentbank.auth.devices import DeviceService
 from agentbank.bank.business import CardService, BirthdayPlanner, MandateService, RecipientResolver, RiskService, SubscriptionService
 from agentbank.bank.capabilities import split_bill
 from agentbank.bank.service import TransferService
-from agentbank.clock import BusinessClock, business_date, utc_now_naive
+from agentbank.clock import BusinessClock, business_date, utc_now_naive, next_scheduled_date
 from agentbank.contracts import CapabilityResult
 from agentbank.db import AABill, AAShare, Account, Card, CardApplication, CapabilityRecord, Database, DebitMandate, InvestmentOrder, LedgerEntry, Mandate, MerchantOrder, Operation, OutboxEvent, Payee, Position, Product, ReceiptConsumption, ReceiptRecord, Reminder, Reservation, ScheduledJob, Subscription, Transaction, UserNotification
 from agentbank.db import MerchantCatalog, MerchantQuote
@@ -114,6 +114,8 @@ class CapabilityService:
                     "display_hash": display_digest, "assurance": assurance}
             if capability_id == 'C08':
                 data['display'] = self._pin_display(payload)
+            elif capability_id not in {'T01', 'T02', 'T03'}:
+                data['display'] = self._capability_display(capability_id, payload)
             if capability_id in {"T01", "T02", "T03"}:
                 data.update(prepared)
                 data["capability_id"] = capability_id
@@ -225,7 +227,7 @@ class CapabilityService:
                 )
             else:
                 expected_action, expected_display = self._payload_hashes(capability_id, payload)
-            if capability_id == 'C08':
+            if capability_id != 'X05' and 'display' in data:
                 expected_display = self._payload_display_hash(expected_action, data.get('display', []))
             if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                 raise DomainError("HASH_MISMATCH")
@@ -263,7 +265,7 @@ class CapabilityService:
                     )
                 else:
                     expected_action, expected_display = self._payload_hashes(capability_id, safe_payload)
-                if capability_id == 'C08':
+                if capability_id != 'X05' and 'display' in data:
                     expected_display = self._payload_display_hash(expected_action, data.get('display', []))
                 if (data.get("action_hash") != expected_action
                         or data.get("display_hash") != expected_display):
@@ -319,7 +321,7 @@ class CapabilityService:
                 expected_action, expected_display = self._payload_hashes(
                     capability_id, dict(data.get("payload", {}))
                 )
-                if data.get("flow") == "merchant_price_reconfirmation" or capability_id == 'C08':
+                if data.get("flow") == "merchant_price_reconfirmation" or 'display' in data:
                     expected_display = self._payload_display_hash(expected_action, data.get("display", []))
                 if data.get("action_hash") != expected_action or data.get("display_hash") != expected_display:
                     raise DomainError("HASH_MISMATCH")
@@ -664,7 +666,30 @@ class CapabilityService:
         digest = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if capability_id == 'C08':
             return digest, self._payload_display_hash(digest, self._pin_display(payload))
-        return digest, digest
+        return digest, self._payload_display_hash(digest, self._capability_display(capability_id, payload))
+
+    @staticmethod
+    def _capability_display(capability_id: str, payload: dict[str, Any]) -> list[dict[str, str]]:
+        names = {'T04': '定时转账', 'T05': 'AA 收款', 'C01': '申请银行卡', 'C02': '调整卡片额度',
+                 'C03': '新增交易限制', 'C04': '解除交易限制', 'C05': '挂失银行卡', 'C06': '解除挂失',
+                 'C07': '冻结或解冻银行卡', 'W03': '提交风险测评', 'W04': '申购理财', 'W05': '赎回理财',
+                 'S01': '查询订阅', 'S02': '设置续费提醒', 'S03': '取消订阅', 'X02': '预留资金',
+                 'X03': '预订鲜花', 'X04': '预订蛋糕'}
+        labels = {'recipient_name': '收款人', 'card_id': '卡片', 'amount_minor': '金额', 'total_minor': '总金额',
+                  'limit_minor': '新额度', 'next_due': '首次执行日期', 'period': '执行周期', 'max_uses': '执行次数',
+                  'product_id': '理财产品', 'order_id': '赎回订单', 'subscription_id': '订阅', 'days': '提前提醒天数',
+                  'delivery_date': '送达日期', 'dispatch_on': '下单日期', 'restriction': '限制类型', 'action': '操作'}
+        values = {'monthly': '每月', 'weekly': '每周', 'daily': '每天', 'yearly': '每年', 'once': '单次',
+                  'online': '网购', 'freeze': '冻结', 'unfreeze': '解冻'}
+        rows = [{'label': '业务', 'value': names.get(capability_id, '银行业务')}]
+        for field, label in labels.items():
+            if field in payload:
+                value = f"¥{int(payload[field]) / 100:.2f}" if field.endswith('_minor') else values.get(str(payload[field]), str(payload[field]))
+                rows.append({'label': label, 'value': value})
+        rows.extend([{'label': '费用', 'value': '本地模拟免费'},
+                     {'label': '生效条件', 'value': '确认且所需强验证通过后执行'},
+                     {'label': '撤销', 'value': '提交前可取消；执行后以业务实际状态为准'}])
+        return rows
 
     @staticmethod
     def _pin_display(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -876,7 +901,22 @@ class CapabilityService:
                                         participant_id=participant_id, amount_minor=amount, status="requested"))
             return {"bill_id": bill_id, "shares": allocations, "participant_count": len(participants), "request_only": True}, "created"
         if capability_id == "B01":
-            dsl = payload.get("dsl", {"source": "transactions", "group_by": ["category"], "limit": 100})
+            dsl = payload.get("dsl")
+            if dsl is None:
+                filters: list[dict[str, Any]] = [{"field": "direction", "op": "eq", "value": "debit"}]
+                if payload.get("start_month"):
+                    filters.append({"field": "posted_at", "op": "gte", "value": f"{payload['start_month']}-01"})
+                if payload.get("end_month"):
+                    from calendar import monthrange
+                    year, month = map(int, str(payload["end_month"]).split("-"))
+                    filters.append({"field": "posted_at", "op": "lte",
+                                    "value": f"{year:04d}-{month:02d}-{monthrange(year, month)[1]:02d}T23:59:59.999999"})
+                dsl = {"source": "transactions", "filters": filters, "group_by": ["category"], "limit": 100}
+            else:
+                # Consumption statistics must retain their business scope even
+                # when the model supplies a syntactically valid DSL query.
+                dsl = {**dsl, "filters": [*dsl.get("filters", []),
+                                          {"field": "direction", "op": "eq", "value": "debit"}]}
             result = DslExecutor(self.database).run(user_id, dsl)
             return {"rows": result.rows, "query_hash": result.query_hash, "row_count": result.row_count}, "succeeded"
         if capability_id == "B02":
@@ -1437,8 +1477,11 @@ class CapabilityService:
                             job.status = "succeeded"
                         data["dispatched_count"] = int(data.get("dispatched_count", 0)) + 1
                         data["max_uses"] = int(data.get("max_uses", 1)) - 1
-                        if data["max_uses"] > 0:
-                            next_due = (datetime.fromisoformat(due) + timedelta(days=30)).date().isoformat()
+                        if data["max_uses"] > 0 and data.get('period', 'monthly') != 'once':
+                            first_job = job_session.scalar(select(ScheduledJob).where(
+                                ScheduledJob.schedule_id == str(data['schedule_id'])).order_by(ScheduledJob.period_index))
+                            next_due = next_scheduled_date(due, str(data.get('period', 'monthly')),
+                                                           first_job.due_date if first_job else due)
                             data["next_due"] = next_due
                             job_session.add(ScheduledJob(id=f"job_{uuid.uuid4().hex}", user_id=record.user_id,
                                                         schedule_id=str(data["schedule_id"]), due_date=next_due,

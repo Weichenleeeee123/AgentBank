@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import os
+from datetime import datetime
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -146,12 +147,32 @@ class LLMGateway:
         fallback: dict[str, Any] = {"intent": "unknown", "capability_id": None, "plan_template": None,
                     "slots": {}, "missing": [], "ambiguities": [], "references": [], "proposed_dag": [],
                     "suggested_next_action": "clarify", "source": "deterministic_fallback"}
-        result = self._call_role("planner", self.PLAN_PROMPT_VERSION, user_text, user_id,
+        # DLP retains opaque references so the model can understand a phone
+        # transfer without seeing or reconstructing a real phone number.
+        phone_pattern = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+        phones: dict[str, str] = {}
+        def phone_reference(match: re.Match[str]) -> str:
+            phone = match.group(0)
+            if phone not in phones:
+                phones[phone] = f"phone_ref_{len(phones) + 1}"
+            return phones[phone]
+        def tokenize(value: Any) -> Any:
+            if isinstance(value, str):
+                return phone_pattern.sub(phone_reference, value)
+            if isinstance(value, dict):
+                return {key: tokenize(child) for key, child in value.items()}
+            if isinstance(value, list):
+                return [tokenize(child) for child in value]
+            return value
+        model_text = str(tokenize(user_text))
+        model_context = tokenize(context or {})
+        result = self._call_role("planner", self.PLAN_PROMPT_VERSION, model_text, user_id,
                                  {"recent_user_messages": [redact_text(item) for item in (recent_user_messages or [])[-6:]],
-                                  "context": self._sanitize_context(context or {}),
+                                  "context": self._sanitize_context(model_context),
+                                  "phone_references": list(phones.values()),
                                   "capability_catalogue": self.capability_catalogue(),
                                   "plan_templates": {"birthday": {"description": "可信生日事件→资金预留→鲜花和蛋糕定时订单",
-                                                                   "slots": {"event_id": "string", "reserve_minor": "positive integer"},
+                                                                   "slots": {"event_id": "string", "reserve_minor": "positive integer", "items": "array of flower|cake; preserve the user's selection"},
                                                                    "required_slots": ["event_id", "reserve_minor"]},
                                                     "query_analysis_report": {"description": "查询→DSL分析→月报或年报",
                                                                    "slots": {"start_month": "YYYY-MM", "end_month": "YYYY-MM",
@@ -167,6 +188,16 @@ class LLMGateway:
                                  validator=self._validate_plan)
         if result is None:
             return fallback
+        reverse_phones = {token: phone for phone, token in phones.items()}
+        def restore(value: Any) -> Any:
+            if isinstance(value, str):
+                return reverse_phones.get(value, value)
+            if isinstance(value, dict):
+                return {key: restore(child) for key, child in value.items()}
+            if isinstance(value, list):
+                return [restore(child) for child in value]
+            return value
+        result = restore(result)
         capability_id = result.get("capability_id")
         plan_template = result.get("plan_template")
         slots = dict(result["slots"])
@@ -177,22 +208,63 @@ class LLMGateway:
                 PlanValidator.validate_proposal(proposed_dag)
             except DomainError:
                 return fallback
-        grounded = self._grounded_values(user_text, self._sanitize_context(context or {}))
-        monetary_sources = list(grounded)
-        from agentbank.text.parse import parse_amount_minor
+        safe_context = self._sanitize_context(context or {})
+        grounded = self._grounded_values(user_text, safe_context)
+        grounded.extend(phones)
+        grounded.extend(recent_user_messages or [])
+        monetary_sources: list[str] = []
+        from agentbank.text.parse import parse_amount_minor, parse_date_expression
         for source_text in grounded:
             for match in re.finditer(r"(?<![A-Za-z0-9_])([0-9]+(?:\.[0-9]{1,2})?|[零一二两三四五六七八九十百千万]+)\s*(?:元|块钱|块)", source_text):
                 try:
                     monetary_sources.append(str(parse_amount_minor(match.group(1))))
                 except Exception:
                     continue
+        # A normalized number is trusted only in a typed monetary field, never
+        # merely because the same digits occurred in a date or product ID.
+        def monetary_fields(value: Any) -> None:
+            if isinstance(value, dict):
+                for field, child in value.items():
+                    if field in {"amount_minor", "reserve_minor", "total_minor", "limit_minor"} and type(child) is int:
+                        monetary_sources.append(str(child))
+                    elif isinstance(child, (dict, list)):
+                        monetary_fields(child)
+            elif isinstance(value, list):
+                for child in value:
+                    monetary_fields(child)
+        monetary_fields(safe_context)
+        # The model identifies the source span. Code only converts that exact
+        # literal; it does not scan the sentence and choose its meaning.
+        normalized_sources: dict[str, list[str]] = {}
+        for reference in result.get("references", []):
+            field, span = reference.get("slot"), reference.get("text")
+            if not isinstance(field, str) or not isinstance(span, str) or not any(span in source for source in grounded):
+                continue
+            try:
+                if field in {"amount_minor", "reserve_minor", "total_minor", "limit_minor"}:
+                    if not re.search(r"(?:元|圆|块钱|块)$", span.strip()) and not any(span.strip() == source.strip() for source in [user_text, *(recent_user_messages or [])]):
+                        continue
+                    literal_minor = parse_amount_minor(span)
+                    if field in slots and slots[field] != literal_minor:
+                        slots.pop(field)
+                        missing.append(field)
+                    normalized_sources.setdefault(field, []).append(str(literal_minor))
+                elif field in {"next_due", "start_date", "end_date", "delivery_date", "dispatch_on"}:
+                    reference_time = datetime.fromisoformat(str(safe_context.get("business_date", datetime.now().date().isoformat())))
+                    normalized_sources.setdefault(field, []).append(parse_date_expression(span, reference_time).isoformat())
+                elif field in {"start_month", "end_month"}:
+                    month = re.fullmatch(r"(\d{4})(?:年|-)(\d{1,2})月?", span)
+                    if month:
+                        normalized_sources.setdefault(field, []).append(f"{int(month[1]):04d}-{int(month[2]):02d}")
+            except (DomainError, ValueError):
+                continue
         provenance_required = {"amount_minor", "reserve_minor", "total_minor", "max_uses", "days", "limit",
                                "recipient_name", "recipient_id", "phone", "alias", "product_id", "order_id", "card_id",
                                "product_ids", "participant_ids", "answers",
                                "subscription_id", "event_id", "bill_id", "plan_id", "start_date", "end_date",
                                "start_month", "end_month", "year", "next_due", "delivery_date", "dispatch_on"}
         for key in list(slots):
-            slot_sources = monetary_sources if key.endswith("_minor") else grounded
+            slot_sources = (monetary_sources if key.endswith("_minor") else grounded) + normalized_sources.get(key, [])
             if key in provenance_required and not self._value_is_grounded(slots[key], slot_sources):
                 slots.pop(key)
                 if key not in missing:
@@ -202,7 +274,7 @@ class LLMGateway:
         except DomainError:
             return fallback
         references = []
-        sources = self._grounded_values(user_text, self._sanitize_context(context or {}))
+        sources = grounded
         for item in result.get("references", []):
             if not isinstance(item, dict):
                 continue
@@ -212,6 +284,8 @@ class LLMGateway:
             if (isinstance(slot, str) and isinstance(source, str) and source in {"user", "current_user_message", "structured_field"}
                     and isinstance(text, str) and any(text in value for value in sources)):
                 references.append({"slot": slot, "source": source, "text": text})
+        if capability_id == "B01":
+            missing = [field for field in missing if field != "dsl"]
         return {"intent": result["intent"], "capability_id": capability_id,
                 "plan_template": plan_template,
                 "slots": slots, "missing": missing,
@@ -326,6 +400,7 @@ class LLMGateway:
     def capability_catalogue() -> dict[str, dict[str, Any]]:
         """Small, versioned capability contract exposed to the planner."""
         required = {"T01": {"recipient_name", "amount_minor"}, "T02": {"phone", "amount_minor"},
+                    "T04": {"recipient_name", "amount_minor", "next_due"},
                     "T03": {"amount_minor"}, "S02": {"subscription_id", "days"},
                     "W03": {"answers"}, "W04": {"product_id", "amount_minor"},
                     "W05": {"order_id"}, "C02": {"card_id", "limit_minor"}, "C03": {"card_id", "restriction"},
@@ -334,15 +409,15 @@ class LLMGateway:
         descriptions = {
             "Q01": "查询本人账户余额", "Q02": "查询本人交易明细", "T01": "向姓名匹配的收款人转账",
             "T02": "向手机号匹配的收款人转账", "T03": "向别名或姓名匹配的收款人转账",
-            "T04": "创建定期转账", "T05": "创建AA账单或分摊请求", "B01": "按明确条件分析本人交易",
+            "T04": "创建定时/周期转账，必须明确首次执行日期、金额和收款人", "T05": "创建AA账单或分摊请求", "B01": "消费分类统计，可直接指定起止月份，不需要用户编写DSL；仅统计支出",
             "B02": "检查本人交易异常", "B03": "生成月度财务报告", "B04": "生成年度财务报告",
             "W01": "查询理财产品推荐", "W02": "比较指定理财产品", "W03": "提交风险测评答案",
             "W04": "申购指定理财产品", "W05": "赎回指定理财订单", "W06": "查询本人理财持仓",
-            "C01": "申请银行卡", "C02": "修改银行卡额度", "C03": "修改银行卡限制",
-            "C04": "修改银行卡限制并验证身份", "C05": "报告银行卡丢失", "C06": "解除挂失",
+            "C01": "申请银行卡", "C02": "修改银行卡额度", "C03": "新增交易限制，例如禁止/限制网购；不能解除限制",
+            "C04": "解除/移除已有交易限制，例如恢复网购，需要强验证；不能新增限制", "C05": "报告银行卡丢失", "C06": "解除挂失",
             "C07": "冻结或解冻银行卡", "C08": "修改银行卡密码", "S01": "查询本人订阅",
             "S02": "设置订阅续费提醒", "S03": "取消订阅", "X01": "查询本人事件",
-            "X02": "预留资金", "X03": "创建商户订单", "X04": "创建商户订单", "X05": "冻结银行卡并验证身份",
+            "X02": "仅预留资金，不含订购或完整生日任务", "X03": "只创建鲜花订单（flower），不能用于蛋糕", "X04": "只创建蛋糕订单（cake），不能用于鲜花", "X05": "冻结银行卡并验证身份",
         }
         model_excluded = {"assurance", "device_token", "otp", "new_pin", "simulate_failure", "recipient_id"}
         integer_slots = {"amount_minor", "total_minor", "limit_minor", "max_uses", "days", "limit"}
@@ -363,7 +438,7 @@ class LLMGateway:
         capability_id = result.get("capability_id")
         plan_template = result.get("plan_template")
         template_slots = {
-            "birthday": {"event_id", "reserve_minor"},
+            "birthday": {"event_id", "reserve_minor", "items"},
             "query_analysis_report": {"start_month", "end_month", "group_by", "report", "category"},
             "investment_review": set(),
         }
@@ -389,6 +464,10 @@ class LLMGateway:
                                                            or isinstance(result["slots"]["reserve_minor"], bool)
                                                            or result["slots"]["reserve_minor"] <= 0):
                 raise ValueError("planner template budget invalid")
+            if plan_template == "birthday" and "items" in result["slots"]:
+                items = result["slots"]["items"]
+                if not isinstance(items, list) or not items or any(item not in {"flower", "cake"} for item in items) or len(set(items)) != len(items):
+                    raise ValueError("planner birthday items invalid")
             if plan_template == "query_analysis_report":
                 if (not isinstance(result["slots"].get("start_month"), str)
                         or not isinstance(result["slots"].get("end_month"), str)
@@ -456,7 +535,8 @@ class LLMGateway:
                 return
             if field in provenance_fields:
                 candidate = str(value)
-                if not candidate or not any(candidate in str(source) for source in grounded_sources):
+                field_sources = monetary_sources if field.endswith("_minor") else grounded_sources
+                if not candidate or not any(candidate in str(source) for source in field_sources):
                     raise DomainError("PLAN_ARGUMENT_UNGROUNDED")
 
         for node in nodes:
@@ -475,6 +555,8 @@ class LLMGateway:
     @staticmethod
     def _sanitize_context(value: Any) -> Any:
         allowed = {"parsed_intent", "slots", "exploration", "step", "intent", "feedback", "observation", "status",
+                   "business_date", "cards", "products", "subscriptions", "payees", "card_count", "event_type", "event_count", "plan_template", "items",
+                   "period", "restriction", "action", "product_ids", "answers", "participant_ids",
                    "pending_intent", "prepared", "references", "missing", "slot", "value", "source", "text",
                    "event_id", "reserve_minor",
                    "capability_id", "available_minor", "ledger_balance_minor", "currency", "as_of",
@@ -514,7 +596,9 @@ class LLMGateway:
         candidate = str(value).strip()
         if not candidate:
             return False
-        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(candidate)}(?![A-Za-z0-9_])")
+        left = r"(?<![A-Za-z0-9_])" if re.match(r"[A-Za-z0-9_]", candidate[0]) else ""
+        right = r"(?![A-Za-z0-9_])" if re.match(r"[A-Za-z0-9_]", candidate[-1]) else ""
+        pattern = re.compile(left + re.escape(candidate) + right)
         return any(pattern.search(source) is not None for source in sources)
 
     @staticmethod

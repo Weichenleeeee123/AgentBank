@@ -26,6 +26,8 @@ test('PIN preparation exposes confirmation and receipt, then MFA then success',a
 test('new identical messages have separate IDs',async()=>{const h=harness();await h.run(`send('查余额')`);await h.run(`send('查余额')`);const requests=h.calls.filter(c=>c.path.includes('/messages'));assert.ok(JSON.parse(requests[0].options.body).message_id);assert.notEqual(JSON.parse(requests[0].options.body).message_id,JSON.parse(requests[1].options.body).message_id);});
 test('ordinary nested facts render structured labels without raw JSON or secrets',()=>{const h=harness();h.run(`addBubble('result','卡片',[],{card:{status:'frozen',limit_minor:1200,pin:'1234'}})`);const text=h.get('messages').text;assert.match(text,/已冻结/);assert.match(text,/¥12\.00/);assert.doesNotMatch(text,/[{}]|1234/);});
 
+test('customer result cards hide execution internals and translate authorization',()=>{const h=harness();h.run(`addBubble('result','完成',[],{plan_id:'plan-internal',capability_id:'T01',assurance:'confirm',transfer_result:{status:'succeeded',ledger_entry_ids:['ledger-internal']}})`);const text=h.get('messages').text;assert.doesNotMatch(text,/plan-internal|ledger-internal|ledger_entry_ids|T01|confirm/);assert.match(text,/用户确认|已完成/);});
+
 test('PIN submit chooses loaded card and offers confirmation instead of false success',async()=>{
  const h=harness();h.get('newPin').value='2468';h.get('confirmPin').value='2468';h.get('pinCard').value='card-user2';
  h.run(`state.cards=[{id:'card-user2'}]`);

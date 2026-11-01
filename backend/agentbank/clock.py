@@ -50,3 +50,16 @@ class BusinessClock:
 
 def month_end(value: date) -> date:
     return value.replace(day=monthrange(value.year, value.month)[1])
+
+
+def next_scheduled_date(due: str, period: str, anchor: str) -> str:
+    current, first = date.fromisoformat(due), date.fromisoformat(anchor)
+    if period in {"daily", "weekly"}:
+        return (current + timedelta(days=1 if period == "daily" else 7)).isoformat()
+    if period == "yearly":
+        year, month = current.year + 1, first.month
+    elif period == "monthly":
+        year, month = current.year + (current.month == 12), current.month % 12 + 1
+    else:
+        raise ValueError("SCHEDULE_PERIOD_INVALID")
+    return date(year, month, min(first.day, monthrange(year, month)[1])).isoformat()

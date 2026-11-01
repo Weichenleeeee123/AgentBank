@@ -4,6 +4,8 @@
 
 核心原则：**模型只负责提议，执行与否由代码裁决，最终由用户在带外确认。**
 
+在线自然语言理解由 LLM 负责，输出结构化业务动作、槽位和原文依据；代码校验来源、单位、日期、权限和业务终态，不再让正则解析覆盖模型判断。手机号以不透明引用交给模型，复杂操作无法可靠理解时追问。保留的离线解析用于确定性评测与受限降级。
+
 ## 文档
 
 | 文件 | 内容 |
@@ -76,3 +78,5 @@ POST /v1/capabilities/Q01
 Compose 配置保留为可选部署路径，当前本地候选不以 Docker 或公网可用为完成依据。为 `PUBLIC_SESSION_SECRET`、`PUBLIC_AUDIT_SECRET`、`EVAL_SESSION_SECRET`、`EVAL_AUDIT_SECRET`、`EVAL_ADMIN_TOKEN`、`EVAL_STAFF_TOKEN` 分别生成独立随机值，并通过环境变量或私有环境文件提供；`.env.example` 只列变量名，不提供可用于运行的默认密钥。
 
 在准备验证 Docker 时，先运行 `docker compose --env-file .env -f deploy/docker-compose.yml config --quiet`，避免输出展开后的凭证；Docker daemon 可用后再单独执行 build/start/health 验证。公共实例 8000、评测实例 8001，使用独立数据卷和审计密钥；公共实例禁用管理员与坐席令牌，评测自测要求 `X-Admin-Token`，坐席要求独立的 `X-Staff-Token`。目前未执行本轮容器构建、公网 HTTPS、真实飞书或真实银行验收。
+
+升级兼容说明：本轮将通用业务确认页内容绑定到确认哈希。升级前尚未确认的旧凭证可能校验失败，需要重新发起并核对确认；已执行业务不受影响。

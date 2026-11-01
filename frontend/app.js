@@ -2,6 +2,8 @@ import {uppercaseMoney, displayValue, money, resultKind} from './presentation.js
 const state = {token: null, userId: null, conversationId: crypto.randomUUID(), cards: [], generation: 0};
 const $ = id => document.getElementById(id);
 const secretKey = /pin|otp|password|secret|token|验证码|密码/i;
+const internalFields = new Set(['plan_id','capability_id','ledger_entry_ids','query_hash','operation_template',
+  'mandate_id','receipt_id','display_hash','action_hash','idempotency_key','trace_id']);
 
 function node(tag, text = "", className = "") {
   const element = document.createElement(tag);
@@ -21,7 +23,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     if (value === undefined || value === null || secretKey.test(label)) return;
     if (typeof value === "object") {
       for (const [key, child] of Object.entries(value)) {
-        if (["receipt_id", "display_hash", "action_hash", "payload"].includes(key) || secretKey.test(key)) continue;
+        if (internalFields.has(key) || key === 'payload' || secretKey.test(key)) continue;
         appendFact(`${label} · ${factLabels[key] || key}`, child, currency, key.endsWith("_minor"));
       }
       return;
@@ -47,7 +49,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     }
   }
   for (const [key, value] of Object.entries(data || {})) {
-    if (["payload", "display", "transactions", "receipt_id", "display_hash", "action_hash", "direct_form"].includes(key)) continue;
+    if (internalFields.has(key) || ["payload", "display", "transactions", "direct_form", "rows"].includes(key)) continue;
     appendFact(factLabels[key] || key, value, "", key.endsWith("_minor"));
   }
   if (Array.isArray(data?.transactions)) appendTransactions(bubble, data.transactions);
@@ -114,7 +116,8 @@ const factLabels = {available_minor: "可用余额", ledger_balance_minor: "账�
   capability_id: "服务", account_id: "账户", record_id: "记录", status: "状态", masked_name: "收款人",
   phone_tail: "手机号尾号", is_new: "新收款人", tier_display: "风险级别", assurance: "验证方式",
   card: "卡片", cards: "卡片", limit_minor: "限额", transfer_result: "转账结果", amount_minor: "金额", total_minor: "总额",
-  operation_id: "操作编号"};
+  operation_id: "操作编号", row_count: "统计分组数", next_due: "首次执行日期", max_uses: "剩余执行次数",
+  period: "执行周期", delivery_date: "送达日期", dispatch_on: "下单日期", expected_settlement_at: "预计到账时间"};
 
 function appendTransactions(parent, transactions) {
   const list = node("div", "", "transaction-list");

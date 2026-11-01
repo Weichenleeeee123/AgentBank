@@ -30,6 +30,20 @@ class IntentParser:
     )
     _phone = re.compile(r"(?<!\d)(1[3-9]\d{9})(?!\d)")
 
+    @classmethod
+    def find_amount(cls, text: str) -> re.Match[str] | None:
+        # Mask non-monetary numbers before looking for a currency amount or a
+        # colloquial bare amount. A date/product number must never win just
+        # because it appeared before the actual amount in the sentence.
+        value = cls._phone.sub(" ", text)
+        value = re.sub(r"[A-Za-z][A-Za-z0-9_-]*", " ", value)
+        value = re.sub(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", " ", value)
+        value = re.sub(r"[0-9零〇一二两三四五六七八九十]+\s*(?:年|月|日|号|天|次|期)", " ", value)
+        explicit = re.search(
+            r"(?P<amount>[0-9]+(?:\.[0-9]{1,2})?|[零〇一二两三四五六七八九十百千万亿]+)"
+            r"\s*(?:元|圆|块钱|块)", value)
+        return explicit or cls._amount.search(value)
+
     def parse(self, text: str) -> ParsedIntent:
         normalized = text.strip()
         if any(word in normalized for word in ("余额", "有多少钱", "账户多少钱")):
@@ -66,7 +80,7 @@ class IntentParser:
             return ParsedIntent("scheduled_transfer", "T04", {**scheduled_slots, "period": "monthly"},
                                 transfer.missing, transfer.ambiguities)
         if any(word in normalized for word in ("AA", "分摊", "聚餐收款", "一起吃饭")):
-            amount = self._amount.search(normalized)
+            amount = self.find_amount(normalized)
             slots: dict[str, Any] = {}
             missing: list[str] = []
             if amount:
@@ -99,7 +113,7 @@ class IntentParser:
         if any(word in normalized for word in ("申请卡", "申请一张卡", "虚拟卡", "实体卡")):
             return ParsedIntent("card_apply", "C01", {"virtual": "实体" not in normalized}, [], [])
         if any(word in normalized for word in ("提高额度", "调高额度", "降低额度", "调低额度", "额度")):
-            amount = self._amount.search(normalized)
+            amount = self.find_amount(normalized)
             limit_slots = {"limit_minor": parse_amount_minor(amount.group("amount"))} if amount else {}
             return ParsedIntent("card_limit", "C02", {"card_id": "card_001", **limit_slots}, ["limit_minor"] if not limit_slots else [], [])
         if any(word in normalized for word in ("限制网购", "限制交易", "禁止网购")):
@@ -121,7 +135,7 @@ class IntentParser:
         if any(word in normalized for word in ("申购", "买理财")):
             subscribe_slots: dict[str, Any] = {}
             product = re.search(r"R[1-5]", normalized, re.IGNORECASE)
-            amount = self._amount.search(normalized)
+            amount = self.find_amount(normalized)
             if product:
                 subscribe_slots["product_id"] = f"product_{product.group(0).upper()}"
             if amount:
@@ -141,7 +155,7 @@ class IntentParser:
         return ParsedIntent("unknown", None, {}, [], ["intent"])
 
     def _reserve(self, text: str) -> ParsedIntent:
-        amount = self._amount.search(text)
+        amount = self.find_amount(text)
         slots = {"amount_minor": parse_amount_minor(amount.group("amount"))} if amount else {}
         return ParsedIntent("funds_reserve", "X02", slots, [] if amount else ["amount_minor"], [])
 
@@ -149,7 +163,7 @@ class IntentParser:
         # Remove a recognized phone number before scanning amounts. Otherwise the
         # amount regex can consume the phone prefix and produce a huge transfer.
         amount_text = self._phone.sub("", text)
-        amount_match = self._amount.search(amount_text)
+        amount_match = self.find_amount(amount_text)
         slots: dict[str, Any] = {}
         missing: list[str] = []
         if amount_match:

@@ -58,6 +58,12 @@ def parse_amount_minor(text: str) -> int:
 def parse_date_expression(expression: str, reference: datetime) -> date:
     value = expression.strip()
     current = reference.date()
+    literal = re.fullmatch(r"(\d{4})(?:年|[-/])(\d{1,2})(?:月|[-/])(\d{1,2})[日号]?", value)
+    if literal:
+        try:
+            return date(*(int(part) for part in literal.groups()))
+        except ValueError as error:
+            raise DomainError("INVALID_DATE") from error
     if value in {"今天", "今日"}:
         return current
     if value == "明天":
