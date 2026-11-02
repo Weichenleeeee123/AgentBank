@@ -27,6 +27,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     kind === "mfa" ? "需要强验证" : kind === "error" ? "处理失败" : kind === "review" ? "行动前审查" : "AgentBank";
   bubble.append(node("h3", title), node("p", text || ""));
 
+  let factGroup = null;
   const seen = new Set();
   const appendFact = (label, value, currency = "", minorUnits = label.endsWith("_minor")) => {
     if (value === undefined || value === null || secretKey.test(label)) return;
@@ -42,9 +43,10 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
       : displayValue(value);
     if (!rendered || seen.has(`${label}:${rendered}`)) return;
     seen.add(`${label}:${rendered}`);
+    if (!factGroup) factGroup = node("dl", "", "facts-grid");
     const row = node("div", "", "fact");
-    row.append(node("span", label || "事实"), node("strong", rendered));
-    bubble.append(row);
+    row.append(node("dt", label || "事实"), node("dd", rendered));
+    factGroup.append(row);
   };
   if (data?.pre_action_review) {
     const review = data.pre_action_review;
@@ -54,14 +56,16 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     subject.append(node("strong", review.subject?.name || review.subject?.query || "未确认主体"));
     subject.append(node("span", review.decision === "pass" ? "可继续授权" : "暂不办理"));
     panel.append(subject);
+    const credentials = node("div", "", "review-credentials");
     if (review.registration) {
       const registration = node("div", "", "review-line");
       registration.append(node("strong", "登记信息"), node("span", review.registration.detail || "未覆盖"));
-      panel.append(registration);
+      credentials.append(registration);
     }
     const qualification = node("div", "", "review-line");
     qualification.append(node("strong", "资质核验"), node("span", review.qualification?.detail || "未覆盖"));
-    panel.append(qualification);
+    credentials.append(qualification);
+    panel.append(credentials);
     const signals = node("div", "", "review-signals");
     for (const signal of review.signals || []) {
       const item = node("div", "", "review-signal");
@@ -69,18 +73,23 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
       signals.append(item);
     }
     panel.append(signals);
-    const addList = (title, items, className) => {
+    const addList = (title, items, className, parent = panel) => {
       if (!items?.length) return;
       const group = node("div", "", `review-list ${className}`);
       group.append(node("strong", title));
       const list = node("ul");
       for (const value of items) list.append(node("li", value));
       group.append(list);
-      panel.append(group);
+      parent.append(group);
     };
     addList("待核实信息", review.gaps, "review-gaps");
     addList("建议确认", review.questions, "review-questions");
-    addList("本地样本来源", review.evidence_sources, "review-sources");
+    if (review.evidence_sources?.length) {
+      const sources = node("details", "", "review-source-details");
+      sources.append(node("summary", "查看本地样本来源"));
+      addList("本地样本来源", review.evidence_sources, "review-sources", sources);
+      panel.append(sources);
+    }
     if (review.product) {
       const product = node("div", "", "review-product");
       product.append(node("strong", review.product.name || "产品信息"));
@@ -105,6 +114,7 @@ function addBubble(kind, text, fragments = [], data = {}, recordId = null, displ
     if (internalFields.has(key) || ["payload", "display", "transactions", "direct_form", "rows", "questionnaire", "invalidated_record_ids", "answers", "questionnaire_version"].includes(key)) continue;
     appendFact(factLabels[key] || key, value, "", key.endsWith("_minor"));
   }
+  if (factGroup?.children.length) bubble.append(factGroup);
   if (Array.isArray(data?.transactions)) appendTransactions(bubble, data.transactions);
   if (data?.questionnaire) bubble.append(questionnaireForm(data.questionnaire));
 
@@ -229,15 +239,20 @@ function appendTransactions(parent, transactions) {
   const list = node("div", "", "transaction-list");
   for (const item of transactions) {
     const row = node("article", "", "transaction-row");
-    row.append(node("strong", item.merchant || "交易"), node("span", item.posted_at || ""));
+    const heading = node("div", "", "transaction-heading");
+    heading.append(node("strong", item.merchant || "交易"));
+    if (item.amount_minor !== undefined && item.amount_minor !== null) {
+      heading.append(node("strong", `¥${(Number(item.amount_minor) / 100).toFixed(2)}`, "transaction-amount"));
+    }
+    row.append(heading);
+    if (item.posted_at) row.append(node("time", item.posted_at, "transaction-date"));
     const details = node("div", "", "transaction-details");
-    for (const key of ["category", "direction", "amount_minor"]) {
+    for (const key of ["category", "direction"]) {
       const value = item[key];
       if (value === undefined || value === null) continue;
-      const rendered = key === "amount_minor" ? `¥${(Number(value) / 100).toFixed(2)}` : String(value);
-      details.append(node("span", `${transactionLabels[key]}：${rendered}`));
+      details.append(node("span", `${transactionLabels[key]}：${String(value)}`));
     }
-    row.append(details);
+    if (details.children.length) row.append(details);
     list.append(row);
   }
   if (!transactions.length) list.append(node("p", "没有符合条件的交易。", "empty-state"));

@@ -25,7 +25,29 @@ test('status fragment chooses status ahead of empty numeric fallback',()=>{const
 test('PIN preparation exposes confirmation and receipt, then MFA then success',async()=>{const h=harness();h.run(`showDirectResult({status:'awaiting_confirmation',record_id:'pin1',capability_id:'C08',data:{receipt_id:'receipt',display_hash:'hash'}},'PIN 已修改')`);const b=h.get('messages').children.at(-1);assert.match(b.text,/确认执行/);const button=b.children.find(c=>c.className==='card-actions').children[0];await button.onclick();const req=h.calls.at(-1);assert.equal(req.path,'/v1/capability-records/pin1/confirm');assert.deepEqual(JSON.parse(req.options.body),{receipt_id:'receipt',display_hash:'hash'});});
 test('new identical messages have separate IDs',async()=>{const h=harness();await h.run(`send('查余额')`);await h.run(`send('查余额')`);const requests=h.calls.filter(c=>c.path.includes('/messages'));assert.ok(JSON.parse(requests[0].options.body).message_id);assert.notEqual(JSON.parse(requests[0].options.body).message_id,JSON.parse(requests[1].options.body).message_id);});
 test('ordinary nested facts render structured labels without raw JSON or secrets',()=>{const h=harness();h.run(`addBubble('result','卡片',[],{card:{status:'frozen',limit_minor:1200,pin:'1234'}})`);const text=h.get('messages').text;assert.match(text,/已冻结/);assert.match(text,/¥12\.00/);assert.doesNotMatch(text,/[{}]|1234/);});
-test('action review card renders qualification, four signals, gaps, and questions',()=>{const h=harness();h.run(`addBubble('confirmation','请核对',[],{pre_action_review:{decision:'pass',subject:{name:'星河模拟理财有限公司'},qualification:{detail:'模拟名录命中'},signals:[{label:'风险',value:'未覆盖'},{label:'财务',value:'有限'},{label:'信用',value:'已核对'},{label:'口碑',value:'未覆盖'}],gaps:['缺少实时资料'],questions:['核实产品编码'],notice:'本地模拟数据'}},'review-1')`);const text=h.get('messages').text;for(const phrase of ['行动前审查','星河模拟理财有限公司','资质核验','风险','财务','信用','口碑','待核实信息','建议确认','本地模拟数据'])assert.ok(text.includes(phrase),phrase);assert.doesNotMatch(text,/source_mode|local_simulation/);});
+test('action review keeps decision details visible and groups sample sources in disclosure',()=>{
+ const h=harness();h.run(`addBubble('confirmation','请核对',[],{pre_action_review:{decision:'block',subject:{name:'星河模拟理财有限公司'},registration:{detail:'本地名录登记'},qualification:{detail:'模拟名录命中'},signals:[{label:'风险',value:'未覆盖'},{label:'财务',value:'有限'},{label:'信用',value:'已核对'},{label:'口碑',value:'未覆盖'}],gaps:['缺少实时资料'],questions:['核实产品编码'],evidence_sources:['来源 A'],product:{name:'稳健产品',risk_level:'R2',term_days:30,redemption_days:2},notice:'本地模拟数据'}},'review-1')`);
+ const card=h.get('messages').children.at(-1),panel=card.children.find(child=>child.className?.startsWith('pre-action-review'));
+ const text=h.get('messages').text;for(const phrase of ['行动前审查','星河模拟理财有限公司','资质核验','风险','财务','信用','口碑','待核实信息','建议确认','本地模拟数据','稳健产品','来源 A'])assert.ok(text.includes(phrase),phrase);
+ assert.ok(panel.children.some(child=>child.className?.includes('review-gaps')));
+ assert.ok(panel.children.some(child=>child.className?.includes('review-questions')));
+ const sources=panel.children.find(child=>child.className==='review-source-details');assert.equal(sources.tagName,'details');
+ assert.match(sources.children[0].text,/查看本地样本来源/);assert.ok(sources.children.some(child=>child.className?.includes('review-sources')));
+ assert.doesNotMatch(text,/source_mode|local_simulation/);
+});
+
+test('ordinary result facts use semantic label and value groups',()=>{
+ const h=harness();h.run(`addBubble('result','余额',[{label:'可用余额',value_minor:123456,currency:'CNY'}])`);
+ const card=h.get('messages').children.at(-1),group=card.children.find(child=>child.className==='facts-grid');
+ assert.equal(group.tagName,'dl');assert.equal(group.children[0].children[0].tagName,'dt');assert.equal(group.children[0].children[1].tagName,'dd');
+});
+
+test('transaction rows emphasize merchant and amount before date and metadata',()=>{
+ const h=harness();h.run(`addBubble('result','交易记录',[],{transactions:[{merchant:'模拟超市',posted_at:'2026-11-02',category:'购物',direction:'支出',amount_minor:1280}]})`);
+ const card=h.get('messages').children.at(-1),list=card.children.find(child=>child.className==='transaction-list'),row=list.children[0];
+ assert.match(row.children[0].text,/模拟超市/);assert.match(row.children[0].text,/¥12\.80/);
+ assert.equal(row.children[1].tagName,'time');assert.match(row.children[2].text,/购物/);assert.match(row.children[2].text,/支出/);
+});
 
 test('customer result cards hide execution internals and translate authorization',()=>{const h=harness();h.run(`addBubble('result','完成',[],{plan_id:'plan-internal',capability_id:'T01',assurance:'confirm',transfer_result:{status:'succeeded',ledger_entry_ids:['ledger-internal']}})`);const text=h.get('messages').text;assert.doesNotMatch(text,/plan-internal|ledger-internal|ledger_entry_ids|T01|confirm/);assert.match(text,/用户确认|已完成/);});
 
