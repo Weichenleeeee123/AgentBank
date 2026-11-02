@@ -14,17 +14,19 @@ The banking assistant renders facts, transaction history, and pre-action due dil
 
 ## Scope
 
-Update the conversation result cards in the main banking app (`frontend/app.js` and `frontend/styles.css`). Focus on ordinary facts, transaction rows, confirmation/result status, and the pre-action review panel. Do not redesign the service forms, notifications, plan page, staff page, or simulated IM page.
+Update business result cards across the main banking app, simulated IM, plan progress, and staff handoff views. Keep the service forms, notification feed, device flow, and evaluation output outside this card redesign.
 
 ## Proposed UI
 
 - Use a consistent card hierarchy: concise heading/status, primary result, grouped supporting facts, then a visually distinct action area where applicable.
 - Render ordinary facts as compact label/value groups with predictable alignment and spacing. Preserve wrapping for long values and values on mobile.
 - Render transactions as distinct rows with merchant and date first, followed by category, direction, and amount in a scan-friendly arrangement.
+- Use the same semantic label/value layout for private IM results and plan-node facts, while preserving group-chat redaction.
 - Structure pre-action review as: decision and subject; registration and qualification; the four review signals; product details when present; always-visible gaps and suggested questions; simulation/source notice.
 - Keep blocked decisions, uncovered signals, evidence gaps, and authorization controls visible. Supporting evidence may be progressively disclosed only if no decision-relevant gap or status is hidden.
 - Keep product risk level, term, and redemption details visible when present; only the sample-source list may be collapsed behind a descriptive disclosure control.
 - Use a responsive grid for signal summaries on wide cards and a single-column layout when space is constrained.
+- Show staff metrics as compact label/value tiles and handoff cases as a short summary with the full system context behind a disclosure control.
 - Keep the current light banking theme and reuse existing CSS variables. Avoid adding a UI dependency.
 
 ## Behavior and Data
@@ -41,10 +43,10 @@ The change is presentational. It must not alter API requests, authorization sema
 
 ## Verification
 
-- Extend the focused frontend tests to verify the review card's information grouping, always-visible blocked/gap content, and availability of supporting details.
+- Extend focused frontend tests to verify business-card grouping, always-visible blocked/gap content, group-chat redaction, and availability of supporting details.
 - Keep existing rendering, sanitization, authorization, and transaction tests passing.
 - Run the frontend test suite and the repository's relevant static checks.
-- Inspect the main app at desktop and mobile widths if a local server/browser is available.
+- Inspect the main app and available companion views at desktop and mobile widths if a local server/browser is available.
 
 ## Non-Goals
 

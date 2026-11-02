@@ -37,13 +37,16 @@ function render(response, group) {
   const card=bubble(response.kind,response.message || '请求已处理');
   // Group responses are server-redacted. Do not render any structured facts in group mode.
   if (!group) {
+    let factGroup = null;
     const fact=(label,value,minor=false,currency='CNY')=>{
       if(value==null || secret.test(label)) return;
       if(typeof value==='object') {for(const [key,child] of Object.entries(value)) if(!secret.test(key) && key!=='payload') fact(`${label} · ${key}`,child,key.endsWith('_minor'));return;}
-      const row=el('div');row.className='fact';row.append(el('span',label),el('strong',minor?`${money(value,currency)}${currency==='CNY'?`（${uppercaseMoney(Number(value))}）`:''}`:displayValue(value)));card.append(row);
+      if(!factGroup) {factGroup=el('dl');factGroup.className='facts-grid';}
+      const row=el('div');row.className='fact';row.append(el('dt',label),el('dd',minor?`${money(value,currency)}${currency==='CNY'?`（${uppercaseMoney(Number(value))}）`:''}`:displayValue(value)));factGroup.append(row);
     };
     for(const f of response.fragments || []) fact(f.label || '详情',f.status ?? f.text ?? f.value_minor,f.status==null&&f.text==null&&f.value_minor!=null,f.currency || 'CNY');
     for(const f of response.data?.display || []) fact(f.label,f.value);
+    if(factGroup?.children.length) card.append(factGroup);
   }
   const link=response.app_deep_link || response.data?.app_deep_link;
   if (link) {
@@ -52,10 +55,11 @@ function render(response, group) {
   }
   const nonce=response.callback_nonce || response.nonce || response.data?.callback_nonce || response.data?.nonce;
   if(!group && nonce && ['confirmation','plan_confirmation'].includes(response.kind) && response.data?.assurance !== 'mfa') {
+    const actions=el('div');actions.className='card-actions';
     const button=el('button','确认以上操作'); const eventId=crypto.randomUUID(), generation=state.generation;
     button.onclick=async()=>{if(generation!==state.generation)return;button.disabled=true;try{const response=await api('callbacks',{event_id:eventId,nonce,action:'confirm',group:false});if(generation!==state.generation)return;render(response,false);}catch(error){if(error.name==='StaleSessionError')return;status(error.message);button.disabled=false;}};
     if (response.record_id) authorizationControls.set(response.record_id, button);
-    card.append(button);
+    actions.append(button);card.append(actions);
   }
 }
 $('connect').onclick=async()=>{

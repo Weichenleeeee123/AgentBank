@@ -233,7 +233,12 @@ const factLabels = {level: "风险等级", score: "测评分数", expires_on: "�
   phone_tail: "手机号尾号", is_new: "新收款人", tier_display: "风险级别", assurance: "验证方式",
   card: "卡片", cards: "卡片", limit_minor: "限额", transfer_result: "转账结果", amount_minor: "金额", total_minor: "总额",
   operation_id: "操作编号", row_count: "统计分组数", next_due: "首次执行日期", max_uses: "剩余执行次数",
-  period: "执行周期", delivery_date: "送达日期", dispatch_on: "下单日期", expected_settlement_at: "预计到账时间"};
+  period: "执行周期", delivery_date: "送达日期", dispatch_on: "下单日期", expected_settlement_at: "预计到账时间",
+  merchant: "商户", category: "类别", direction: "类型", posted_at: "日期", transaction_id: "交易编号",
+  product_id: "理财产品", product_name: "产品名称", issuer: "发行方", issuer_name: "发行方", risk_level: "风险等级",
+  term_days: "期限（天）", redemption_days: "赎回天数", fee_bps: "费率（基点）", yield_bps: "收益率（基点）",
+  subscription_id: "订阅", next_charge_at: "下次扣款日期", reminder_id: "提醒编号", card_id: "卡片",
+  masked_number: "卡号", card_type: "卡片类型", days: "提前提醒天数", charge_date: "扣款日期"};
 
 function appendTransactions(parent, transactions) {
   const list = node("div", "", "transaction-list");

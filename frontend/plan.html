@@ -3,12 +3,19 @@ import {displayValue} from "/app/presentation.js";
 const $ = id => document.getElementById(id);
 const text = (tag, value) => { const el = document.createElement(tag); el.textContent = value ?? ""; return el; };
 const headers = () => ({Authorization: `Bearer ${localStorage.agentbank_token || ""}`});
+const statusTones = new Map([["succeeded", "success"], ["failed", "danger"], ["rejected", "danger"],
+  ["cancelled", "neutral"], ["awaiting_confirmation", "attention"], ["awaiting_mfa", "attention"],
+  ["paused", "attention"], ["waiting_trigger", "attention"], ["partially_completed", "attention"],
+  ["running", "active"], ["scheduled", "active"]]);
+const statusTone = status => statusTones.get(status) || "neutral";
 let liveStream;
 function renderGraph(data) {
   $("graph").replaceChildren();
   const controls = document.createElement("article");
-  controls.className = "bubble";
+  controls.className = `bubble plan-controls plan-status-${statusTone(data.status)}`;
   controls.append(text("h2", `计划状态：${displayValue(data.status)}`));
+  const actions = document.createElement("div");
+  actions.className = "card-actions";
   for (const [label, suffix] of [["暂停", "/pause"], ["继续", "/resume"], ["取消计划", "/cancel"]]) {
     const button = text("button", label);
     button.type = "button";
@@ -25,17 +32,20 @@ function renderGraph(data) {
         $("load").requestSubmit();
       } catch (error) { $("error").textContent = error.message; button.disabled = false; }
     };
-    controls.append(button);
+    actions.append(button);
   }
+  controls.append(actions);
   $("graph").append(controls);
   for (const item of data.nodes || []) {
-    const card = document.createElement("article"); card.className = "bubble";
+    const card = document.createElement("article"); card.className = `bubble plan-node-card plan-status-${statusTone(item.status)}`;
     card.append(text("h3", `${item.logical_id} · ${displayValue(item.status)}`));
+    const facts = document.createElement("dl"); facts.className = "facts-grid";
     for (const [label, value] of [["工具", item.tool], ["授权", item.authorization]]) {
       const row = document.createElement("div"); row.className = "fact";
-      row.append(text("span", label), text("strong", value)); card.append(row);
+      row.append(text("dt", label), text("dd", value || "未记录")); facts.append(row);
     }
-    const details = document.createElement("details");
+    card.append(facts);
+    const details = document.createElement("details"); details.className = "plan-node-evidence";
     details.append(text("summary", "决策与执行凭证"));
     details.append(text("pre", JSON.stringify({decision_chain: item.decision_chain || [], evidence: item.evidence || {}}, null, 2)));
     card.append(details);

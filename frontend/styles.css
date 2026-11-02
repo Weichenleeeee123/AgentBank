@@ -79,7 +79,12 @@ h2 { color: var(--ink); }
 .bubble.user { align-self: flex-end; border-color: #b9d2f8; background: var(--surface-blue); box-shadow: none; }
 .bubble.error, .bubble.risk { border-color: #efcaca; background: #fff8f8; }
 .bubble.review { border-color: #e5c98f; background: #fffdf7; }
+.bubble.confirmation, .bubble.plan_confirmation, .bubble.mfa { border-color: #e7d5b2; background: #fffdf8; }
 .bubble h3 { margin: 0 0 9px; color: var(--blue); font-size: 14px; }
+.bubble.result h3 { color: var(--teal); }
+.bubble.pending h3 { color: var(--muted); }
+.bubble.review h3, .bubble.confirmation h3, .bubble.plan_confirmation h3, .bubble.mfa h3 { color: #85520c; }
+.bubble.error h3, .bubble.risk h3 { color: #a33838; }
 .bubble p { margin: 7px 0 0; line-height: 1.55; white-space: pre-wrap; }
 .facts-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; margin: 14px 0 0; border-top: 1px solid var(--line); }
 .fact { min-width: 0; display: grid; gap: 4px; align-content: start; padding: 11px 0; border-bottom: 1px solid var(--line); }
@@ -134,16 +139,41 @@ h2 { color: var(--ink); }
 .review-list > strong { color: var(--ink); }
 .review-list ul { display: grid; gap: 5px; margin: 5px 0 0; padding-left: 18px; color: var(--muted); line-height: 1.5; }
 .review-notice { margin-top: 12px !important; color: var(--muted); font-size: 11px; }
+.bubble details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.bubble details summary { min-height: 44px; display: flex; align-items: center; color: var(--blue); cursor: pointer; font-size: 12px; font-weight: 750; }
+.bubble details summary:focus-visible { outline: 3px solid rgba(37, 99, 217, .26); outline-offset: 2px; }
 .review-source-details { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
-.review-source-details summary { min-height: 44px; display: flex; align-items: center; color: var(--blue); cursor: pointer; font-size: 12px; font-weight: 750; }
 .review-source-details summary:focus-visible { outline: 3px solid rgba(37, 99, 217, .26); outline-offset: 2px; }
 pre { max-width: 100%; overflow: auto; white-space: pre-wrap; color: var(--muted); }
+.bubble details pre { margin: 0 0 10px; padding: 12px; border-radius: 6px; background: var(--surface); overflow-wrap: anywhere; }
+.plan-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; }
+.plan-controls h2 { margin: 0; font-size: 17px; }
+.plan-controls .card-actions { margin-top: 0; }
+.plan-node-card h3 { overflow-wrap: anywhere; }
+.plan-status-success h2, .plan-status-success h3 { color: var(--teal); }
+.plan-status-danger h2, .plan-status-danger h3 { color: #a33838; }
+.plan-status-attention h2, .plan-status-attention h3 { color: #85520c; }
+.plan-node-card .facts-grid { margin-top: 8px; }
+.plan-node-card .fact { overflow-wrap: anywhere; }
+.plan-node-evidence summary { overflow-wrap: anywhere; }
 .plan-page .messages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
 .plan-page .messages > .bubble:first-child { grid-column: 1 / -1; max-width: none; }
 .plan-page .bubble { max-width: none; }
 .im-page .shell > p { max-width: 780px; color: var(--muted); line-height: 1.6; }
 .staff-page h2 { margin-top: 28px; font-size: 20px; }
-.staff-page #metrics, .staff-page #cases { display: grid; gap: 14px; }
+.staff-page #metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.staff-page #cases { display: grid; gap: 14px; margin-top: 16px; }
+.metric-card { min-width: 0; display: grid; align-content: start; gap: 7px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); }
+.metric-card span { color: var(--muted); font-size: 12px; }
+.metric-card strong { color: var(--ink); font-size: 17px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.staff-case-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.staff-case-header h2 { min-width: 0; margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.staff-case-state { flex: 0 0 auto; padding: 4px 8px; border-radius: 6px; color: #85520c; background: #fff4de; font-size: 12px; font-weight: 750; }
+.staff-case-summary { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.staff-case-summary .fact dd { font-size: 13px; }
+.staff-case-context summary { overflow-wrap: anywhere; }
+.staff-case-form { display: grid; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.staff-case-form .card-actions { margin-top: 0; }
 .app-page .shell > .account-bar { margin-bottom: 24px; box-shadow: none; }
 .app-layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 24px; align-items: start; }
 .operations-column, .conversation-column { min-width: 0; }
@@ -162,7 +192,8 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; color: var(--muted
 .conversation-column > .messages { flex: 1 1 auto; min-height: 0; padding: 24px; overflow-y: auto; overscroll-behavior: contain; scroll-padding: 24px; }
 .conversation-column .bubble { flex: 0 0 auto; width: fit-content; max-width: 100%; box-shadow: none; }
 .conversation-column .bubble:not(.user) { background: var(--surface); }
-.conversation-column .bubble.confirmation, .conversation-column .bubble.plan_confirmation { width: 100%; border-color: #e7d5b2; background: #fffdf8; }
+.conversation-column .bubble.confirmation, .conversation-column .bubble.plan_confirmation, .conversation-column .bubble.mfa { width: 100%; border-color: #e7d5b2; background: #fffdf8; }
+.conversation-column .bubble.confirmation h3, .conversation-column .bubble.plan_confirmation h3, .conversation-column .bubble.mfa h3 { color: #85520c; }
 .conversation-column .bubble.error, .conversation-column .bubble.risk { background: #fff8f8; border-color: #efcaca; }
 .conversation-column .bubble.user { max-width: 88%; }
 .conversation-column > .composer { flex: 0 0 auto; margin: 0 20px; border: 1px solid var(--line); box-shadow: none; }
@@ -233,6 +264,8 @@ pre { max-width: 100%; overflow: auto; white-space: pre-wrap; color: var(--muted
   .facts-grid, .review-credentials { grid-template-columns: minmax(0, 1fr); }
   .review-signals { grid-template-columns: minmax(0, 1fr); }
   .review-line span, .review-product span { max-width: none; text-align: left; }
+  .staff-case-summary { grid-template-columns: minmax(0, 1fr); }
+  .plan-controls { align-items: stretch; flex-direction: column; }
   .tool-page .composer { flex-wrap: wrap; }
   .tool-page .composer button { width: 100%; }
   .tool-page .composer label { flex-wrap: wrap; }
